@@ -754,6 +754,76 @@ static void t_clock(void)
     CHECK_EQ(WX_SYNC_BIAS_MS, 700u);
 }
 
+/* H-6b: 同期済みの時計に対し、first_ms の 100 秒後(基準の瞬間 f2 - 700)に Date: = 今の時計 - d 秒 が来る。採用されたかは wx_clock_now(f2 - 700) で見る */
+static uint32_t back_case(uint32_t jst, uint32_t f1, uint32_t d)
+{
+    wx_clock_t k;
+    uint32_t   f2 = f1 + 100000u;                               /* uint32 の足し算(巻き戻ってよい) */
+    uint32_t   s = 0u;
+
+    wx_clock_init(&k);
+    wx_clock_sync(&k, jst, f1);
+    wx_clock_sync(&k, jst + 100u - d, f2);                      /* 時計は同じ瞬間に jst + 100 */
+    CHECK(wx_clock_now(&k, f2 - WX_SYNC_BIAS_MS, &s));
+    return s - jst;
+}
+
+static void t_clock_back(void)
+{
+    uint32_t jst = 1795580653u + 32400u;                        /* 2026-11-25 13:24:13 JST */
+    wx_clock_t k;
+    uint32_t   s = 0u;
+    wx_date_t  d;
+
+    TEST("H-6b 時計の同期: 未同期は採用・進む側は採用・遅れ 1〜30 秒は採用しない(戻らない)・31 秒以上は採用・32bit の巻き戻り・日付の変わり目");
+    CHECK_EQ(WX_CLOCK_BACK_MAX_S, 30u);
+    wx_clock_init(&k);
+    wx_clock_sync(&k, jst, 100000u);                            /* 初回 */
+    CHECK(wx_clock_now(&k, 100000u, &s)); CHECK_EQ(s, jst);
+    CHECK_EQ(back_case(jst, 100000u, 0u), 100u);                /* 同じ */
+    CHECK_EQ(back_case(jst, 100000u, 1u), 100u);                /* 1 秒の遅れ: 採用しない */
+    CHECK_EQ(back_case(jst, 100000u, 7u), 100u);
+    CHECK_EQ(back_case(jst, 100000u, 29u), 100u);
+    CHECK_EQ(back_case(jst, 100000u, 30u), 100u);               /* ちょうど 30 秒: 採用しない */
+    CHECK_EQ(back_case(jst, 100000u, 31u), 69u);                /* 31 秒: 採用 */
+    CHECK_EQ(back_case(jst, 100000u, 100u), 0u);                /* 大きな遅れ: 採用 */
+    CHECK_EQ(back_case(jst, 100000u, 99999u), 100u - 99999u);   /* 遅れが基準より大きい(基準より前の日時): 採用(uint32 の差) */
+    /* 進み */
+    {
+        wx_clock_t k2;
+        wx_clock_init(&k2);
+        wx_clock_sync(&k2, jst, 100000u);
+        wx_clock_sync(&k2, jst + 105u, 200000u);                /* 時計は jst + 100 → 5 秒進み */
+        CHECK(wx_clock_now(&k2, 200000u - WX_SYNC_BIAS_MS, &s)); CHECK_EQ(s, jst + 105u);
+        wx_clock_sync(&k2, jst + 5000u, 300000u);
+        CHECK(wx_clock_now(&k2, 300000u - WX_SYNC_BIAS_MS, &s)); CHECK_EQ(s, jst + 5000u);
+    }
+    /* 32bit の巻き戻り(first_ms が 0xFFFFFFFF をまたぐ) */
+    CHECK_EQ(back_case(jst, 0xFFFFFF00u, 10u), 100u);           /* 棄却 */
+    CHECK_EQ(back_case(jst, 0xFFFFFF00u, 30u), 100u);
+    CHECK_EQ(back_case(jst, 0xFFFFFF00u, 31u), 69u);            /* 採用 */
+    CHECK_EQ(back_case(jst, 0xFFFFFFFFu - 99999u, 10u), 100u);  /* 2 回目の基準がちょうど巻き戻る位置 */
+    /* 棄却したあとも、元の時計がそのまま進む */
+    wx_clock_init(&k);
+    wx_clock_sync(&k, jst, 100000u);
+    wx_clock_sync(&k, jst + 8u, 200000u);                       /* 時計は jst + 100 のところへ jst + 8(92 秒遅れ)→ 採用 */
+    wx_clock_sync(&k, jst + 8u + 99u, 300000u);                 /* 時計は jst + 8 + 100 → 1 秒遅れ: 棄却 */
+    CHECK(wx_clock_now(&k, 300000u - WX_SYNC_BIAS_MS, &s)); CHECK_EQ(s, jst + 108u);
+    CHECK(wx_clock_now(&k, 300000u - WX_SYNC_BIAS_MS + 10000u, &s)); CHECK_EQ(s, jst + 118u);
+    /* 日付の変わり目: 2026-12-31 23:59:50 に合わせ、15 秒後 = 2027-01-01 00:00:05 */
+    {
+        uint32_t m = 1798729200u - 10u + 32400u;                /* 23:59:50 */
+        wx_clock_init(&k);
+        wx_clock_sync(&k, m, 5000u);
+        wx_clock_sync(&k, m + 15u, 5000u + 15000u);             /* 進み: 採用 */
+        CHECK(wx_clock_now(&k, 20000u - WX_SYNC_BIAS_MS, &s)); wx_date_fields(s, &d);
+        CHECK_EQ(d.year, 2027); CHECK_EQ(d.month, 1); CHECK_EQ(d.day, 1); CHECK_EQ(d.hour, 0); CHECK_EQ(d.min, 0); CHECK_EQ(d.sec, 5);
+        wx_clock_sync(&k, m + 8u, 20000u);                      /* 00:00:05 の時計に、日をまたいだ前の 23:59:58(7 秒遅れ)→ 棄却 */
+        CHECK(wx_clock_now(&k, 20000u - WX_SYNC_BIAS_MS, &s)); wx_date_fields(s, &d);
+        CHECK_EQ(d.year, 2027); CHECK_EQ(d.day, 1); CHECK_EQ(d.hour, 0); CHECK_EQ(d.sec, 5);
+    }
+}
+
 int main(void)
 {
     t_request();
@@ -761,5 +831,6 @@ int main(void)
     t_sched();
     t_date();
     t_clock();
+    t_clock_back();
     TEST_REPORT("test_wx_core");
 }

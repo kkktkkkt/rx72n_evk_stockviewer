@@ -14,6 +14,10 @@
 #include "app_logfmt.h"      /* APPLOG_LINE_MAX だけ使う */
 #include "test_framework.h"
 
+#if APP_STK_BADAP   /* -DAPP_STK_BADAP=n の試験は t_badap だけ(main)。ほかの試験は使わない */
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
+
 #define SSID_MARK   "SSID_SENT_9a1"
 #define PASS_MARK   "PW_SENTINEL_9f3"
 #define NEIGH_MARK  "NEIGHBOR_SENTINEL"      /* 他の AP の名前(ログ・構造体に出てはいけない目印) */
@@ -2494,7 +2498,7 @@ static void t_wx_classify(void)
 
 static void t_wx_quiet(void)
 {
-    TEST("H-X5-14 製品(wifi_core_set_quiet): res=start・res=ok と key=oth の行を出さない(失敗・skip・result・[wifiv] key=ip は出す)。既定(専用モード)は今までどおり出す");
+    TEST("H-X5-14 製品(wifi_core_set_quiet): res=start・res=ok・[wifiv](key=ip など)の行を 1 行も出さない(失敗・skip・result は出す)。既定(専用モード)は今までどおり出す");
     begin(SSID_MARK, PASS_MARK);
     wifi_core_set_quiet(&g_c, true);
     normal_rules();
@@ -2502,7 +2506,8 @@ static void t_wx_quiet(void)
     CHECK(last_is("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"));
     CHECK_EQ(count_with("res=start"), 0);
     CHECK_EQ(count_with("res=ok"), 0);
-    CHECK(first_with("[wifiv] key=ip val=192.168.1.23\r\n") >= 0);
+    CHECK_EQ(count_with("[wifiv] "), 0);                             /* IP アドレスなどを UART に出さない(design.md §7.5・§7.8) */
+    CHECK_EQ(count_with("192.168.1.23"), 0);
     CHECK_EQ(count_with("key=oth"), 0);
     CHECK_EQ(log_has_secret(), 0);
     g_nsend = 0; g_npend = 0;
@@ -2543,6 +2548,10 @@ static void t_wx_quiet(void)
     run(WIFI_RANGE_WX, 30000u);
     CHECK_EQ(count_with("res=start"), 5); CHECK_EQ(count_with("res=ok"), 5);
     CHECK(first_with("[wifiv] key=oth val=") >= 0);
+    begin(SSID_MARK, PASS_MARK);                                     /* 非 quiet では接続の key=ip も出る */
+    normal_rules();
+    run(WIFI_RANGE_CONNECT, 60000u);
+    CHECK(first_with("[wifiv] key=ip val=") >= 0);
 }
 
 /* ================================================================ 銘柄・3 銘柄の連続(製品の使い方: 銘柄を選んで WIFI_RANGE_WX を 1 回ずつ。design.md §5.7・§5.9) */
@@ -2675,8 +2684,54 @@ static void t_wx_symbol(void)
     CHECK(first_with("step=wx_tcp res=timeout try=1 ms=20000 code=1") >= 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 1);
 }
 
+#if APP_STK_BADAP
+/* APP_STK_BADAP = n: 最初の n 回の接続(join に入る回数。join のやり直しは数えない)だけダミーの SSID / パスワードで AT+CWJAP する。n + 1 回目から本物 */
+static int cwjap_count(const char *ssid)
+{
+    int i, n = 0;
+
+    for (i = 0; i < g_nsend; i++) {
+        if ((strncmp(g_sent[i], "AT+CWJAP=", 9) == 0) && (strstr(g_sent[i], ssid) != NULL)) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void t_badap(void)
+{
+    int k;
+
+    TEST("APP_STK_BADAP: 最初の n 回の接続だけダミー(join のやり直しは 1 回と数える)・n + 1 回目から本物・ダミーも本物もログに出ない");
+    printf("  APP_STK_BADAP = %d\n", (int)APP_STK_BADAP);
+    begin(SSID_MARK, PASS_MARK);
+    rule("AT+CWJAP=*", 1, 500, "+CWJAP:4\r\n\r\nFAIL\r\n");          /* 最初の join は失敗 → 同じ接続の中でやり直す(ダミーのまま) */
+    normal_rules();
+    for (k = 1; k <= (APP_STK_BADAP) + 2; k++) {
+        g_nsend = 0; g_npend = 0; g_en_n = 0;                    /* g_en_* は 16 件まで */
+        run(WIFI_RANGE_CONNECT, 60000u);
+        if (k <= (APP_STK_BADAP)) {
+            CHECK_EQ(cwjap_count(APP_STK_BADAP_SSID), (k == 1) ? 2 : 1);
+            CHECK_EQ(cwjap_count(APP_STK_BADAP_PASS), (k == 1) ? 2 : 1);
+            CHECK_EQ(cwjap_count(SSID_MARK), 0);
+        } else {
+            CHECK_EQ(cwjap_count(APP_STK_BADAP_SSID), 0);
+            CHECK_EQ(cwjap_count(SSID_MARK), 1);
+            CHECK_EQ(cwjap_count(PASS_MARK), 1);
+        }
+    }
+    CHECK(strstr(g_all, APP_STK_BADAP_SSID) == NULL);
+    CHECK(strstr(g_all, APP_STK_BADAP_PASS) == NULL);
+    CHECK_EQ(log_has_secret(), 0);
+}
+#endif
+
 int main(void)
 {
+#if APP_STK_BADAP
+    t_badap();
+    TEST_REPORT("test_wifi_core(badap)");
+#else
     t_lines();
     t_classify();
     t_values();
@@ -2710,4 +2765,5 @@ int main(void)
     t_wx_symbol();
     t_secret();                          /* 最後: g_all(全ログ)を調べる */
     TEST_REPORT("test_wifi_core");
+#endif
 }

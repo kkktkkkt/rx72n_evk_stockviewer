@@ -224,3 +224,21 @@ Phase 4 で全部実施(旧 UI のファイルの削除、`ui_wx_t` と `wx_ui` 
 ## 未実装(Phase 1 以降)
 
 Phase 5(実機の試験)だけ。
+
+## Phase 5 の所見による修正(2026-11-27)
+
+| ファイル | 内容 |
+|---|---|
+| `src/app/wifi_core.c` | `emit_val` が `quiet` のとき何も出さない。製品(`wifi_core_set_quiet(true)`)は `[wifiv]` を 1 行も出さない(`key=ip` の IP アドレスなど。設計 §7.5・§7.8)。専用モード(`APP_WIFI_TEST`。quiet にしない)は従来どおり出す |
+| `src/app/wx_core.h/.c` | `WX_CLOCK_BACK_MAX_S`(30)を追加。`wx_clock_sync` は、同期済みで、新しい `Date:` が**同じ瞬間の今の時計**(`first_ms - WX_SYNC_BIAS_MS` での時刻)より 1〜30 秒遅いとき採用しない(設計 §5.9、F6-3)。ちょうど 30 秒は棄却、31 秒は採用。未同期・進み・同じ値は採用。差は uint32 で比べるので 32bit の巻き戻りでも正しい |
+| `tests/host/test_wx_core.c` | `t_clock_back`(H-6b。境界 0・1・29・30・31・100 秒、進み、初回、32bit の巻き戻り、棄却後も時計が進む、日付の変わり目) |
+| `tests/host/test_wifi_core.c` `test_wifi_at.c` | quiet では `[wifiv]` が出ない・非 quiet では出る(H-X5-14)。P2 は `[wifiv]` 0 行。P4 の偽サーバーは、`a` のあとの `Date:` を実時間どおり進める(以前は固定で、新しい規則だと 30 秒以内の遅れとして棄却されるため。本物の Yahoo の挙動に近づけた) |
+
+H-6⑥(更新要求の返値)の試験の期待値は、設計どおり(取得中・やり直し待ち = `busy`、周期の開始から 5 秒未満・429 待ち = `ignored`)で既に合っていたため、変更していない。
+
+### `APP_STK_BADAP`(実機でオフライン表示と再接続を試す。試験専用)
+
+- 切り替え: `src/app/wifi_sw.h` の `#define APP_STK_BADAP (0)` の 0 を n(1〜9)にするか、`-DAPP_STK_BADAP=n`。範囲外は `#error`。コミットする値は 0。0 のときは `wifi_core.c` のコードも文字列も消える(ホスト試験 S22 が `wifi_core.o` にダミーの文字列が無いことを確認)。`wifi_core_t` に 2 バイト(`badap_n`、`badap_on`)が増える(常に存在。RAM のみ)。
+- 動作: **最初の n 回の接続だけ**、`wifi_sw.h` に固定のダミー(`APP_STK_BADAP_SSID` / `APP_STK_BADAP_PASS`。存在しない AP と誤ったパスワード)で `AT+CWJAP` する。n + 1 回目から本物の `WIFI_SSID` / `WIFI_PASS`。ダミーも本物もログに出ない。
+- **1 回の数え方**: `wifi_core` が `join` の step に入るたびに 1 回(= `WIFI_RANGE_CONNECT` の実行 1 回 = `wx_sched` の再接続 1 周期)。同じ実行の中での `join` のやり直し(タイムアウト・接続失敗の `try=2`)は数えず、ダミーのまま。範囲 `ALL` など `join` を含む実行も 1 回。
+- 実機での使い方(`APP_STK_BADAP = 2` の例): ビルドして書き込み、UART(COM7)を見る。期待するログ: 起動 3 秒後に `[wifi] step=join res=fail try=1 ms=… code=…`(接続失敗は `code=4` かタイムアウト `1`、パスワード違いは `2`)→ やり直しでも失敗 → `[wifi] result=fail stage=join` → `[stk] res=fail sym=0 src=boot err=8` → `[stk] net=err`(LCD はオフライン表示)。約 60 秒後に 2 回目の接続(ダミー。同じ失敗)→ さらに約 120 秒後の 3 回目から本物で接続 → `[stk] net=on` と `[stk] res=ok`(3 銘柄)。再接続の間隔は設計 §5.7 の 60 / 120 / 300 秒(更新要求 `x` / `t` で待ちを飛ばして直ちに再接続もできる。その場合も 1 回に数える)。**実機では未実行**。

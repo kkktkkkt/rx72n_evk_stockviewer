@@ -36,6 +36,17 @@
 #error "APP_STK_FAULT must be 0..3"
 #endif
 
+/* n(1〜9)= 最初の n 回の接続(WIFI_RANGE_CONNECT の join。再接続の 1 周期 = 1 回。join のやり直しは数えない)だけ、下のダミーの SSID・パスワードで
+ * AT+CWJAP する(必ず失敗する)。n + 1 回目からは本物。オフライン表示と再接続を実機で試す用(使い方: docs/implementation-notes.md)。0 = 使わない(コードも消える)。製品は 0 */
+#ifndef APP_STK_BADAP
+#define APP_STK_BADAP        (0)
+#endif
+#if ((APP_STK_BADAP) < 0) || ((APP_STK_BADAP) > 9)
+#error "APP_STK_BADAP must be 0..9"
+#endif
+#define APP_STK_BADAP_SSID   "stk-badap-no-such-ap"
+#define APP_STK_BADAP_PASS   "stk-badap-no-such-pw"
+
 /* 1 = 起動 2 秒後に UART コマンド d と同じ(全部)を 1 回だけ実行する(APP_WIFI_TEST = 1 の試験用) */
 #ifndef APP_WIFI_AUTOSTART
 #define APP_WIFI_AUTOSTART   (0)

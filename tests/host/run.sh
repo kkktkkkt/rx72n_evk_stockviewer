@@ -320,6 +320,21 @@ if sel S22; then
   [ -x "$BUILD/test_wifi_core" ] && { timeout 300 "$BUILD/test_wifi_core" || rc=1; }
   cc_nowarn $STD $WARN -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core_wx" || rc=1     # 製品(接続先は Yahoo の SSL だけ。z の step は範囲に入らない)
   [ -x "$BUILD/test_wifi_core_wx" ] && { timeout 300 "$BUILD/test_wifi_core_wx" || rc=1; }
+  echo "  APP_STK_BADAP(0〜9。範囲外は #error)。0 = コードが消える(ダミーの文字列が wifi_core.o に無い)。2 = 最初の 2 回だけダミーで接続(test_wifi_core.c の t_badap)。変異: 判定を 1 つずらすと失敗"
+  if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c -DAPP_STK_BADAP=10 -I"$APP" - >/dev/null 2>&1; then echo "  NG: APP_STK_BADAP = 10 で #error が出ない"; rc=1; else echo "  ok (APP_STK_BADAP = 10 は #error)"; fi
+  if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c -DAPP_STK_BADAP=-1 -I"$APP" - >/dev/null 2>&1; then echo "  NG: APP_STK_BADAP = -1 で #error が出ない"; rc=1; else echo "  ok (APP_STK_BADAP = -1 は #error)"; fi
+  if strings "$BUILD/wifi_core_wx.o" | grep -q "stk-badap"; then echo "  NG: APP_STK_BADAP = 0 の wifi_core.o にダミーの文字列が残っている"; rc=1; else echo "  ok (APP_STK_BADAP = 0 ではダミーの文字列なし)"; fi
+  for n in 1 2 9; do
+    cc_nowarn $STD $WARN -DAPP_WX=1 -DAPP_STK_BADAP=$n -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core_badap$n" || rc=1
+    [ -x "$BUILD/test_wifi_core_badap$n" ] && { timeout 300 "$BUILD/test_wifi_core_badap$n" | tail -3 | grep -E "FAIL|APP_STK_BADAP|checks"; [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1; }
+  done
+  mkdir -p "$BUILD/mut_badap"
+  sed 's/c->badap_n <= (uint8_t)APP_STK_BADAP/c->badap_n < (uint8_t)APP_STK_BADAP/' "$APP/wifi_core.c" > "$BUILD/mut_badap/wifi_core.c"
+  if cmp -s "$APP/wifi_core.c" "$BUILD/mut_badap/wifi_core.c"; then echo "  NG: 変異を入れられなかった(APP_STK_BADAP)"; rc=1
+  else
+    cc_nowarn $STD -Wall -Wextra -DAPP_WX=1 -DAPP_STK_BADAP=2 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$BUILD/mut_badap/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core_badap_mut" || rc=1
+    if [ -x "$BUILD/test_wifi_core_badap_mut" ] && "$BUILD/test_wifi_core_badap_mut" >/dev/null 2>&1; then echo "  NG: 変異 [ダミーの回数を 1 つ少なく] で試験が失敗しない"; rc=1; else echo "  ok: 変異 [ダミーの回数を 1 つ少なく] で試験が失敗した"; fi
+  fi
   echo "  H-W8: wifi_secret.h を include するのは wifi_at.c だけ(ファイル名だけ出す。中身は読まない)"
   inc="$(grep -rlE '^\s*#\s*include\s*[<"]wifi_secret\.h[>"]' "$ROOT/src" --include='*.c' --include='*.h' --exclude=wifi_secret.h --exclude-dir=smc_gen 2>/dev/null | sed 's#.*/##' | sort -u)"
   echo "  include している: ${inc:-(なし)}"

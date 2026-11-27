@@ -605,3 +605,47 @@ cd D:\workspace\rx72n\rx72n_gcc
 
 ### 注意
 - 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。`wifi_sw.h` は未変更。ランナーは起動したまま。
+
+## 追記: 2026-11-27 19:36〜19:39 (JST) 3 構成のビルド(A 製品 / B `APP_STK_FAULT`=2 / C `APP_STK_BADAP`=2)とA の再ビルド(ビルド担当)
+
+前提: e2studio / e2studioc / make / rfp-cli / e2-server-gdb / rx-elf-gdb のプロセス無し。`jobs/runner.alive` 19:36:27(新しい)。`jobs/inbox` 空。`wifi_secret.h` は開いていない・内容を出していない。書込み・実機操作・COM・gdb・rfp-cli は**未実施**。
+
+| 時刻(JST) | コマンド(`tools/submit-job.sh`) | 結果 | 備考 |
+|---|---|---|---|
+| 19:36:38〜19:37:04 | A: `build '{"mode":"Headless"}' 400`(ジョブ `193638-build`、exit 0、24 秒) | 成功(0 errors, 0 warnings) | 増分。11 ファイル再コンパイル。確認用に clean へ |
+| 19:37:21〜19:37:38 | A: `build '{"mode":"Headless","clean":true}' 400`(exit 0、26 秒) | **成功**(0 errors, **2 warnings**) | 警告は既知の smc_gen 2 件(下) |
+| 19:38:04〜19:38:18 | B: `wifi_sw.h` の `APP_STK_FAULT` (0) → (2) の 1 行だけ → clean ヘッドレス(exit 0、26 秒)→ (0) に戻す(戻したことを grep で確認) | 成功(0 errors, 2 warnings) | `git diff` の値は (0) に戻っている |
+| 19:38:42〜19:38:57 | C: `wifi_sw.h` の `APP_STK_BADAP` (0) → (2) の 1 行だけ → clean ヘッドレス(exit 0、26 秒)→ (0) に戻す(同上) | 成功(0 errors, 2 warnings) | 同上 |
+| 19:39:16〜19:39:31 | A: clean ヘッドレス(再ビルド。exit 0、26 秒)。`HardwareDebug` を製品版に戻す | 成功(0 errors, 2 warnings) | 最終の `HardwareDebug` は製品版 |
+
+### 成果物(`jobs\artifacts\`。git 管理外。Wi-Fi の設定が入りうるので外へ出さない)
+| 構成 | ファイル | ELF(バイト) | MOT(バイト) | text / data / bss | ROM(text+data) | 前回の製品(18:19)との差 |
+|---|---|---|---|---|---|---|
+| A 製品 | `A-product.mot` `A-product.elf` `A-product.map` | 1,759,804 | 1,499,442 | 496,884 / 2,876 / 22,592 | 499,760 | text +40、data 0、bss 0 |
+| B 障害模擬(`APP_STK_FAULT`=2) | `B-fault2.mot` `B-fault2.elf` `B-fault2.map` | 1,759,936 | 1,499,514 | 496,904 / 2,876 / 22,592 | 499,780 | A との差: text +20、MOT +72 |
+| C 接続失敗模擬(`APP_STK_BADAP`=2) | `C-badap2.mot` `C-badap2.elf` `C-badap2.map` | 1,759,980 | 1,499,810 | 497,004 / 2,876 / 22,592 | 499,880 | A との差: text +120、MOT +368 |
+| ビルドログ(jobs/outbox/) | A 増分 `193638-build.log`、A clean `193711-build.log`、B `193753-build.log`、C `193832-build.log`、A 再ビルド `193905-build.log`。jobs/artifacts/ の `B-build.log` `C-build.log` `A2-build.log` は同じ内容の写し | | | | | |
+
+- 前回の製品(18:19)との差の内訳(推定): `wifi_core.c` と `wx_core.c` が 19:33 に変更された(この作業ツリーの変更。内容は未確認)。その分の text +40 と見る。data・bss は変化なし。
+
+### 構成の証拠
+- **B**: `wx_core.o` の `.text` が 0x68 → 0x78(+16 バイト)、`wx_build_request` の配置が 0xffc0c530 → 0xffc0c540 に変わった(`A-product.map` と `B-fault2.map` の比較)。`wx_build_request` の中に `"ZZ"` を入れる分岐が増えた。RX の ELF で `"ZZ"` の出現は A 2 件 / B 3 件(`grep -a`)。
+- **C**: `"stk-badap-no-such-ap"`(ダミーの SSID)の文字列が C の ELF に 1 件(A と B は 0 件)。`_wifi_` `_wx_` の関数シンボル数は A・B・C とも 26 / 37 で同じ(`rx-elf-nm`)。
+- **A**: `"stk-badap-no-such-ap"` 0 件。`APP_STK_*` の効果は見えない(既定 0)。
+
+### 再ビルドの確認(手順 5)
+- `git diff -- src/app/wifi_sw.h` は **0 行になっていない**(22 行)。理由: `APP_STK_BADAP` のブロック(11 行の追加、`#ifndef` から `#endif` と `APP_STK_BADAP_SSID` `APP_STK_BADAP_PASS`)が未コミットで作業ツリーに入っているため(コーディング担当の変更)。3 つのスイッチの**値**は HEAD と同じ(`APP_STK_PREVIEW` `APP_WIFI_TEST` `APP_WIFI_AUTOSTART` `APP_STK_FAULT` `APP_STK_BADAP` は (0)、`APP_WX` の既定は (1))。B・C の作業で書き換えた行は、どちらも (0) に戻した。
+- 最終の A(19:39)の `.mot` は `jobs\artifacts\A-product.mot`(19:37)と**同じではない**: サイズは同じ(1,499,442)で、違うのは 5 バイトだけ。`app_main.c:277` の `applog_fmt_boot(... __DATE__ " " __TIME__ ...)` の時刻文字列(`19:37:34` と `19:39:29`)。ロジック・サイズの差は無い。SHA-256 は `A-product.mot` = 36a29754…(19:37)、最終 `HardwareDebug\rx72n_stockview.mot` = a1123897…(19:39)。`A-product.*` は 19:37 の製品版のまま残した。
+
+### 警告・エラー
+- A・B・C・A2 とも **0 errors**。
+- 警告は毎回 2 件のみで、どちらも既知の smc_gen の `-Wstack-usage=100` 非対応(`src/smc_gen/r_bsp/mcu/all/r_bsp_common.c:105` `delay_wait`、`src/smc_gen/r_bsp/mcu/all/r_rx_intrinsic_functions.c:347` `R_BSP_ChangeToUserMode`)。`src/app/` の警告は 0 件(`-Wstack-usage` を含む)。
+- ログ末尾の llvm manifest メッセージは従来どおり(影響なし)。
+
+### 秘密情報
+- 構成 A(APP_WX = 1)の ELF・MOT・MAP には、`wifi_secret.h` の Wi-Fi の SSID・パスワードが入りうる(設計 §21.5)。値は確認していない(`wifi_secret.h` は開いていない)。`jobs\artifacts\` の外へ出さないこと。B・C も同じ。
+- 構成 C の ELF にはダミーの SSID・パスワード(`APP_STK_BADAP_*`)が入る。
+
+### 注意
+- `HardwareDebug\` の中身は製品版(A、19:39)。書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。
+- `.settings/*.properties` のタイムスタンプ行をビルドが書き換えた可能性がある(内容の変化は未確認)。

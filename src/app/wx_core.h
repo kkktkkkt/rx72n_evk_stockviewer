@@ -16,6 +16,7 @@
 #define WX_UA            "rx72n-stockview/1"
 #define WX_NSYM          (STK_ROWS)  /* 銘柄の数 3(0 = 6723.T、1 = ^N225、2 = ^GSPC) */
 #define WX_SYM_ALL       (7u)        /* 3 銘柄のビットマスク */
+#define WX_CLOCK_BACK_MAX_S (30u)    /* 同期済みの時計より 30 秒以内の遅れの Date: は採用しない(CDN のキャッシュ応答。design.md §5.9) */
 #define WX_SYNC_BIAS_MS  (700u)      /* 最初のデータを受けた ms から引いて Date: の秒の頭とする。実機で PC と比べて調整する 1 定数 */
 #define WX_INTERVAL_MS   (600000u)   /* 定期取得(前回の周期の開始から) */
 #define WX_MIN_GAP_MS    (5000u)     /* 更新要求を受け付ける最小の間隔(周期の開始から) */
@@ -99,7 +100,7 @@ void wx_date_fields(uint32_t secs, wx_date_t *out);            /* 通算秒 → 
 
 typedef struct { uint32_t base_s; uint32_t base_ms; uint8_t synced; } wx_clock_t;
 void wx_clock_init(wx_clock_t *k);
-void wx_clock_sync(wx_clock_t *k, uint32_t jst_s, uint32_t first_ms);   /* base_ms = first_ms - WX_SYNC_BIAS_MS */
+void wx_clock_sync(wx_clock_t *k, uint32_t jst_s, uint32_t first_ms);   /* base_ms = first_ms - WX_SYNC_BIAS_MS。同期済みで 1〜WX_CLOCK_BACK_MAX_S 秒の遅れは採用しない */
 bool wx_clock_now(const wx_clock_t *k, uint32_t now_ms, uint32_t *jst_s);   /* 未同期なら false。now_ms は 32bit で巻き戻ってよい(差で使う。再同期の間隔 49 日未満) */
 uint16_t wx_clock_min(const wx_clock_t *k, uint32_t now_ms);   /* 時 * 60 + 分。未同期は 0xFFFF */
 

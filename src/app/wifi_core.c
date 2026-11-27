@@ -658,6 +658,9 @@ static void emit_step(wifi_core_t *c, wifi_res_t res, uint32_t ms, uint32_t code
 
 static void emit_val(wifi_core_t *c, wifi_key_t key, const char *val)
 {
+    if (c->quiet != 0u) {
+        return;                                                 /* 製品: [wifiv] を 1 行も出さない(IP アドレスなどを UART に出さない。design.md §7.5・§7.8) */
+    }
     log_out(c, wifi_fmt_val(c->out, sizeof c->out, key, val));
 }
 
@@ -802,6 +805,14 @@ static void next_step(wifi_core_t *c, uint32_t now)
         finish(c, true, WIFI_STEP_NONE);
         return;
     }
+#if APP_STK_BADAP
+    if (c->step == (uint8_t)WIFI_STEP_JOIN) {                   /* 接続 1 回 = join に入る 1 回(やり直しは数えない) */
+        if (c->badap_n < 255u) {
+            c->badap_n++;
+        }
+        c->badap_on = (c->badap_n <= (uint8_t)APP_STK_BADAP) ? 1u : 0u;
+    }
+#endif
     begin_try(c, now);
 }
 
@@ -929,7 +940,14 @@ static void begin_try(wifi_core_t *c, uint32_t now)
         return;
     }
     if (c->step == (uint8_t)WIFI_STEP_JOIN) {
-        n = wifi_build_cwjap(c->cmd, WIFI_CMD_MAX - 2u, c->ssid, c->pass);
+#if APP_STK_BADAP
+        if (c->badap_on != 0u) {
+            n = wifi_build_cwjap(c->cmd, WIFI_CMD_MAX - 2u, APP_STK_BADAP_SSID, APP_STK_BADAP_PASS);   /* 必ず失敗する(オフライン表示の試験) */
+        } else
+#endif
+        {
+            n = wifi_build_cwjap(c->cmd, WIFI_CMD_MAX - 2u, c->ssid, c->pass);
+        }
         if (n == 0u) {
             end_fail(c, now, WIFI_RES_FAIL, 100u);      /* 組み立てられない(長すぎる等)。送らない */
             return;

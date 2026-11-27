@@ -634,8 +634,17 @@ void wx_clock_init(wx_clock_t *k)
 
 void wx_clock_sync(wx_clock_t *k, uint32_t jst_s, uint32_t first_ms)
 {
+    uint32_t base_ms = first_ms - WX_SYNC_BIAS_MS;                 /* uint32 の引き算(巻き戻っても差は正しい) */
+    uint32_t cur_s;
+
+    if (k->synced != 0u) {
+        cur_s = k->base_s + ((uint32_t)(base_ms - k->base_ms) / 1000u);   /* 同じ瞬間の今の時計 */
+        if ((jst_s < cur_s) && ((cur_s - jst_s) <= WX_CLOCK_BACK_MAX_S)) {
+            return;                                    /* 小さな遅れは CDN のキャッシュ応答。時計を戻さない(§5.9) */
+        }
+    }
     k->base_s  = jst_s;
-    k->base_ms = first_ms - WX_SYNC_BIAS_MS;       /* uint32 の引き算(巻き戻っても差は正しい) */
+    k->base_ms = base_ms;
     k->synced  = 1u;
 }
 

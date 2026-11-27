@@ -146,6 +146,7 @@ static bool     g_tcp_fail;        /* AT+CIPSTART に ERROR を返す */
 static bool     g_tcp_nodata;      /* 要求を受けても +IPD を返さず CLOSED だけ */
 static bool     g_join_fail;       /* AT+CWJAP に FAIL を返す */
 static unsigned g_http_min = 24u, g_http_sec = 13u;   /* 応答の Date: の UTC の分・秒(04:mm:ss) */
+static uint32_t g_http_a_tick = 0u;                    /* 0 以外 = a の時の tick。その後の Date: は実時間どおり進む(本物の Yahoo と同じ。時計が小さな遅れを採用しない規則 §5.9 と両立させる) */
 static uint32_t g_cipstart_tick[32];
 static unsigned g_n_cipstart;
 static bool     g_conn_tcp;        /* 直近の AT+CIPSTART が "TCP"(平文 80。Yahoo は 301 を返す) */
@@ -186,14 +187,20 @@ static void esp_http(void)
     unsigned    d = C.resp_delay_iters + (10u * g_ipt);
     size_t      n, k, m;
     int         sym = req_sym();
+    unsigned    http_min = g_http_min, http_sec = g_http_sec;
 
+    if (g_http_a_tick != 0u) {
+        unsigned t = (unsigned)((((uint32_t)s_tick - g_http_a_tick) / 100u) + (g_http_min * 60u) + g_http_sec);
+
+        http_min = t / 60u; http_sec = t % 60u;
+    }
     if (g_conn_tcp) {                                   /* 平文 80: Yahoo は HTTPS へ転送(301) */
-        n = (size_t)snprintf(http, sizeof(http), "HTTP/1.1 301 Moved Permanently\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>BODY_SENTINEL</html>", g_http_min % 100u, g_http_sec % 100u);
+        n = (size_t)snprintf(http, sizeof(http), "HTTP/1.1 301 Moved Permanently\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>BODY_SENTINEL</html>", http_min % 100u, http_sec % 100u);
     } else if (sym < 0) {                               /* Phase 0 の g(Google): chart のキーが無い 200 */
-        n = (size_t)snprintf(http, sizeof(http), "HTTP/1.0 200 OK\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nConnection: close\r\n\r\n{\"chart\":\"BODY_SENTINEL\"}", g_http_min % 100u, g_http_sec % 100u);
+        n = (size_t)snprintf(http, sizeof(http), "HTTP/1.0 200 OK\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nConnection: close\r\n\r\n{\"chart\":\"BODY_SENTINEL\"}", http_min % 100u, http_sec % 100u);
     } else if (sym == g_fail_sym) {                     /* この銘柄だけ失敗(404) */
         n = (size_t)snprintf(http, sizeof(http), "HTTP/1.0 404 Not Found\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
-                             "{\"chart\":{\"result\":null,\"error\":{\"code\":\"Not Found\",\"description\":\"BODY_SENTINEL\"}}}", g_http_min % 100u, g_http_sec % 100u);
+                             "{\"chart\":{\"result\":null,\"error\":{\"code\":\"Not Found\",\"description\":\"BODY_SENTINEL\"}}}", http_min % 100u, http_sec % 100u);
     } else {
         n = (size_t)snprintf(http, sizeof(http),
             "HTTP/1.0 200 OK\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nContent-Type: application/json;charset=utf-8\r\nX-Body: BODY_SENTINEL\r\nConnection: close\r\n\r\n"
@@ -207,7 +214,7 @@ static void esp_http(void)
             "\"dataGranularity\":\"1d\",\"range\":\"2d\",\"validRanges\":[\"1d\",\"5d\",\"1mo\",\"3mo\",\"6mo\",\"1y\",\"2y\",\"5y\",\"10y\",\"ytd\",\"max\"]},"
             "\"timestamp\":[1795479000,%lu],\"indicators\":{\"quote\":[{\"open\":[2380.0,2400.0],\"low\":[2370.0,2400.0],\"high\":[2440.0,2450.0],"
             "\"volume\":[5000000,1234567],\"close\":[%s,%s]}]}}],\"error\":null}}",
-            g_http_min % 100u, g_http_sec % 100u, K_CUR[sym], K_ENC[sym], K_MT[sym], K_PRICE[sym], K_PREV[sym], K_RS[sym], K_RS[sym], K_RE[sym], K_RE[sym], K_MT[sym], K_PREV[sym], K_PRICE[sym]);
+            http_min % 100u, http_sec % 100u, K_CUR[sym], K_ENC[sym], K_MT[sym], K_PRICE[sym], K_PREV[sym], K_RS[sym], K_RS[sym], K_RE[sym], K_RE[sym], K_MT[sym], K_PREV[sym], K_PRICE[sym]);
     }
     CHECK(n < sizeof(http));
     if (g_tcp_nodata) {
@@ -363,7 +370,7 @@ static void reset_all(void)
 #if APP_WIFI_TEST
     s_wx_last_ok = 0u;
 #endif
-    g_hook_tick = 0u; g_tick_seen = 0u; g_tick_lines = 0u; g_max_tick_lines = 0u; g_join_fail = false; g_http_min = 24u; g_http_sec = 13u; g_n_cipstart = 0u; memset(g_cipstart_tick, 0, sizeof g_cipstart_tick);
+    g_hook_tick = 0u; g_tick_seen = 0u; g_tick_lines = 0u; g_max_tick_lines = 0u; g_join_fail = false; g_http_min = 24u; g_http_sec = 13u; g_http_a_tick = 0u; g_n_cipstart = 0u; memset(g_cipstart_tick, 0, sizeof g_cipstart_tick);
     wx_clock_init(&s_clk);
 #if APP_WX_PRODUCT
     memset(&s_sched, 0, sizeof s_sched); s_act = 0u; s_act_t0 = 0u; s_done_seen = 0u; s_cycle_seen = 0u; s_last_net = 0u; s_last_busy = 0u; s_res_ok = 0u; s_res_http = 0u;
@@ -407,7 +414,7 @@ static void product_main(void)
             }
             else if (ch == 's') { wx_log_state(now * 10u); }
             else if (ch == 'z') { for (i = 0u; i < 3u; i++) { s_slot[i].ok_ms -= 1860000u; } }
-            else if (ch == 'a') { g_http_min = 40u; g_http_sec = 50u; }
+            else if (ch == 'a') { g_http_min = 40u; g_http_sec = 50u; g_http_a_tick = (now != 0u) ? now : 1u; }
             else if (ch == 'f') { g_tcp_fail = true; }
             else if (ch == 'j') { g_join_fail = true; }
             else if (ch == 'g') { g_join_fail = false; g_tcp_fail = false; }
@@ -840,7 +847,7 @@ int main(void)
     CHECK_EQ(count_prefix("[wifi] step="), 0);                                       /* 失敗がないので、step の行は 1 本も出ない */
     for (i = 0u; i < g_nlogs; i++) { CHECK(strstr(g_logs[i], " res=start") == NULL); CHECK(strstr(g_logs[i], "key=oth") == NULL); }
     CHECK_EQ(count_prefix("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"), 1 + 3);   /* 接続 1 回と、3 銘柄の取得 */
-    CHECK_EQ(count_prefix("[wifiv] key=ip val=192.168.1.23"), 1);
+    CHECK_EQ(count_prefix("[wifiv] "), 0);                                           /* 製品は [wifiv] を 1 行も出さない(IP アドレスを UART に出さない。design.md §7.5・§7.8) */
     CHECK(!tx_has("AT+GMR") && !tx_has("AT+CWLAP") && !tx_has("AT+PING") && !tx_has("AT+CIPDOMAIN") && !tx_has("CWLAPOPT"));   /* 製品の接続は gmr lapopt scan dns ping を省く */
     CHECK(tx_has("AT+CWQAP\r\n") && tx_has("AT+CWJAP=\"SSID_SENTINEL_7c1\",\"PW_SENTINEL_9f3\"\r\n") && tx_has("AT+CIFSR\r\n"));
     CHECK_EQ(tx_count("AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n"), 3);   /* 銘柄ごとに TCP/SSL を開く */
@@ -920,8 +927,8 @@ int main(void)
     CHECK_EQ(tx_count("AT+CWQAP\r\n"), 1);                                           /* 再接続はしない */
     {
         unsigned n40 = 0u;
-        for (i = 0u; i < g_nlogs; i++) { if ((strncmp(g_logs[i], "[stk] res=ok ", 13) == 0) && (strstr(g_logs[i], "jst=134050") != NULL)) { n40++; } }
-        CHECK_EQ(n40, 9u);                                                           /* 'a' の後の 3 周期(9 回)は Date: = 04:40:50 UTC → 13:40:50 JST */
+        for (i = 0u; i < g_nlogs; i++) { if ((strncmp(g_logs[i], "[stk] res=ok ", 13) == 0) && (strstr(g_logs[i], "jst=1340") != NULL || strstr(g_logs[i], "jst=1341") != NULL)) { n40++; } }
+        CHECK_EQ(n40, 9u);                                                           /* 'a' の後の 3 周期(9 回)の Date: は 04:40:50 UTC から実時間どおり進む → 13:40:50 JST 以降(13:40〜13:41 台) */
     }
     {
         int last = -1;
@@ -932,7 +939,7 @@ int main(void)
             unsigned hh = (unsigned)(p[5] - '0') * 10u + (unsigned)(p[6] - '0'), mm = (unsigned)(p[7] - '0') * 10u + (unsigned)(p[8] - '0');
             CHECK_EQ(hh, 13u); CHECK(mm == 40u || mm == 41u);
             CHECK(starts(g_logs[last], "[stk] net=on busy=0 have=7 stale=0 "));
-            CHECK(strstr(g_logs[last], " upd=1340\r\n") != NULL);
+            CHECK(strstr(g_logs[last], " upd=1340\r\n") != NULL || strstr(g_logs[last], " upd=1341\r\n") != NULL);
             CHECK(last + 3 < (int)g_nlogs);
             CHECK(starts(g_logs[last + 1], "[stk] sym=0 have=1 p100=243300 d100=5500 bp=231 dir=u mkt=t age="));
             CHECK(starts(g_logs[last + 2], "[stk] sym=1 have=1 p100=5795384 d100=45468 bp=79 dir=u mkt=t age="));

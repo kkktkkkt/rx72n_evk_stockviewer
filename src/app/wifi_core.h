@@ -184,6 +184,8 @@ typedef struct {
     uint8_t     sym;                              /* 取得する銘柄 0〜2(wifi_core_set_symbol。既定 0) */
     uint8_t     res_pass;
     uint8_t     res_stage;
+    uint8_t     badap_n;                          /* APP_STK_BADAP: join に入った回数(0 のビルドでは使わない) */
+    uint8_t     badap_on;                         /* APP_STK_BADAP: 今回の接続はダミーで join する */
     uint8_t     quiet;                            /* 1 = 製品: res=start・res=ok と key=oth の行を出さない(wifi_core_set_quiet) */
     wx_result_t wx;
     char        wx_buf[WX_BUF_SIZE];
