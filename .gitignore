@@ -1,0 +1,23 @@
+# ビルド出力(e2 studio / ヘッドレスビルドで再生成)
+/HardwareDebug/
+
+# ジョブランナーの実行時ファイル(ログ・ジョブ・ハートビート・キャッシュ)。ランナーが起動時に作り直す
+/jobs/
+
+# Smart Configurator が生成する FIT モジュールの PDF 資料(再生成で得られる。サイズが大きい)
+/src/smc_gen/**/doc/
+
+# OS・エディタ
+Thumbs.db
+.DS_Store
+*.bak
+*.tmp
+
+# ホスト試験の出力(tests/host/run.sh の S15 が再生成する PPM)
+/tests/out/
+
+# Python のバイトコードキャッシュ
+__pycache__/
+
+# Wi-Fi の SSID・パスワード(コミットしない。ひな形 wifi_secret.h.example だけコミットする)
+/src/app/wifi_secret.h

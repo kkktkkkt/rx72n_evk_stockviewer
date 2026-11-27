@@ -1,0 +1,453 @@
+### S1 標準Cのみの製品コード(nav_logic touch_decode app_logfmt app_logq gfx ui_logic ui_render)の静的条件
+  [-std=gnu99] nav_logic.c
+  [-std=gnu99] touch_decode.c
+  [-std=gnu99] app_logfmt.c
+  [-std=gnu99] app_logq.c
+  [-std=gnu99] gfx.c
+  [-std=gnu99] ui_logic.c
+  [-std=gnu99] ui_render.c
+  [-std=c99 -pedantic-errors] nav_logic.c
+  [-std=c99 -pedantic-errors] touch_decode.c
+  [-std=c99 -pedantic-errors] app_logfmt.c
+  [-std=c99 -pedantic-errors] app_logq.c
+  [-std=c99 -pedantic-errors] gfx.c
+  [-std=c99 -pedantic-errors] ui_logic.c
+  [-std=c99 -pedantic-errors] ui_render.c
+  [-std=c11] nav_logic.c
+  [-std=c11] touch_decode.c
+  [-std=c11] app_logfmt.c
+  [-std=c11] app_logq.c
+  [-std=c11] gfx.c
+  [-std=c11] ui_logic.c
+  [-std=c11] ui_render.c
+  platform.h / FIT ヘッダを include していないこと
+  include 一覧:
+      2 #include "app_logfmt.h"
+      1 #include "app_logq.h"
+      2 #include "gfx.h"
+      2 #include "nav_logic.h"
+      1 #include "nav_logic.h"      /* nav_sample_t */
+      1 #include "touch_decode.h"
+      1 #include "ui_assets.h"
+      2 #include "ui_logic.h"
+      1 #include "ui_render.h"
+      5 #include <stdbool.h>
+      2 #include <stddef.h>
+      7 #include <stdint.h>
+      1 #include <stdio.h>
+      4 #include <string.h>
+  グローバル/静的データが無いこと(nm: D/d/B/b/C が無い。const の台本表は r なので可。MinGW のセクション名シンボル .data/.bss は除く)
+  (データシンボルなし)
+==> PASS  S1
+
+### S2 nav_logic 単体テスト(H1〜H7): 左右半分モード + 次へのみモード(v2 では app_main から使わない。P2 用に残す)
+[H1 右半分を2標本(20ms)触れると +1]
+[H1/H2 左右判定の境界(x_max=479 -> 238 が左, 239 が右)]
+[左右判定: x_max が偶数/奇数/極小のとき]
+[H2 左で -1、端で循環(0 の左 -> 2、2 の右 -> 0)]
+[画像枚数 1 / 0 / 2 / 255 の端]
+[押下確定待ちの間にXが動いた場合は確定時(最新標本)のXを使う(設計に明記なし: 現状の挙動の記録)]
+[H3 押下1標本だけ(ノイズ)では動作しない]
+[H4 押しっぱなし(5秒 = 500標本)で動作は1回だけ]
+[H5/H7 300ms 間隔(299 は無視、300 は動作)と uint32 一周をまたぐ場合]
+[記録: 設計 §11.1(動作から300ms)と §14 H5(離しから300ms)の文言差。実装は §11.1(動作から)]
+[起動直後(now_ms < 300)の最初の押下は動作する(前回動作なし)]
+[300ms 以内で無視された押下は、押し続けて 300ms を過ぎても動作しない]
+[H6 2点以上を含む押下は動作しない。全部離れて30ms後に再び動作可能]
+[pressed と points が食い違う標本 / NULL 引数]
+[性質テスト: 乱数入力 6回 x 30万標本で不変条件]
+test_nav: 245 checks, 0 failed
+[NAV_MODE_NEXT_ONLY: どこを触れても次へ]
+[H3 押下1標本だけ(ノイズ)では動作しない]
+[H4 押しっぱなし(5秒 = 500標本)で動作は1回だけ]
+[H5/H7 300ms 間隔(299 は無視、300 は動作)と uint32 一周をまたぐ場合]
+[記録: 設計 §11.1(動作から300ms)と §14 H5(離しから300ms)の文言差。実装は §11.1(動作から)]
+[起動直後(now_ms < 300)の最初の押下は動作する(前回動作なし)]
+[300ms 以内で無視された押下は、押し続けて 300ms を過ぎても動作しない]
+[H6 2点以上を含む押下は動作しない。全部離れて30ms後に再び動作可能]
+[pressed と points が食い違う標本 / NULL 引数]
+test_nav_next: 196 checks, 0 failed
+==> PASS  S2
+
+### S3 touch_decode 単体テスト(H8)
+[H8 既知バイト列 -> 期待の (点数, x, y)。点数>5 は false]
+[タッチ数 0〜15 の全値(下位4bit): 0〜5 は true、6〜15 は false]
+[NULL 引数]
+[decode 出力を nav_update に通す(右端 x=479 -> 次へ)]
+test_touch_decode: 135 checks, 0 failed
+==> PASS  S3
+
+### S4 画面アセット(H-A1, H-A2): gen_ui_assets.py --check / 再実行で同一 / コミット済みと一致 / 警告なし / const で ROM / サイズ
+フォント: NotoSansJP-VF.ttf sha256=5113756f8a3b
+ROM(データ): 背景 1827840 / 数字 103867 / 形 53824 / バー 45406 / タグ 4032 = 2034969 バイト
+  色数(RGB565) home           277
+  色数(RGB565) fill_run       163
+  色数(RGB565) fill_done      157
+  色数(RGB565) reheat_run     210
+  色数(RGB565) reheat_done    205
+  色数(RGB565) usage          124
+  色数(RGB565) stby            29
+  色数 全背景の合計 435 (P2 の CLUT8 は 256 まで)
+検査 OK(全スロットが画面内、当たり判定が重ならない、背景 480x272)
+  比較したファイル数 = 10(背景7 + ui_gfx_data.c + ui_layout.c + ui_assets.h = 10)
+  nm(R/r = 読み取り専用データ。D/d/B/b なら RAM)の ui_ シンボル:
+    0000000000000000 R ui_bg_fill_done
+    0000000000000000 R ui_bg_fill_run
+    0000000000000000 R ui_bg_home
+    0000000000000000 R ui_bg_reheat_done
+    0000000000000000 R ui_bg_reheat_run
+    0000000000000000 R ui_bg_stby
+    0000000000000000 R ui_bg_usage
+    0000000000031fa0 R ui_bars
+    0000000000000000 R ui_glyph_pool
+    00000000000195c0 R ui_glyphs
+    0000000000026da0 R ui_shapes
+    0000000000031fe0 R ui_tag_pix
+    0000000000000300 R ui_bg
+                     U ui_bg_fill_done
+                     U ui_bg_fill_run
+                     U ui_bg_home
+                     U ui_bg_reheat_done
+                     U ui_bg_reheat_run
+                     U ui_bg_stby
+                     U ui_bg_usage
+    0000000000000080 R ui_btn_defs
+    0000000000000360 R ui_scr_name
+    0000000000000280 R ui_slots
+    0000000000000388 R ui_usage_h
+  生成データの .rodata 合計 = 2037568 バイト(設計 §8.2 のデータ見積 約 2,030,000。±30% = 1,421,000〜2,639,000)
+==> PASS  S4
+
+### S5 tools/img2c.py & tools/prepare_slide.py(H9。P2 ギャラリー用に残してある)
+test_known_pixels (__main__.TestImageInput.test_known_pixels) ... ok
+test_missing_file_and_bad_args (__main__.TestImageInput.test_missing_file_and_bad_args) ... ok
+test_rgba_and_palette_inputs (__main__.TestImageInput.test_rgba_and_palette_inputs) ... ok
+test_wrong_sizes_exit_nonzero (__main__.TestImageInput.test_wrong_sizes_exit_nonzero) ... ok
+test_committed_array_lengths (__main__.TestTestpattern.test_committed_array_lengths) ... skipped 'img_00.c �� v2(���i�f��)�ō폜�ς�'
+test_committed_files_match_generator (__main__.TestTestpattern.test_committed_files_match_generator) ... skipped 'img_00.c �� v2(���i�f��)�ō폜�ς݁BP2 �M�������[�ōĐ������鎞�ɗL��'
+test_const_and_header (__main__.TestTestpattern.test_const_and_header) ... ok
+test_each_array_has_exact_length (__main__.TestTestpattern.test_each_array_has_exact_length) ... ok
+test_exit_ok (__main__.TestTestpattern.test_exit_ok) ... ok
+test_known_pixels_pattern0 (__main__.TestTestpattern.test_known_pixels_pattern0) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 4.438s
+
+OK (skipped=2)
+test_251x305_rgba_center_black_bars_and_alpha_composite (__main__.TestPrepareSlide.test_251x305_rgba_center_black_bars_and_alpha_composite) ... ok
+test_bg_white_option (__main__.TestPrepareSlide.test_bg_white_option) ... ok
+test_committed_slide03_assets_match_pipeline (__main__.TestPrepareSlide.test_committed_slide03_assets_match_pipeline) ... ok
+test_img2c_still_rejects_251x305 (__main__.TestPrepareSlide.test_img2c_still_rejects_251x305) ... ok
+test_invalid_bg_rejected (__main__.TestPrepareSlide.test_invalid_bg_rejected) ... ok
+test_landscape_image_top_bottom_bars (__main__.TestPrepareSlide.test_landscape_image_top_bottom_bars) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 2.177s
+
+OK
+==> PASS  S5
+
+### S6 lcd_panel.c ホスト・ハーネス(実FITヘッダ + 実 r_glcdc_private.c のパラメータ検査。2面・入れ替え・アンダーフロー)
+[ピン割り当て(回路図: BL=P67, DISP=PB3, タッチRST=P66) と極性]
+[(c) lcd_init の順序: GPIO安全状態 -> PinSet -> Open -> START -> DISP -> 待ち -> BL(v2: 画像コピーなし)]
+[lcd_init 失敗時: Open 失敗 / START 失敗 では BL を点けず false、err_code に記録]
+[lcd_fb: 面0 = 0x00800000、面1 = 0x0083FC00(+261,120)。範囲外の番号は面1]
+[lcd_flip: GR2 の BufferChange を面のアドレスで呼ぶ。成功 = OK、反映待ち = BUSY(エラー記録なし)、他の失敗 = FAIL(APP_ERR_LCD_FLIP を記録)]
+[lcd_flip_busy: GLCDC.GR2VEN.VEN を読む]
+[lcd_underflow_poll: 検出があれば 1 を返して GR2 の検出だけクリア。無ければ 0(クリアしない)。取得失敗は 0]
+[(b) R_GLCDC_Open に渡す cfg と r_glcdc_rx_config.h の既定値(LCD_CH0_*)の一致]
+[(b) cfg と設計 §3/§6 の値(HFP17/HBP62/HSYNC25, VFP8/VBP7/VSYNC1, ÷24, RGB565, Low-active sync, DE High)]
+  参考: 総 584 x 288, ドットクロック 240MHz/24=10MHz -> 59.46 Hz
+[(b) 実 FIT の r_glcdc_open_param_check() に cfg を通す(正常) / 壊した cfg は検出される(対照)]
+test_lcd_panel: 153 checks, 0 failed
+==> PASS  S6
+
+### S7 ハード依存部の -fsyntax-only(P項目の事前確認。RX用GCCでのビルドではない)
+ -- A: FIT 実ヘッダ + 実 platform.h
+  ok [A] lcd_panel.c
+  ok [A] touch_ft5x.c
+  ok [A] app_main.c
+  ok [A] app_debug.c
+ -- A + APP_LOG_ENABLE=1 (SCI2)
+  ok [A log2] lcd_panel.c
+  ok [A log2] touch_ft5x.c
+  ok [A log2] app_main.c
+  ok [A log2] app_debug.c
+ -- A + APP_LOG_ENABLE=1 (SCI1)
+  ok [A log1] lcd_panel.c
+  ok [A log1] touch_ft5x.c
+  ok [A log1] app_main.c
+  ok [A log1] app_debug.c
+ -- A + APP_LOG_ENABLE=0 (UARTログ無効。app_logq 等が未使用でも警告が出ない: 設計 U-H11)
+  ok [A log0] lcd_panel.c
+  ok [A log0] touch_ft5x.c
+  ok [A log0] app_main.c
+  ok [A log0] app_debug.c
+  ok [B log0] lcd_panel.c
+  ok [B log0] touch_ft5x.c
+  ok [B log0] app_main.c
+  ok [B log0] app_debug.c
+ -- A + APP_PERF_BENCH=0 (計測なし)
+  ok [A perf0] lcd_panel.c
+  ok [A perf0] touch_ft5x.c
+  ok [A perf0] app_main.c
+  ok [A perf0] app_debug.c
+ -- A + -Wconversion(製品コードの警告のみ数える。情報用)
+ -- B: 仮 platform.h(tests/stubs) + FIT の実ヘッダ(platform.h だけ差し替え)
+  ok [B] lcd_panel.c
+  ok [B] touch_ft5x.c
+  ok [B] app_main.c
+  ok [B] app_debug.c
+  ok [B log2] lcd_panel.c
+  ok [B log2] touch_ft5x.c
+  ok [B log2] app_main.c
+  ok [B log2] app_debug.c
+ -- A: APP_LOG_SCI_CH=3 は #error になること(想定どおりの失敗)
+  ok (#error 発生)
+==> PASS  S7
+
+### S8 app_logfmt 単体テスト(U-H1〜U-H6 + design-uart.md §10.6: 各行の文字列・境界値・小バッファ・build・コマンド・周期・新しい [ev] [ui] [perf])
+[U-H1 boot]
+[U-H1 init]
+[U-H1 hb / st: 代表値と境界値]
+  (実測) hb 最長 = 178 バイト、st 最長 = 222 バイト、APPLOG_LINE_MAX = 256
+[U-H1 hb: 各項目を1つずつ境界値にする(取り違え・桁あふれ・符号の検出)]
+[U-H1 [st] の範囲項目(xmin xmax ymin ymax)の取り違え検出]
+[U-H1 scan]
+[U-H1 ev / err / help]
+[U-H1 製品デモの [ev](design-uart.md §10.3): scr / btn / set / done / demo]
+[U-H1 [ui] と [perf]]
+[U-H1 新しい行の長さ: すべて APPLOG_LINE_MAX 未満(最大値で)]
+  (実測) [ui] 最長 = 96 バイト(設計の見積: 約 110)
+[U-H3 引数不正(NULL / size=0)と、失敗時の buf[0]]
+[U-H4 boot: build の空白・制御文字・長さ・NULL]
+  (参考) build="" の出力 = [boot] fw=rx72n_gcc build= ch=2 baud=115200
+[U-H5 applog_cmd_parse: n p s ? d + - と その他の全値]
+[U-H6 applog_due: 100 tick 毎、折り返し]
+[U-H6 周期のシミュレーション: 1000 tick で 10 回、折り返しをまたいでも同じ]
+[applog_err_changed]
+test_logfmt: 14384 checks, 0 failed
+==> PASS  S8
+
+### S9 app_logq 単体テスト(U-H7)と nav_step 単体テスト(U-H8)
+[Q1 初期状態]
+[Q2 8行まで push 成功、9行目は false で drops==1(U-H7)]
+[Q3 pop 後に再び push できる(循環)]
+[Q4 長さの境界: 255 は可、256 / 0 / 巨大 は false(drops+1)]
+[Q5 push は len バイトだけコピーして NUL 終端し、隣の行を壊さない]
+[Q6 drops: note_drop と飽和]
+[Q7 NULL 引数で落ちない]
+[Q8 モデル照合: 乱数列の push/pop/note_drop を単純な配列と比べる(2万回)]
+test_logq: 154 checks, 0 failed
+[NS1 3枚: +1 は 0→1→2→0、-1 は 0→2→1→0]
+[NS1b 4枚: +1 は 0→1→2→3→0、-1 は 0→3→2→1→0]
+[NS2 dir の値: 正なら次、負なら前(大きさは無関係)。0 は何もしない]
+[NS3 画像1枚・0枚指定・NULL は false]
+[NS4 2枚・255枚の循環]
+[NS5 nav_step は index 以外のフィールドを変えない(状態機械・間隔規則に触らない)]
+[NS6 300ms 規則は nav_step に適用されない / タッチの 300ms 規則は nav_step の影響を受けない]
+[NS7 差分試験: +1 と -1 を毎回挟んでも nav_update の戻り値・index が変わらない(乱数列 20000 標本)]
+  (参考) nav_update の動作回数 = 435
+test_nav_step: 589 checks, 0 failed
+==> PASS  S9
+
+### S10 app_debug.c のログ部(キュー・BUSY 再送・満杯破棄・受信・コールバック)を r_sci_rx の偽物で試験
+[D1 初期化: PinSet が Open より前、引数(ch=2, 115200, 8N1, 優先度2, コールバックあり)]
+[D2 init 前に app_log_line を呼んでも自動で init される]
+[D3 Open 失敗: 無音で続行。drop は数えない。再度 Open しない]
+[D4 init 前の poll / 空キューの poll は R_SCI_Send を呼ばない]
+[D5 送信中(BUSY)の保持・満杯での破棄・再送の順序]
+[D6 BUSY で待っている行の中身が、後続の push・poll で壊れない]
+[D7 BUSY 以外の送信エラー: その行を捨てて drop+1、次の行へ進む]
+[D8 多数周期: 1万行を送受(毎回 tx_done)しても順序・内容・件数が保たれる(キューの循環)]
+[D9 app_log_getc: 0〜255 を非負で返す(0xFF が -1 にならない)、空は -1]
+[D10 コールバック: 異常イベントの値だけを書く(受信イベント値の確認つき)]
+[D11 drop 累計の飽和(app_log_drops)]
+test_app_debug: 121 checks, 0 failed
+==> PASS  S10
+
+### S11 app_main.c の結合試験(偽の SCI/CMT/LCD/タッチ。起動順・hb・コマンド・[ev]・描画と入れ替え・[err]・連打・各種失敗)
+[M1 起動: [boot] → 面0に描画 → LCD初期化 → [init lcd] → タッチ初期化 → [init touch] → [init timer] → [init loop] → [perf] → [hb]]
+[M2 [hb]: 1000 tick で 10 本、tick=100,200,...,1000、drop=0、scr=0 demo=0 uf=0、全行が整形済み]
+[M3 [hb] はその tick の touch_read より前にキューへ積まれる]
+[M4 touch_init 失敗: [init touch ok=0 err=3 detail=5] と [err]。hb は止まらず、UARTコマンドも効く]
+[M5 touch_read が常に失敗: hb は毎秒出る。ui_update は標本なしで動き続ける(デモが進む)]
+[M6 n/p: 画面の順送り home→fill→reheat→usage→standby→home、p は逆送り。表示面が切り替わる。[ev] src=uart]
+[M7 未知の文字(大文字・改行・空白・0x00・0xFF・数字・x)は無視: 出力なし・画面変化なし・drop 不変]
+[M8 s と ?: [st](範囲つき)の後に found>0 なら [scan]、続けて [ui]。? は新しい [help]]
+[M9 + と -: h_up / h_dn の仮想タップ([ev] btn down → act → set、src=uart)。表示面も更新される]
+[M10 デモ(d): 36 本の [ev] が台本どおりの順序、[hb] の demo=1 が 33 本、終了後 scr=0 demo=0。drop=0 uf=0]
+  (参考) 33 秒のデモで入れ替えた回数 frm = 614(模擬の垂直同期 = 5 周回 = 約 17 ms)
+[M10b デモ中に実タッチ: 即ホーム・demo=abort src=touch・そのタッチは btn にならない]
+[M11 タッチ: ホームの「湯はり」を押すと btn down(2標本)→ act(押下から 90ms)→ scr=fill。ボタン外は何も起きない。2本指は無視]
+[M12 描画: 静止中は描かない。表示が変わった時だけ裏面に描いて入れ替える(面は交互)。反映待ちの面は書き換えない。反映待ち中に lcd_flip を呼ばない]
+  (参考) 2.5 秒のスライド + 水位で入れ替えた回数 = 50
+[M12b lcd_flip が BUSY を返す間は次の周回で再試行(面は進めない)。反映後に frm が増える]
+[M12c lcd_flip が FAIL: [err] code=8 を出し、以後描かない。UART・タッチ・hb は動き続ける]
+[M12d アンダーフロー: 1秒ごとに lcd_underflow_poll を呼び、検出を uf に足す(hb の uf=)]
+[M12e 起動時の GLCDC 初回検出(lcd_init の直後の1回)は捨てる: 起動後の uf 増分は 0。失敗時は poll しない]
+[M13 + を同時に 60 個: 1 tick に1文字、押下中は無視。[hb] 継続、drop=0、set は 48 を超えない]
+[M14 送信が遅い回線(1行に 5 tick)で s を40個: キュー満杯 → 新しい行を捨てる、drop が [hb] に載る、部分行なし]
+[M15 [err] (A): g_app_dbg.err の変化で1行、100ms に1行まで、同じ値は再送しない]
+[M15b 100ms 間引き: 変化が速くても (A) は10tick に1行]
+  (参考) 40tick の間の [err] 本数 = 5
+[M16 [err] (B): UART受信異常は code=7 detail=<event>、1秒に1行、g_app_dbg.err_code には書かない]
+[M17 タイマ作成失敗: [init timer ok=0 err=4] と [err] code=4 を出し切って停止(hb なし、loop なし、perf なし)]
+[M18 LCD 初期化失敗: [init lcd ok=0 err=1 detail=3] を出して続行(描画しない・perf なし。タッチ・タイマ・hb・UART は動く)]
+[M19 R_SCI_Open 失敗: UART は無音、LCD/タッチ(画面操作)・タイマは動き続ける]
+[M20 s_tick が 0xFFFFFF9C から始まり 32bit を折り返しても、hb は 100 tick 毎(間隔がすべて 100)。画面の時刻も壊れない]
+[M21 メインが詰まって tick が 250 飛んだ場合: hb は1本だけ(まとめて出さない)]
+test_app_main: 380 checks, 0 failed
+==> PASS  S11
+
+### S12 -fsanitize=address,undefined で S8〜S11 と S2/S3/S13〜S15 のテストを再実行(1件でも検出したら失敗)
+==> SKIP (未実施) S12: この環境では gcc の -fsanitize=address,undefined がリンクできない(libasan / libubsan が無い)
+
+### S13 gfx 単体テスト(H-G1: gfx_a8 の精度・濃度 / H-G2: blit・fillrect の切り取り)
+[H-G1a gfx_a8: 濃度 0..255 x scale x 色の組合せで、基準値との差が各チャンネル 2 以内]
+  (参考) 最大差 = 2
+[H-G1b scale256 = 0 で変化なし / 濃度 0 で変化なし / scale256=256 かつ濃度 255 で文字色 / 範囲外の scale は 256 に丸める]
+[H-G1c gfx_a8 の切り取り: 全方向のはみ出しで、面の外へ書かず、中は a8 の正しい位置の画素になる]
+[H-G1d gfx_a8: w/h が 0 以下・NULL は何もしない]
+[H-G2a gfx_fillrect: 範囲どおり塗る / 切り取り / 幅 0・負 / NULL]
+[H-G2b gfx_blit565: 範囲どおり・stride・ソース位置の切り取り(左/上にはみ出すとソースも詰める)]
+test_gfx: 37 checks, 0 failed
+==> PASS  S13
+
+### S14 ui_logic 単体テスト(H-U1〜H-U7: 状態機械・押下表示・タッチ・遷移・式・デモ台本・UARTコマンド)
+[H-U2a 水位: e x speed / 32(0.1%単位)、1000 で頭打ち。speed=4 で 8.0 秒]
+[H-U2b 浴槽温度(追い焚き): 380 + e x speed / 400、設定 x 10 で頭打ち。追い焚き残り / バー幅]
+[H-U2c 流量: 85 + T[(e/800)&15](67..103)、時計: 21:45 起点で実時間、24時間で巻き戻る]
+[H-U5a スライド量: e=0 で 0、125 で 360、250 以上で 480、単調増加]
+[棒グラフの高さ: 40ms x i 遅れて 400ms で伸びる(終わり際がゆっくり)]
+[H-U4a 座標変換: px = raw_x x 479 / X_MAX、py = raw_y x 271 / Y_MAX。範囲外は丸める]
+[H-U4b 座標の向きの設定(flags)で、反転した位置を押すと同じボタンが押される]
+[H-U4c 押下確定 = 1点が2標本連続。1標本だけ(ノイズ)は押下にならない]
+[H-U4d 離し確定 = 触れていない標本が3標本連続。2標本の途切れでは離しにならない]
+[H-U4e 2点以上: 押下にならない。1点に戻っても、全部離れるまで押下にならない。押下中の2点目は無視]
+[H-U4f NULL(標本なし)は状態を変えない: 押下確定の途中・押下中・離しの途中のどれでも]
+[H-U4g ボタン外のタッチ: 押下表示も [ev] も出ない(待機以外)]
+[H-U3a 短いタップ: 押下確定で PRESS、離しは 30ms 後だが実行は押下から 90ms 後、実行の 60ms 後に FLASH 終了]
+[H-U3b 長押し(300ms): 離し確定(離してから30ms後)で実行。3秒押しっぱなしで強制実行]
+[H-U3c 押下表示中(PRESS)の別の押下は無視。FLASH 中の押下は受け付ける]
+[H-U1a ホーム: h_dn / h_up で設定温度 ±1、35 と 48 で止まる(止まった時は [ev] set を出さない)]
+[H-U1b ホーム → 湯はり: 右から入るスライド、水位 0%、スライド 250ms で終わる]
+[H-U1c 湯はり: 水位が 100% で done(背景切替・[ev] done=fill)、f_stop / f_done / f_home の動作と bath]
+[H-U1d 追い焚き: 380 から。bath >= set x 10 で done、r_stop / r_done / r_home でホームへ(bath はそのまま)]
+[H-U1e 設定温度が低い時(35): 追い焚きは開始と同時に done]
+[H-U1f 使用量: 棒が 0 から伸びる、流量が変わる、u_back でホームへ]
+[H-U1g 電源 → 待機(即切替)。待機のどこを押しても押下確定で復帰し、離すまで他のボタンは受け付けない]
+[H-U1h 全ボタン: 15個のボタンの中心を押すと、その画面でそのボタンの [ev] が出る(当たり判定の表との整合)]
+[H-U1i 当たり判定は押下確定の座標で1回だけ(指が滑って外れても実行は取り消さない)]
+[H-U5b 遷移中(250ms)の押下は受け付けない。古い画面の値の写しは遷移中に変わらない]
+[H-U5c 遷移の向き: ホーム→子は前進、子→ホームは後退。待機への出入りは即切替]
+[H-U7a n: home→fill→reheat→usage→standby→home、p: 逆。値の初期化はボタンで入った時と同じ]
+[H-U7b + / -: h_up / h_dn の仮想タップ(押下表示 → 実行 → set)。ホーム以外・遷移中・押下表示中は無視]
+[H-U7c 連続して + を送っても押下中は無視される(UT17 相当: 6 以下の set、48 を超えない)]
+[H-U6a デモ全走(UART d): 36 本の [ev] が §6.2 の時刻(±10ms)・順序で出る。終了後ホームで止まり speed=1]
+  (参考) 表示キーが変わった回数(描画の要求回数) = 699 / 33秒
+[H-U6b デモ(ホームの「デモ」ボタン): btn=h_demo の後に demo=start src=touch。同じ経路]
+[H-U6c 実タッチで中断: 即ホーム + demo 終了 + speed=1。そのタッチは動作にならない。離した後は通常操作]
+[H-U6d UART d で開始 / 実行中に d で中断(即ホーム、demo=abort src=uart + scr=home ...)。n p + - は demo 中は無視]
+[H-U6e 台本どおりに押せない時(想定外)は demo=abort src=demo]
+[H-U6f デモ中は、デモ用のタグ表示キーが立つ(demo=1)。終了で消える]
+[表示キー: 初回は変化あり。マーク後は、何も変わらなければ変化なし。値・押下表示・遷移で変化]
+[イベント待ち行列: 8個まで。満杯なら新しいものを捨てて ev_lost に数える。pop は古い順]
+test_ui_logic: 343 checks, 0 failed
+==> PASS  S14
+
+### S15 ui_render 単体テスト(H-G3: 全画素を書く / スライドの平行移動 / 押下表示 / バー)と、画面の PPM 出力(tests/out → 目視用 PNG)
+[H-G3a 5画面 x 状態(running / done)で全画素を書く(0xA5A5 / 0x5A5A の2回の結果が同じ)]
+[H-G3b 遷移(古い画面 x 新しい画面 x 状態 x dx x 前進/後退)で全画素を書く]
+  (参考) 試した組合せ = 600
+[H-G3c 値の極端(水位 0 / 1000、追い焚き 350..480、流量、時計 0:00 / 23:59、棒 0..640)でも全画素を書く]
+[見た目の PPM を出力(各画面・押下・白光・スライド途中・デモ中)]
+[押下の暗転 / 離した時の白光: ボタンの中だけが変わり、外は変わらない。デモ中タグは (228,5) の 84x24 だけ]
+[進捗バー: 幅 = 432 x 水位(最小 20)。右端の列が進みの色、その先は溝の色]
+[使用量の棒グラフ: 最終の高さ = 設計の {42,34,50,31,47,54,44}、最初は 0 から伸びる]
+[H-U5c スライド: 全画素が、古い画面と新しい画面の単独の描画を、設計どおりに平行移動して並べたものと一致する]
+  (参考) 試した組合せ = 250
+test_ui_render: 38 checks, 0 failed
+14 ���� D:/workspace/rx72n/rx72n_gcc/tools/assets/bath/preview �ɏo��
+==> PASS  S15
+
+### S16 追加試験(test_ui_extra: 当たり判定の幾何・UT10〜UT17 相当の [ev] 列・更新間隔のばらつき・32bit折り返し・デモ再開・不変条件ファズ・gfx/ui_render の極端な値)
+    (D1〜D3 は修正済み。以前の KNOWN-DEFECT 表示は無い)
+[X1 当たり判定: 画面内・見た目を含む・見た目 ±3(デモとs_wake以外)・同じ画面で同時に成り立つ2つが重ならない]
+[X2 UT10/UT11: n x5(700ms 間隔)で to = fill reheat usage standby home、from = home fill reheat usage standby、すべて src=uart。p は逆。btn は出ない]
+[X3 UT12: + x8, - x2(500ms 間隔): btn h_up の down/act が8組、set = 43..48 の6本(7・8回目は出ない)、続いて 47 46、h_dn が2組]
+[X4 UT16: n n(700ms)で fill → reheat。reheat から done=reheat まで 16.0 秒(設定 42℃)。done=fill は出ない(32秒未満で離れる)]
+[X5 UT17: + を 10ms ごとに 60 個(1 tick に1文字): set の [ev] は 1〜6 本、48 を超えない、押下表示が残らない]
+  (参考) 60 個の + で set の [ev] = 4 本、最終 set=46
+[X6 ui_update の呼び出しが 10ms 刻みでなくても(メインが詰まって 20〜40ms 飛ぶ)、デモは同じ 36 本が同じ順序で出る]
+[X7 now_ms が 2^32 を折り返す瞬間をまたいでも、デモが同じ 36 本・順序で出る(unsigned の引き算)]
+[X8 デモを UART で中断してすぐ d で再開: 台本が最初から(set=42、4倍速)。終了後にもう一度 d でも同じ36本]
+[X9 [D1 修正済み] デモの仮想押下(150ms)の最中に実タッチで中断すると、押下表示が離し待ちのまま残り、3秒後に中断済みのはずのボタンが動作する]
+[X9b [D1 修正済み] 同じ状況で、押下表示が残る間は実タッチのボタンが効かない(最大 3 秒)]
+[X9c [D1 修正済み] UART の d で中断した場合も同じ(仮想押下の最中)]
+[X9d [D2 修正済み] + を送った直後(150ms 以内)に d で開始すると、仮想押下がデモの途中で実行される]
+[X9e [D3 修正済み] 画面が戻るスライド中(ホームに戻る途中)に実タッチで中断しても、スライドが続く(設計 §6.1 は「アニメーションなしで即ホーム」)]
+[X10 ui_touch_map: x_max / y_max = 0 でもゼロ割りせず画面内に収まる。生座標 0xFFFF も収まる。入れ替え時は軸ごとの最大値で正規化]
+[X10b 式の端: ui_bar_h(i >= 7) = 0、棒の高さは時間で単調増加して最終値に一致、遷移量は単調、flow は 67..103]
+[X11 ファズ: 乱数の標本(NULL・2点・範囲外座標・押しっぱなし)と UART コマンドを 40 万 tick 与えても、不変条件が崩れない]
+  (参考) イベント総数 4783、最長の PRESS 3000 ms、デモ中断後に残った PRESS の tick 数 0
+[X12 gfx: 座標・大きさが INT32 の端でも面の外へ書かず(番兵)、fillrect は遅い基準実装と一致する]
+[X13 ui_render: 値が範囲外(時計 65535 分・水位/浴槽/流量 65535・設定 0..255・棒 65535・画面番号 9)でも面の前後へ書かず、全画素を書く]
+test_ui_extra: 11999 checks, 0 failed
+==> PASS  S16
+
+### S17 UART ログの判定スクリプト(judge_ui.py): 本物の app_main が出す UT10〜UT19 相当のログ(trace_ui)と、tests/host/data の固定ログを判定し、壊したログが不合格になることを確認
+  ut10: 25 行, 1906 バイト
+  ut11: 25 行, 1906 バイト
+  ut12: 52 行, 2953 バイト
+  ut13: 84 行, 5822 バイト
+  ut14: 37 行, 2383 バイト
+  ut15: 51 行, 3933 バイト
+  ut16: 39 行, 3492 バイト
+  ut17: 32 行, 2064 バイト
+  ut18: 26 行, 2337 バイト
+  ut19: 35 行, 2706 バイト
+trace_ui: 10 checks, 0 failed
+test_ut10_missing_and_src (__main__.MutationTests.test_ut10_missing_and_src) ... ok
+test_ut10_order (__main__.MutationTests.test_ut10_order) ... ok
+test_ut11_wrong_direction (__main__.MutationTests.test_ut11_wrong_direction) ... ok
+test_ut12_values (__main__.MutationTests.test_ut12_values) ... ok
+test_ut13_end_hb (__main__.MutationTests.test_ut13_end_hb) ... ok
+test_ut13_err_line (__main__.MutationTests.test_ut13_err_line) ... ok
+test_ut13_extra_event (__main__.MutationTests.test_ut13_extra_event) ... ok
+test_ut13_frm_range (__main__.MutationTests.test_ut13_frm_range) ... ok
+test_ut13_hb_demo_flag (__main__.MutationTests.test_ut13_hb_demo_flag) ... ok
+test_ut13_missing_event (__main__.MutationTests.test_ut13_missing_event) ... ok
+test_ut13_time_shift_plain (__main__.MutationTests.test_ut13_time_shift_plain) ... ok
+test_ut13_time_shift_stamped (__main__.MutationTests.test_ut13_time_shift_stamped) ... ok
+test_ut14_abort_time (__main__.MutationTests.test_ut14_abort_time) ... ok
+test_ut14_wrong (__main__.MutationTests.test_ut14_wrong) ... ok
+test_ut15_touch_btn_after_abort (__main__.MutationTests.test_ut15_touch_btn_after_abort) ... ok
+test_ut16_done_fill (__main__.MutationTests.test_ut16_done_fill) ... ok
+test_ut16_hb_count (__main__.MutationTests.test_ut16_hb_count) ... ok
+test_ut17 (__main__.MutationTests.test_ut17) ... ok
+test_ut18_first_hb_tick_is_warning_only (__main__.MutationTests.test_ut18_first_hb_tick_is_warning_only) ... ok
+test_ut18_init_ok0 (__main__.MutationTests.test_ut18_init_ok0) ... ok
+test_ut18_order_and_perf_missing (__main__.MutationTests.test_ut18_order_and_perf_missing) ... ok
+test_ut18_perf_over_is_warning_only (__main__.MutationTests.test_ut18_perf_over_is_warning_only) ... ok
+test_ut19 (__main__.MutationTests.test_ut19) ... ok
+test_wrong_hb_format_old (__main__.MutationTests.test_wrong_hb_format_old) ... ok
+test_real_log_new_build_uf0 (__main__.RealLogTests.test_real_log_new_build_uf0) ... ok
+test_real_log_second_uf_increment_fails (__main__.RealLogTests.test_real_log_second_uf_increment_fails) ... ok
+test_real_log_segmentation_and_comments (__main__.RealLogTests.test_real_log_segmentation_and_comments) ... ok
+test_real_logs (__main__.RealLogTests.test_real_logs) ... ok
+test_bom (__main__.ReceiveTests.test_bom) ... ok
+test_lf_only (__main__.ReceiveTests.test_lf_only) ... ok
+test_partial_first_and_last_line (__main__.ReceiveTests.test_partial_first_and_last_line) ... ok
+test_partial_stamped (__main__.ReceiveTests.test_partial_stamped) ... ok
+test_stamp_midnight_wrap (__main__.ReceiveTests.test_stamp_midnight_wrap) ... ok
+test_tx_markers_ignored (__main__.ReceiveTests.test_tx_markers_ignored) ... ok
+test_tx_markers_in_unstamped_log (__main__.ReceiveTests.test_tx_markers_in_unstamped_log) ... ok
+
+----------------------------------------------------------------------
+Ran 49 tests in 0.375s
+
+OK
+==> PASS  S17
+
+================ 集計: PASS=16 FAIL=0 SKIP(未実施)=1 

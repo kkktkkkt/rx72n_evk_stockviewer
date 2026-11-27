@@ -1,0 +1,41 @@
+12:00:00.000 [boot] fw=rx72n_gcc build=Nov_21_2026_13:30:07 ch=2 baud=115200
+12:00:00.000 [init] stage=lcd ok=1 err=0 detail=0
+12:00:00.000 [init] stage=touch ok=1 err=0 detail=0
+12:00:00.000 [init] stage=timer ok=1 err=0 detail=0
+12:00:00.000 [init] stage=loop ok=1 err=0 detail=0
+12:00:00.010 [perf] n=50 copy_us=0 home_us=0 slide_us=0
+12:00:01.000 [hb] tick=100 scr=0 demo=0 frm=1 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:02.000 [hb] tick=200 scr=0 demo=0 frm=1 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:03.000 # tx 'n'
+12:00:03.000 [hb] tick=300 scr=0 demo=0 frm=1 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:03.000 [ev] scr=fill from=home src=uart
+12:00:03.700 # tx 'n'
+12:00:03.700 [ev] scr=reheat from=fill src=uart
+12:00:04.000 [hb] tick=400 scr=2 demo=0 frm=40 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:05.000 [hb] tick=500 scr=2 demo=0 frm=43 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:06.000 [hb] tick=600 scr=2 demo=0 frm=45 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:07.000 [hb] tick=700 scr=2 demo=0 frm=48 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:08.000 [hb] tick=800 scr=2 demo=0 frm=50 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:09.000 [hb] tick=900 scr=2 demo=0 frm=53 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:10.000 [hb] tick=1000 scr=2 demo=0 frm=55 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:11.000 [hb] tick=1100 scr=2 demo=0 frm=58 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:12.000 [hb] tick=1200 scr=2 demo=0 frm=60 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:13.000 [hb] tick=1300 scr=2 demo=0 frm=63 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:14.000 [hb] tick=1400 scr=2 demo=0 frm=65 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:15.000 [hb] tick=1500 scr=2 demo=0 frm=68 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:16.000 [hb] tick=1600 scr=2 demo=0 frm=70 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:17.000 [hb] tick=1700 scr=2 demo=0 frm=73 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:18.000 [hb] tick=1800 scr=2 demo=0 frm=75 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:19.000 [hb] tick=1900 scr=2 demo=0 frm=78 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:19.700 [ev] done=reheat
+12:00:20.000 [hb] tick=2000 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:21.000 [hb] tick=2100 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:22.000 [hb] tick=2200 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:23.000 [hb] tick=2300 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:24.000 [hb] tick=2400 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:25.000 [hb] tick=2500 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:26.000 [hb] tick=2600 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:27.000 [hb] tick=2700 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:28.000 [hb] tick=2800 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:29.000 [hb] tick=2900 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
+12:00:30.000 [hb] tick=3000 scr=2 demo=0 frm=80 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0
