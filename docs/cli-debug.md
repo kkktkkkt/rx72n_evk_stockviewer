@@ -280,3 +280,10 @@ Windows 上の Claude Code から、e² studio を閉じた状態で直接実行
 - **`file` は最初の行に置かない**(最初の行に BOM が付いて `Undefined command` で失敗する)。先頭に `-gdb-set confirm off` などの捨て行を1行置く。
 - `s_sched.net` / `s_wx_have` / `s_wx_ok_ms` / `s_clk.synced` / `s_wx_temp` / `s_wx_kind` は `set var` で書ける(停止中に書き、走らせて 0.6 秒後に interrupt。10ms ごとに `ui_set_wx` が `s_ui.wx` を作り直すので、**`s_ui.wx` ではなくこの元の変数を書く**)。最初の取得が終わる前に書くと予定表が上書きするので、接続後 14 秒待ってから書く。
 - ホスト描画は `tools\fb_hostrender.c` を作り直す(`jobs\fb\fb_hostrender.exe` は 11-22 の古い版。天気つきは `jobs\fb\fb_hostrender_wx.exe`。ビルド行は `tools\fb_hostrender.c` の先頭)。判定: `python -I tools/fb2png.py check <gdb.log> jobs/fb/W --c8 --host jobs/fb/fb_hostrender_wx.exe`。
+
+### 12.5 追記(2026-11-27 stockview の Phase 0): 起動から録る・送信の許可文字・複数ジョブの組み合わせ
+- `serial` ジョブの `tx` の許可文字は `[npsd+?xtygz-]`(`job-runner.ps1` 147 行目。`t y g z` は TLS 検証用)。`tools\serial-read.ps1` と `tools\gdb-run.ps1` の許可文字は**まだ従来のまま**(`t y g z` は送れない)。
+- **`[boot]` から全部を録る手順**: `serial` ジョブ(`tx` 付き)をバックグラウンドで出す(`(tools/submit-job.sh serial '<JSON>' 160 > out 2>&1 &)`)→ 4 秒待つ → **ランナーを経由せず** `rfp-cli.exe -d RX72x -t e2l -if fine -auth id FF… -noquery -noprogress -sig -run` を直接実行(ランナーは 1 つずつ順に処理するので、`serial` の実行中に `rfp reset-run` のジョブは出せない)。`serial` は先頭に直前の走行の残りが混ざる(`DiscardInBuffer` なし)ので、`[boot]` の行から判定する。
+- `serial` の `txGapMs` の上限は 1000ms。15 秒間隔で送るには、`?`(`[help]` を 1 行出すだけ)を 14 個はさむ。
+- `rfp-cli -a -run` の書込みは約 82 秒(2026-11-27。旧記録の約 65 秒より長い)。
+- 試験版の UART: `[wx] res=fail ... err=<n> http=<n> ms=<n> len=<n>`。`err=4` は HTTP が 200 でない、`err=5` はキー無し(天気用のキーなので想定どおり)、`err=7` はバッファ超過。結果は `docs/debug-report.md`。
