@@ -189,3 +189,45 @@ uint8_t stk_market(const stk_sym_t *sym, bool synced, uint32_t now_jst, uint32_t
     }
     return ((uint32_t)(now_utc - rs) <= STK_OPEN_GRACE_S) ? (uint8_t)STK_MKT_TRADING : (uint8_t)STK_MKT_CLOSED;   /* open_grace */
 }
+
+/* ---- 表示用データの組み立て ---- */
+
+void stk_view_make(stk_view_t *v, uint8_t net, uint8_t busy, uint8_t fail_mask, const stk_slot_t slot[STK_ROWS],
+                   uint32_t now_ms, uint16_t clock_min, uint16_t upd_min)
+{
+    uint8_t  i;
+    uint32_t age_s;
+    uint32_t newest = 0u;          /* have の行のうち、最後の成功からの秒が最小のもの */
+    bool     any    = false;
+
+    if ((v == NULL) || (slot == NULL)) {
+        return;
+    }
+    memset(v, 0, sizeof *v);
+    v->net       = net;
+    v->busy      = (busy != 0u) ? 1u : 0u;
+    v->partial   = ((fail_mask & 7u) != 0u) ? 1u : 0u;
+    v->clock_min = clock_min;
+    v->upd_min   = upd_min;
+    for (i = 0u; i < (uint8_t)STK_ROWS; i++) {
+        stk_row_t *r = &v->row[i];
+
+        r->fail = (((fail_mask >> i) & 1u) != 0u) ? 1u : 0u;
+        if (slot[i].have == 0u) {
+            continue;
+        }
+        age_s         = (now_ms - slot[i].ok_ms) / 1000u;
+        r->have       = 1u;
+        r->stale      = (age_s >= STK_STALE_S) ? 1u : 0u;
+        r->mkt        = slot[i].mkt;
+        r->price_x100 = slot[i].price_x100;
+        r->diff_x100  = slot[i].diff_x100;
+        r->pct_bp     = slot[i].pct_bp;
+        if (!any || (age_s < newest)) {
+            newest = age_s;
+            any    = true;
+        }
+    }
+    v->have_any  = any ? 1u : 0u;
+    v->stale_all = (any && (newest >= STK_STALE_S)) ? 1u : 0u;
+}

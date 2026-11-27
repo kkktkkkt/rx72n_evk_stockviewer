@@ -1,6 +1,6 @@
 # 実装メモ(コーディング担当)
 
-最終更新: 2026-11-27。状態: **Phase 0(TLS の実機検証用の最小の変更)・Phase 1(表示)・Phase 2(数値と解析)を実装済み。Phase 3 以降は未着手。** 実機ではビルドも実行もしていない(ホスト試験のみ)。
+最終更新: 2026-11-27。状態: **Phase 0(TLS の実機検証用の最小の変更)・Phase 1(表示)・Phase 2(数値と解析)・Phase 3(取得と予定表)を実装済み。Phase 4 以降は未着手。** 実機ではビルドも実行もしていない(ホスト試験のみ)。
 
 ## Phase 0: 変更したファイル(`docs/design.md` §5.5.2 の 0-1〜0-6)
 
@@ -47,6 +47,41 @@
 ## ログ
 
 `[wx] res=fail src=<src> err=<1..9> http=<n> ms=<n> len=<n>`。`err=9` = 取得中に `ready`(ESP32 が再起動)。`len` = バッファに溜めたバイト数(最大 3,072。本文は出さない)。`[wifi] step=wx_sslconf ...` が `z` のときだけ出る。
+
+## Phase 3(取得と予定表): 実装したこと
+
+| ファイル | 内容 |
+|---|---|
+| `src/app/wx_core.h/.c` | 天気を全部削除(`wx_parse_weather`・`wx_kind_*`・`WX_KIND_*`・`wx_view_t`・`WX_REQ_LEN`・`wx_result_t` の `wmo` `kind` `temp_x10` `obs`)。`wx_build_request(buf, size, sym)`(製品。Yahoo の SSL。144 / 145 / 145)と `wx_build_request_t(buf, size, target, sym)`。`wx_target_t` は `YAHOO_SSL`(= 0。製品)と、`APP_WIFI_TEST` の `YAHOO_TCP` `GOOGLE_SSL` `YAHOO_SSL_NOAUTH`。`WX_SRC_RETRY` を追加。ログ行を `[stk]` に(`wx_fmt_ok` / `fail` / `cycle` / `req` / `net` / `sym`。§7.5)。予定表 `wx_sched_*` を 3 銘柄に(下) |
+| `src/app/wifi_core.h/.c` | `wifi_core_set_symbol`(銘柄ごとに `WIFI_RANGE_WX` を 1 回)。結果に `sym`。`wx_parse_http` に切り替え(溢れた応答は `err=7`)。`quiet` は `res=start` に加えて **`res=ok` も出さない**(失敗・時間切れ・skip・`result=` は出す)。`z` の step は製品の範囲に入れない(`MASK_WX_SSLCONF` は `APP_WIFI_TEST` のみ。step 番号は変えない) |
+| `src/app/wifi_at.c/.h` | 銘柄ごとの最後の成功(`stk_slot_t s_slot[3]`)と更新時刻を保持。`wx_report`(成功時に `stk_calc`・`stk_market` で記録)、`[stk] res=` / `cycle=` / `net=`(`net` / `busy` が変わった時)/ `sym=` ×3(`s` の時)。**`stk_ui(stk_view_t *, now_ms)`**(= `stk_view_make`)を追加。専用モードは `t y g z x`(銘柄は ^N225)のまま `[stk]` を出す |
+| `src/app/stk_core.h/.c` | `stk_slot_t`、`stk_view_make`(設計 §7.1 の組み立て)、`STK_STALE_S` = 1,800 |
+| `tests/host/` | `test_wx_core.c`(要求・書式 R-STK-*・予定表 H-6 を作り直し)、`test_wifi_core.c`(応答を Yahoo ふうに。銘柄・err=9・タイムアウト・CLOSED の途切れ・quiet。専用モードと製品の 2 通りで実行)、`test_wifi_at.c`(偽の ESP32 が銘柄ごとの応答。製品の 3 銘柄の周期・失敗分のやり直し・全部失敗の再接続)、`test_wx_indep.c`(予定表の乱数走行を 3 銘柄用のモデルに)、`test_stk_core.c`(`stk_view_make`)、`tests/stubs/fake_sci.h`(受信バッファを読み切ったら先頭に戻す。長い走行用)、`run.sh`(S22・S24 を 2 通りに、S33 = 変異試験を追加) |
+
+### 予定表の決め(設計 §5.7 を実装した形)
+
+- 1 周期 = 銘柄 0 → 1 → 2 を `wx_sched_poll` が 1 つずつ `WX_ACT_FETCH`(`wx_sched_sym` で銘柄)で返し、`wx_sched_done` を銘柄ごとに受ける。周期の開始 = 最初の銘柄の `poll`。定期 = 開始から 600,000ms、更新要求の最小間隔 5,000ms も開始から。
+- 失敗した銘柄だけを 20 秒後(`WX_RETRY_MS`)に `src=retry` で、周期あたり最大 2 回(`WX_RETRY_MAX`)。やり直しの間も `net` は `on`。周期の記録(`wx_sched_cycle`: `n` `ok` `fail` `ms`)は、やり直しまで含めた周期の終わりに 1 回(`[stk] cycle=`)。
+- 429: 周期を打ち切り(取っていない銘柄は失敗扱い)、300 秒後に周期を最初から(`src=timer`)。待ちの間の更新要求は `req=ignored`。
+- 全部失敗: やり直しの後も 3 銘柄とも失敗**で、すべて応答なし(`http=0`)** なら、`net=err` にして接続からやり直す(接続の失敗は 60 → 120 → 300 秒。待ち中の更新要求は直ちに再接続)。応答がある失敗(403・404 など)が混じる時は再接続せず、次の定期の周期まで待つ(10 分の間隔を守るため)。
+- `net`: 接続の試行中は、失敗の後(`err`)ならそのまま `err`(オフライン表示を `conn` にちらつかせない)。起動直後だけ `conn`。
+
+### 設計から外れた点・判断が要る点(設計役の確認が要る)
+
+1. **全部失敗の再接続の条件**: 設計 §5.7 は「3 銘柄すべてが失敗(`err` 1〜3 または 9)」。`wx_sched_done` が受けるのは `ok` と `http` だけなので、「すべて `http=0`」で近似した(上のとおり。`err=3` でも状態行が読めていれば `http≠0` で、再接続しない)。
+2. **`quiet` が `res=ok` も止める**: 設計 §5.9 のとおりに、接続の step も含めて全部。設計 §8.3 U-1 の「`[wifi]` の `join` ok」は見えなくなる(`[wifi] result=pass` と `[stk] net=` で代える)。
+3. **接続の失敗の `[stk] res=fail`**: `err=8` の行の `sym` は 0(銘柄がない。R-STK-FAIL が `sym=[0-2]` のため)。
+4. **更新要求の返値**: 失敗分のやり直しの待ち = `req=busy`、429 の待ち = `req=ignored`(設計に規定なし)。
+5. **`wx_ui` と `ui_wx_t` を残した**(`net` `busy` `clock_min` `upd_min` だけ。`app_main.c` が使うため。Phase 4 で `app_main` が `stk_ui` に切り替えたら、`ui_logic.h` の `ui_wx_t` と一緒に消す)。`app_main.c` / `ui_logic.*` / `wifi_sw.h` は変えていない。
+6. `stk_view_make` を `stk_core` に置いた(設計 §7.1)。`row.stale` / `stale_all` は「1,800 秒以上」(以前の `>` ではなく設計の「以上」)。
+
+### Phase 4 に残したこと
+
+`app_main.c` の `stk_ui` への切り替え(`view_from_wx` の削除)、`[ev] btn=tap src=...` の書式(`app_logfmt`)、`APP_STK_FAULT`(`wifi_sw.h` と要求のパス。U-6 用)、`APP_WX = 1` を既定に、`ui_logic` の縮小、旧 UI のファイルの削除(`tools/fb2png.py` `gen_ui_assets.py` の天気の名前もそこで)。`docs/design-uart.md` §13(`[wx]`)は旧のまま(設計 §7.5 が優先)。
+
+### 確かめていないこと
+
+RX 用 GCC でのビルド(`-Wstack-usage=100` を含む)。S12(ASan / UBSan)は libasan が無く SKIP。実機での実行(ESP32 の再起動後の再接続・SSL の分割受信の粒度など)。
 
 ## Phase 2(数値と解析): 実装したこと
 

@@ -1,9 +1,9 @@
 /* wifi_at.c - Wi-Fi(ESP32 AT)のハード側: SCI1、EN(P43)、受信の汲み上げ、取得の予定表の実行、UART コマンド、ログ
- * 仕様: docs/design.md §21.4・§22、docs/design-uart.md §12・§13。論理(状態機械・書式・予定表)は wifi_core.c / wx_core.c(標準C)。
+ * 仕様: docs/design.md §21.4(Wi-Fi)・§5・§7.5(株価の取得と [stk] ログ)、docs/design-uart.md §12。論理(状態機械・書式・予定表・表示値)は wifi_core.c / wx_core.c / stk_core.c(標準C)。
  * 2 つの使い方(どちらも APP_WIFI_ON = 0 の時は中身が消える。wifi_sw.h):
- *   - 専用モード(APP_WIFI_TEST = 1): wifi_test_main()。戻らない。LCD・タッチは動かさない。d n p = 接続の試験、x = 天気の取得(WIFI_RANGE_WX)。
+ *   - 専用モード(APP_WIFI_TEST = 1): wifi_test_main()。戻らない。LCD・タッチは動かさない。d n p = 接続の試験、x t y g z = 取得 1 回(WIFI_RANGE_WX。銘柄は ^N225)。
  *   - 製品(APP_WX_PRODUCT = APP_WX かつ APP_WIFI_TEST = 0): app_main のメインループから wx_init() / wx_poll()(ブロックしない)。
- *     接続(WIFI_RANGE_CONNECT)→ 取得(WIFI_RANGE_WX)を wx_sched_*(予定表)が決め、ここが実行して結果を返す。表示用の値は wx_ui()。
+ *     接続(WIFI_RANGE_CONNECT)→ 銘柄ごとの取得(WIFI_RANGE_WX を 3 回)を wx_sched_*(予定表)が決め、ここが実行して結果を返す。表示用の値は stk_ui()。
  * 応答の本文は、ここからも出さない(出すのは数値と名前だけ)。
  * 秘密: SSID・パスワードは wifi_secret.h(git 管理外)から wifi_core へポインタで渡すだけ。ここからはログ・[err] に出さない。
  *       wifi_secret.h を include するのはこのファイルだけ。無い時は製品は OFFLINE のまま動く(ESP32 に触れない)。 */
@@ -23,6 +23,7 @@
 #include "board_pins.h"
 #include "app_debug.h"
 #include "app_logfmt.h"
+#include "stk_core.h"
 #include "wifi_core.h"
 #include "wx_core.h"
 #include "wifi_at.h"
@@ -64,10 +65,6 @@
 static wifi_core_t s_core;
 static wx_clock_t  s_clk;                   /* ソフト時計(Date: + 9 時間。取得のたびに合わせ直す) */
 static uint32_t    s_wx_seen;               /* 報告した取得の結果の数(wifi_core_wx_seq) */
-static uint32_t    s_wx_ok_ms;              /* 最後の成功の時刻(age 用) */
-static int16_t     s_wx_temp;               /* 最後の成功の値(表示・s の状態行用) */
-static uint8_t     s_wx_kind;
-static uint8_t     s_wx_have;               /* 一度でも成功した */
 static sci_hdl_t   s_hdl;
 static bool        s_ok;                    /* SCI1 を開けた */
 static uint32_t    s_open_err;              /* R_SCI_Open の戻り値(gdb 用) */
@@ -177,15 +174,36 @@ static void wifi_open(void)
     s_ok = (e == SCI_SUCCESS);
 }
 
-/* ---- 取得の結果(wifi_core が出した結果を [wx] の行にし、ソフト時計を合わせる。数値だけ。本文は wifi_core が消している) ---- */
-static uint8_t  s_res_ok;                   /* 今の動きの中で出た取得の結果(製品の予定表へ返す) */
-static uint16_t s_res_http;
-#if APP_WX_PRODUCT
-static uint16_t s_upd_min;                  /* 最後の成功の時刻(JST の分。0xFFFF = なし) */
-#endif
+/* ---- 取得の結果(wifi_core が出した結果を [stk] の行にし、ソフト時計を合わせ、銘柄ごとの最後の成功を保持する。数値だけ。本文は wifi_core が消している) ---- */
+static uint8_t    s_res_ok;                 /* 今の動きの中で出た取得の結果(製品の予定表へ返す) */
+static uint16_t   s_res_http;
+static stk_slot_t s_slot[STK_ROWS];         /* 銘柄ごとの最後の成功(stk_view_make の入力) */
+static uint16_t   s_upd_min;                /* 最後の成功の時刻(JST の分。STK_NONE16 = なし) */
 #if APP_WIFI_TEST
-static uint8_t  s_wx_last_ok;
+static uint8_t    s_wx_last_ok;
 #endif
+
+/* 成功した結果を保持して、市場の状態(STK_MKT_*)を返す。時計は Date: で合わせた後(未同期なら STK_MKT_NONE) */
+static uint8_t slot_record(const wx_result_t *r, uint32_t now_ms)
+{
+    stk_calc_t c;
+    uint32_t   jst;
+    bool       synced = wx_clock_now(&s_clk, now_ms, &jst);
+    stk_slot_t *t;
+
+    if ((r->sym >= (uint8_t)WX_NSYM) || !stk_calc(r->price_x100, r->prev_x100, &c)) {
+        return (uint8_t)STK_MKT_NONE;
+    }
+    t             = &s_slot[r->sym];
+    t->have       = 1u;
+    t->mkt        = stk_market(stk_sym(r->sym), synced, jst, r->mtime, r->rs, r->re);
+    t->price_x100 = r->price_x100;
+    t->diff_x100  = c.diff_x100;
+    t->pct_bp     = c.pct_bp;
+    t->ok_ms      = now_ms;
+    s_upd_min     = wx_clock_min(&s_clk, now_ms);
+    return t->mkt;
+}
 
 static void wx_report(uint32_t now_ms, wx_src_t src)
 {
@@ -206,32 +224,56 @@ static void wx_report(uint32_t now_ms, wx_src_t src)
     s_wx_last_ok = r->ok;
 #endif
     if (r->ok != 0u) {
-        s_wx_have  = 1u;
-        s_wx_temp  = r->temp_x10;
-        s_wx_kind  = r->kind;
-        s_wx_ok_ms = now_ms;
-#if APP_WX_PRODUCT
-        s_upd_min  = wx_clock_min(&s_clk, now_ms);
-#endif
-        emit(wx_fmt_ok(s_line, sizeof(s_line), src, r));
+        emit(wx_fmt_ok(s_line, sizeof(s_line), src, r, slot_record(r, now_ms)));
     } else {
         emit(wx_fmt_fail(s_line, sizeof(s_line), src, r));
     }
 }
 
-/* [wx] 状態行(s の応答。製品は net / busy が変わった時も) */
-static void wx_state_line(uint32_t now_ms, uint8_t net, uint8_t busy)
+/* [stk] net= 行 */
+static void net_line(uint32_t now_ms, uint8_t net, uint8_t busy)
 {
-    wx_view_t v;
+    wx_netlog_t v;
+    uint8_t     i;
 
-    v.net      = net;
-    v.busy     = busy;
-    v.have     = s_wx_have;
-    v.kind     = s_wx_kind;
-    v.temp_x10 = s_wx_temp;
-    v.age_s    = (s_wx_have != 0u) ? (int32_t)((now_ms - s_wx_ok_ms) / 1000u) : -1;
-    v.synced   = wx_clock_now(&s_clk, now_ms, &v.jst_s) ? 1u : 0u;
-    emit(wx_fmt_state(s_line, sizeof(s_line), &v));
+    memset(&v, 0, sizeof v);
+    v.net     = net;
+    v.busy    = busy;
+    v.upd_min = s_upd_min;
+    v.synced  = wx_clock_now(&s_clk, now_ms, &v.jst_s) ? 1u : 0u;
+    for (i = 0u; i < (uint8_t)STK_ROWS; i++) {
+        if (s_slot[i].have != 0u) {
+            v.have_mask = (uint8_t)(v.have_mask | (1u << i));
+            if (((now_ms - s_slot[i].ok_ms) / 1000u) >= WX_STALE_S) {
+                v.stale_mask = (uint8_t)(v.stale_mask | (1u << i));
+            }
+        }
+    }
+    emit(wx_fmt_net(s_line, sizeof(s_line), &v));
+}
+
+/* [stk] sym= 行を 3 本(s の時だけ) */
+static void sym_lines(uint32_t now_ms)
+{
+    wx_symlog_t v;
+    uint8_t     i;
+
+    for (i = 0u; i < (uint8_t)STK_ROWS; i++) {
+        memset(&v, 0, sizeof v);
+        v.sym   = i;
+        v.have  = s_slot[i].have;
+        v.age_s = -1;
+        v.dir   = (uint8_t)STK_FLAT;
+        if (v.have != 0u) {
+            v.p100  = s_slot[i].price_x100;
+            v.d100  = s_slot[i].diff_x100;
+            v.bp    = s_slot[i].pct_bp;
+            v.dir   = (v.bp > 0) ? (uint8_t)STK_UP : ((v.bp < 0) ? (uint8_t)STK_DOWN : (uint8_t)STK_FLAT);
+            v.mkt   = s_slot[i].mkt;
+            v.age_s = (int32_t)((now_ms - s_slot[i].ok_ms) / 1000u);
+        }
+        emit(wx_fmt_sym(s_line, sizeof(s_line), &v));
+    }
 }
 
 #if APP_WX_PRODUCT
@@ -240,7 +282,8 @@ static wx_sched_t s_sched;                  /* 取得の予定表。gdb で s_sc
 static uint8_t    s_act;                    /* 実行中の動き(wx_act_t。NONE = なし) */
 static uint32_t   s_act_t0;
 static uint32_t   s_done_seen;              /* 報告した実行の完了の数(wifi_core_done_seq) */
-static uint8_t    s_last_net;               /* 状態行を最後に出した時の net / busy */
+static uint32_t   s_cycle_seen;             /* 報告した周期の終わりの数(wx_sched_cycle の n) */
+static uint8_t    s_last_net;               /* net 行を最後に出した時の net / busy */
 static uint8_t    s_last_busy;
 
 static void act_begin(wx_act_t act, uint32_t now_ms)
@@ -249,13 +292,16 @@ static void act_begin(wx_act_t act, uint32_t now_ms)
     s_act_t0   = now_ms;
     s_res_ok   = 0u;
     s_res_http = 0u;
+    if (act == WX_ACT_FETCH) {
+        wifi_core_set_symbol(&s_core, wx_sched_sym(&s_sched));      /* 1 回の取得 = 1 銘柄(銘柄ごとに TCP/SSL を開閉) */
+    }
     if (!wifi_core_start(&s_core, (act == WX_ACT_CONNECT) ? WIFI_RANGE_CONNECT : WIFI_RANGE_WX, now_ms)) {
         s_act = (uint8_t)WX_ACT_NONE;       /* 始められない(通常は起きない): 失敗として予定表へ返す */
         wx_sched_done(&s_sched, act, false, 0u, now_ms);
     }
 }
 
-/* wifi_core の実行が終わったら、結果を予定表へ返す。接続の失敗は [wx] res=fail err=8 を 1 行 */
+/* wifi_core の実行が終わったら、結果を予定表へ返す。接続の失敗は [stk] res=fail err=8 を 1 行 */
 static void act_end(uint32_t now_ms)
 {
     uint32_t    seq = wifi_core_done_seq(&s_core);
@@ -273,9 +319,8 @@ static void act_end(uint32_t now_ms)
         ok = wifi_core_pass(&s_core);
         if (!ok) {
             memset(&f, 0, sizeof f);
-            f.err  = 8u;
-            f.kind = (uint8_t)WX_KIND_UNKNOWN;
-            f.ms   = now_ms - s_act_t0;
+            f.err = 8u;
+            f.ms  = now_ms - s_act_t0;
             emit(wx_fmt_fail(s_line, sizeof(s_line), wx_sched_src(&s_sched), &f));
         }
         wx_sched_done(&s_sched, WX_ACT_CONNECT, ok, 0u, now_ms);
@@ -284,10 +329,26 @@ static void act_end(uint32_t now_ms)
     }
 }
 
+/* 周期が終わったら [stk] cycle= を 1 行 */
+static void cycle_report(void)
+{
+    const wx_cycle_t *c = wx_sched_cycle(&s_sched);
+
+    if (c->n != s_cycle_seen) {
+        s_cycle_seen = c->n;
+        emit(wx_fmt_cycle(s_line, sizeof(s_line), c->n, c->ok, c->fail, c->ms));
+    }
+}
+
 void wx_init(uint32_t now_ms)
 {
+    uint8_t i;
+
     wx_clock_init(&s_clk);
-    s_upd_min = 0xFFFFu;
+    s_upd_min = STK_NONE16;
+    for (i = 0u; i < (uint8_t)STK_ROWS; i++) {
+        memset(&s_slot[i], 0, sizeof s_slot[i]);
+    }
     wifi_core_init(&s_core, &k_ops, AT_SSID, AT_PASS);
     wifi_core_set_quiet(&s_core, true);
     if (AT_HAVE_SECRET != 0) {
@@ -314,6 +375,7 @@ void wx_poll(uint32_t now_ms)
     wifi_core_poll(&s_core, now_ms);
     wx_report(now_ms, wx_sched_src(&s_sched));
     act_end(now_ms);
+    cycle_report();
     act = wx_sched_poll(&s_sched, now_ms);
     if (act != WX_ACT_NONE) {
         act_begin(act, now_ms);
@@ -324,7 +386,7 @@ void wx_poll(uint32_t now_ms)
     if ((net != s_last_net) || (busy != s_last_busy)) {
         s_last_net  = net;
         s_last_busy = busy;
-        wx_log_state(now_ms);
+        net_line(now_ms, net, busy);
     }
 }
 
@@ -340,30 +402,25 @@ wx_req_t wx_request(wx_src_t src, uint32_t now_ms)
 
 void wx_log_state(uint32_t now_ms)
 {
-    wx_state_line(now_ms, (uint8_t)wx_sched_net(&s_sched), wx_sched_busy(&s_sched) ? 1u : 0u);
+    net_line(now_ms, (uint8_t)wx_sched_net(&s_sched), wx_sched_busy(&s_sched) ? 1u : 0u);
+    sym_lines(now_ms);
 }
 
+void stk_ui(stk_view_t *out, uint32_t now_ms)
+{
+    stk_view_make(out, (uint8_t)wx_sched_net(&s_sched), wx_sched_busy(&s_sched) ? 1u : 0u, wx_sched_failed_mask(&s_sched), s_slot,
+                  now_ms, wx_clock_min(&s_clk, now_ms), s_upd_min);
+}
+
+/* 暫定(Phase 4 で app_main が stk_ui に切り替えたら、ui_wx_t と一緒に消す): 旧 UI の枠(Wi-Fi の状態・時計・更新時刻)だけ */
 void wx_ui(ui_wx_t *u, uint32_t now_ms)
 {
-    wx_date_t d;
-    uint32_t  j;
-
     memset(u, 0, sizeof *u);
     u->net       = (uint8_t)wx_sched_net(&s_sched);                     /* wx_net_t = UI_NET_*(同じ並び) */
     u->busy      = wx_sched_busy(&s_sched) ? 1u : 0u;
-    u->have      = s_wx_have;
-    u->kind      = s_wx_kind;
-    u->temp_x10  = s_wx_temp;
-    u->stale     = ((s_wx_have != 0u) && (((now_ms - s_wx_ok_ms) / 1000u) > WX_STALE_S)) ? 1u : 0u;
     u->clk_ext   = 1u;
     u->upd_min   = s_upd_min;
     u->clock_min = wx_clock_min(&s_clk, now_ms);
-    if (wx_clock_now(&s_clk, now_ms, &j)) {
-        wx_date_fields(j, &d);
-        u->month = d.month;
-        u->day   = d.day;
-        u->wday  = d.wday;
-    }
 }
 #endif /* APP_WX_PRODUCT */
 
@@ -404,17 +461,17 @@ static void log_state(const char *tag, bool with_range)
     emit(applog_fmt_state(s_line, sizeof(s_line), tag, &s_st, with_range));
 }
 
-/* s の応答に足す状態行。一度も取得していなければ出さない(UW の判定に影響しない) */
+/* s の応答に足す [stk] の状態行(net と sym 3 本)。一度も取得していなければ出さない(UW の判定に影響しない) */
 static void ded_state_line(uint32_t now_ms)
 {
     if (s_wx_seen == 0u) {
         return;
     }
-    wx_state_line(now_ms, (s_wx_last_ok != 0u) ? (uint8_t)WX_NET_ON : (uint8_t)WX_NET_ERR,
-                  (wifi_core_state(&s_core) == WIFI_STATE_RUN) ? 1u : 0u);
+    net_line(now_ms, (s_wx_last_ok != 0u) ? (uint8_t)WX_NET_ON : (uint8_t)WX_NET_ERR, (wifi_core_state(&s_core) == WIFI_STATE_RUN) ? 1u : 0u);
+    sym_lines(now_ms);
 }
 
-/* ---- 受信コマンド(1 tick に1文字): d n p は実行、x t y g z は取得、s ? は応答。それ以外(+ - を含む)は無視 ---- */
+/* ---- 受信コマンド(1 tick に1文字): d n p は実行、x t y g z は取得(銘柄は ^N225 = 1)、s ? は応答。それ以外(+ - を含む)は無視 ---- */
 static void start(wifi_range_t range, uint32_t now)
 {
     if (s_ok) {
@@ -491,7 +548,10 @@ void wifi_test_main(void)
     uint32_t now;
 
     wifi_open();
+    wx_clock_init(&s_clk);
+    s_upd_min = STK_NONE16;
     wifi_core_init(&s_core, &k_ops, AT_SSID, AT_PASS);
+    wifi_core_set_symbol(&s_core, 1u);       /* t y g z x の要求は ^N225 に固定(Phase 0 と同じ) */
     emit(applog_fmt_init(s_line, sizeof(s_line), "wifi", s_ok, s_ok ? 0u : APP_ERR_WIFI_OPEN, s_ok ? 0u : s_open_err));
     if (!s_ok) {
         emit(applog_fmt_err(s_line, sizeof(s_line), APP_ERR_WIFI_OPEN, s_open_err));

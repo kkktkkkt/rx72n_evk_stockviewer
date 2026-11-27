@@ -1,5 +1,5 @@
 /* wifi_core.c - Wi-Fi(ESP32 AT)試作の論理部。標準Cのみ。FITのヘッダを include しない。
- * 仕様: docs/design.md §21.4、docs/design-uart.md §12。
+ * 仕様: docs/design.md §21.4(Wi-Fi)・§5(株価の取得)、docs/design-uart.md §12。
  * SSID・パスワードは wifi_build_cwjap の入力と、送信コマンドの組み立て中の c->cmd にだけ現れる(送信後・受信行の処理後に消す)。ログ関数は秘密を引数に取らない。
  * scan(AT+CWLAP)は、受けた各行の SSID を c->ssid と比べるだけ。AP の名前・MAC は保存せず、ログにも出さない(出すのは件数と自分の AP の ch / rssi / ecn、分類できなかった行の「形」)。 */
 #include <stdio.h>
@@ -23,7 +23,6 @@ enum { F_OK = 0x01, F_CONN = 0x02, F_PROMPT = 0x04, F_REQ = 0x08, F_SENT = 0x10,
 #define F_STEP_KEEP   ((uint8_t)(F_CLOSED | F_OVER | F_FIRST))
 #define IPD_MAX       (2048u)
 #define SSL_TCP_TIMEOUT_MS (20000u)                                    /* wx_tcp の SSL の時(ハンドシェイク。design.md §5.5.2 の 0-1)。TCP は k_def のまま */
-#define WX_SYM_PHASE0 (1u)                                             /* Phase 0 の Yahoo の要求は ^N225 に固定(Phase 3 で wifi_core_set_symbol に置き換える) */
 
 #define M(s)          (1u << (unsigned)(s))
 #define MASK_ALL      (0x7FFEu)                                         /* reset 〜 ping_dns(bit 1〜14) */
@@ -31,7 +30,9 @@ enum { F_OK = 0x01, F_CONN = 0x02, F_PROMPT = 0x04, F_REQ = 0x08, F_SENT = 0x10,
 #define MASK_AT       (M(WIFI_STEP_AT))
 #define MASK_CONNECT  (MASK_BOOT | M(WIFI_STEP_ECHO) | M(WIFI_STEP_MODE) | M(WIFI_STEP_QAP) | M(WIFI_STEP_JOIN) | M(WIFI_STEP_IP))
 #define MASK_WX       (M(WIFI_STEP_WX_MUX) | M(WIFI_STEP_WX_CLOSE) | M(WIFI_STEP_WX_TCP) | M(WIFI_STEP_WX_SEND) | M(WIFI_STEP_WX_RECV))
-#define MASK_WX_SSLCONF (MASK_WX | M(WIFI_STEP_WX_SSLCONF))            /* z(WX_TGT_YAHOO_SSL_NOAUTH) */
+#if APP_WIFI_TEST
+#define MASK_WX_SSLCONF (MASK_WX | M(WIFI_STEP_WX_SSLCONF))            /* 専用モードの z(WX_TGT_YAHOO_SSL_NOAUTH)だけ。製品の範囲には入れない(design.md §5.9) */
+#endif
 
 /* step の表(AT 1.1.3.0 と 2.x で書式が同じコマンドだけ。版では切り替えない)。コマンドを変える時はここだけ直す。cmd = NULL の step は個別に処理する */
 typedef struct {
@@ -649,6 +650,9 @@ static void log_out(wifi_core_t *c, size_t n)
 
 static void emit_step(wifi_core_t *c, wifi_res_t res, uint32_t ms, uint32_t code)
 {
+    if ((c->quiet != 0u) && ((res == WIFI_RES_START) || (res == WIFI_RES_OK))) {
+        return;                                                 /* 製品: 失敗・時間切れ・skip だけ出す(design.md §5.9。行キューの drop を避ける) */
+    }
     log_out(c, wifi_fmt_step(c->out, sizeof c->out, (wifi_step_t)c->step, res, c->try_n, ms, code));
 }
 
@@ -749,6 +753,7 @@ static void wx_publish(wifi_core_t *c, uint32_t now)
 {
     c->wx.ms       = now - c->wx_t0;
     c->wx.first_ms = c->wx_first_ms;
+    c->wx.sym      = c->sym;
     memset(c->wx_buf, 0, sizeof c->wx_buf);
     c->wx_len   = 0u;
     c->ipd_left = 0u;
@@ -759,7 +764,6 @@ static void wx_publish(wifi_core_t *c, uint32_t now)
 static void wx_fail(wifi_core_t *c, uint32_t now, uint8_t err)
 {
     memset(&c->wx, 0, sizeof c->wx);
-    c->wx.kind = (uint8_t)WX_KIND_UNKNOWN;
     c->wx.err  = err;
     wx_publish(c, now);
 }
@@ -771,7 +775,6 @@ static void wx_reboot(wifi_core_t *c, uint32_t now)
 
     emit_step(c, WIFI_RES_FAIL, now - c->t0, 9u);
     memset(&c->wx, 0, sizeof c->wx);
-    c->wx.kind = (uint8_t)WX_KIND_UNKNOWN;
     c->wx.err  = 9u;
     c->wx.len  = c->wx_len;
     wx_publish(c, now);
@@ -887,9 +890,7 @@ static void begin_try(wifi_core_t *c, uint32_t now)
     } else {
         /* 他の step は何もしない */
     }
-    if (c->quiet == 0u) {
-        emit_step(c, WIFI_RES_START, 0u, 0u);
-    }
+    emit_step(c, WIFI_RES_START, 0u, 0u);
     if (c->step == (uint8_t)WIFI_STEP_RESET) {
         c->ops->en(0);
         c->phase = PH_EN_LOW;
@@ -907,7 +908,7 @@ static void begin_try(wifi_core_t *c, uint32_t now)
         return;
     }
     if (c->step == (uint8_t)WIFI_STEP_WX_SEND) {                /* AT+CIPSEND=<要求の長さ> */
-        n = wx_build_request(c->cmd, sizeof c->cmd, (wx_target_t)c->target, WX_SYM_PHASE0);
+        n = wx_build_request_t(c->cmd, sizeof c->cmd, (wx_target_t)c->target, c->sym);
         if (n == 0u) {
             end_fail(c, now, WIFI_RES_FAIL, 100u);
             return;
@@ -964,6 +965,13 @@ void wifi_core_set_target(wifi_core_t *c, wx_target_t t)
     }
 }
 
+void wifi_core_set_symbol(wifi_core_t *c, uint8_t sym)
+{
+    if ((c->phase == PH_IDLE) && (sym < (uint8_t)WX_NSYM)) {
+        c->sym = sym;
+    }
+}
+
 bool wifi_core_start(wifi_core_t *c, wifi_range_t range, uint32_t now_ms)
 {
     if (c->phase != PH_IDLE) {
@@ -974,8 +982,14 @@ bool wifi_core_start(wifi_core_t *c, wifi_range_t range, uint32_t now_ms)
     case WIFI_RANGE_BOOT:    c->mask = MASK_BOOT;    c->step = (uint8_t)WIFI_STEP_RESET;  break;
     case WIFI_RANGE_AT:      c->mask = MASK_AT;      c->step = (uint8_t)WIFI_STEP_AT;     break;
     case WIFI_RANGE_CONNECT: c->mask = MASK_CONNECT; c->step = (uint8_t)WIFI_STEP_RESET;  break;
-    case WIFI_RANGE_WX:      c->mask = (c->target == (uint8_t)WX_TGT_YAHOO_SSL_NOAUTH) ? MASK_WX_SSLCONF : MASK_WX;
-                             c->step = (uint8_t)WIFI_STEP_WX_MUX; break;
+    case WIFI_RANGE_WX:
+#if APP_WIFI_TEST
+        c->mask = (c->target == (uint8_t)WX_TGT_YAHOO_SSL_NOAUTH) ? MASK_WX_SSLCONF : MASK_WX;
+#else
+        c->mask = MASK_WX;
+#endif
+        c->step = (uint8_t)WIFI_STEP_WX_MUX;
+        break;
     default:                 return false;
     }
     c->ping_ip  = 0u;
@@ -995,15 +1009,14 @@ static void recv_done(wifi_core_t *c, uint32_t now, int how)
     bool         ok = false;
 
     if ((c->wx_flags & F_OVER) != 0u) {
-        (void)wx_parse_weather(c->wx_buf, c->wx_len, r);     /* http と Date: だけ拾う(Phase 0 の g。応答が途切れているので、成功にはしない) */
+        (void)wx_parse_http(c->wx_buf, c->wx_len, r);        /* http と Date: だけ拾う。溢れた応答は、キーがそろっていても成功にしない(design.md §5.2 段 8) */
         r->ok  = 0u;
         r->err = 7u;
     } else if (c->wx_len == 0u) {
         memset(r, 0, sizeof *r);
-        r->kind = (uint8_t)WX_KIND_UNKNOWN;
-        r->err  = 3u;
+        r->err = 3u;
     } else {
-        ok = wx_parse_weather(c->wx_buf, c->wx_len, r);   /* Phase 3 で wx_parse_http(株価)へ切り替える */
+        ok = wx_parse_http(c->wx_buf, c->wx_len, r);
     }
     r->closed = (how == RECV_CLOSED) ? 1u : 0u;
     r->len    = c->wx_len;
@@ -1020,7 +1033,7 @@ static void recv_done(wifi_core_t *c, uint32_t now, int how)
 /* wx_send の > を受けた後の要求本体を送る準備(c->cmd に要求を入れて PH_SEND_DATA へ) */
 static void start_request(wifi_core_t *c, uint32_t now)
 {
-    size_t n = wx_build_request(c->cmd, sizeof c->cmd, (wx_target_t)c->target, WX_SYM_PHASE0);
+    size_t n = wx_build_request_t(c->cmd, sizeof c->cmd, (wx_target_t)c->target, c->sym);
 
     c->wx_flags |= F_REQ;
     if (n == 0u) {

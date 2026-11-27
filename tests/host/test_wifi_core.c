@@ -1,7 +1,7 @@
-/* test_wifi_core.c - src/app/wifi_core.c の単体試験(docs/design.md §21.7 の H-W1〜H-W7、H-W10〜H-W13、H-W8 の一部)。標準Cのみ。
- * 2026-11-25 追加: 天気の取得(WX step・データモード・範囲のビットマスク。design.md §22.12 の H-X5・H-X6)は H-X5-* として下のほうにある。
+/* test_wifi_core.c - src/app/wifi_core.c の単体試験(docs/design.md §21.7 の H-W1〜H-W7、H-W10〜H-W13、H-W8 の一部と、株価の取得 H-10・H-11 の一部)。標準Cのみ。
+ * 株価の取得(WX step・データモード・範囲のビットマスク・銘柄の選択・SSL のタイムアウト・ready = err 9)は H-X5-* / H-P3-* として下のほうにある(応答は Yahoo の chart API ふう)。
  * 2026-11-25 改訂: AT 1.1.3.0 向け(14 step。store を削除、qap / lapopt / scan を追加、ip は AT+CIFSR)。
- * -DAPP_WIFI_TEST=1 でコンパイルする(0 の時 wifi_core.c は空)。
+ * -DAPP_WIFI_TEST=1(専用モード。t y g z の接続先も試験する)と -DAPP_WX=1(製品。接続先は Yahoo の SSL だけ)の 2 通りでコンパイルする(両方 0 の時 wifi_core.c は空)。
  * 偽の ESP32(下の esp_recv)に、台本(rule)どおりの応答を、遅れ(ms)つきで返させ、10ms ごとに wifi_core_poll を回す。
  * SSID・パスワードは、明らかなダミー(目印)だけを使う。 */
 #include <stdint.h>
@@ -1720,33 +1720,44 @@ static void t_secret(void)
     CHECK(strstr(g_all, "de:ad") == NULL);                           /* MAC */
     CHECK(strstr(g_all, "CWLAP") == NULL);                           /* +CWLAP: の生の行 */
     CHECK(strstr(g_all, "BODY_SENTINEL") == NULL);                   /* 取得の応答の本文・ヘッダー(H-X6)。取得の全シナリオを通して */
-    CHECK(strstr(g_all, "latitude") == NULL);
-    CHECK(strstr(g_all, "generationtime") == NULL);
-    CHECK(strstr(g_all, "Date:") == NULL);
-    CHECK(strstr(g_all, "api.open-meteo") == NULL);                  /* 要求の中身・ホスト名もログに出ない */
+    CHECK(strstr(g_all, "regularMarket") == NULL);                   /* 応答の本文のキー(chart API) */
+    CHECK(strstr(g_all, "chartPreviousClose") == NULL);
+    CHECK(strstr(g_all, "\"chart\"") == NULL);
+    CHECK(strstr(g_all, "HTTP/1") == NULL);                          /* 状態行・ヘッダー */
+    CHECK(strstr(g_all, "Date:") == NULL); CHECK(strstr(g_all, "date:") == NULL);
+    CHECK(strstr(g_all, "query1") == NULL);                          /* 要求の中身・ホスト名もログに出ない */
+    CHECK(strstr(g_all, "yahoo") == NULL);
     CHECK(strstr(g_all, "GET /") == NULL);
+    CHECK(strstr(g_all, "+IPD") == NULL);
     CHECK(g_all_n > 2000u);                                          /* ログは実際に溜まっている */
 }
 
 /* ================================================================ H-X5 / H-X6 取得(WX step)・範囲 */
 
 #define BODY_MARK "BODY_SENTINEL"
-#define DEGC "\xC2\xB0" "C"
 
 static char   g_http[4000];              /* 偽サーバーの応答(ヘッダー + 本文) */
 static size_t g_http_n;
 static char   g_reply[7000];             /* AT+CIPSEND の後に ESP が返す全部(Recv … SEND OK + +IPD + CLOSED) */
 static size_t g_reply_n;
 
-/* 応答を作る。extra = Content-Type の後に足すヘッダーの行(NULL 可。\r\n で終わる)、status = 状態行 */
-static void mk_http(const char *status, const char *extra, const char *temp, const char *code)
+/* Yahoo の chart API ふうの応答(design.md §2.1 F2・F4)。price / prev = 値の文字列(そのまま埋める)。close 配列は [prev, price](直前の足 = prev)。
+ * status = 状態行、extra = Content-Type の後に足すヘッダーの行(NULL 可。\r\n で終わる)。目印 BODY_MARK をヘッダーと本文の両方に入れる(消えているかの検査用) */
+static void mk_http(const char *status, const char *extra, const char *price, const char *prev)
 {
     g_http_n = (size_t)snprintf(g_http, sizeof g_http,
-        "%s\r\nDate: Wed, 25 Nov 2026 04:24:13 GMT\r\nContent-Type: application/json; charset=utf-8\r\n%sX-Body: " BODY_MARK "\r\nConnection: close\r\n\r\n"
-        "{\"latitude\":35.7,\"longitude\":139.75,\"generationtime_ms\":0.04,\"utc_offset_seconds\":32400,\"timezone\":\"Asia/Tokyo\","
-        "\"current_units\":{\"time\":\"iso8601\",\"interval\":\"seconds\",\"temperature_2m\":\"" DEGC "\",\"weather_code\":\"wmo code\"},"
-        "\"current\":{\"time\":\"2026-11-25T13:30\",\"interval\":900,\"temperature_2m\":%s,\"weather_code\":%s},\"pad\":\"" BODY_MARK "\"}",
-        status, (extra != NULL) ? extra : "", temp, code);
+        "%s\r\ndate: Wed, 25 Nov 2026 04:24:13 GMT\r\nContent-Type: application/json;charset=utf-8\r\n%sX-Body: " BODY_MARK "\r\nConnection: close\r\n\r\n"
+        "{\"chart\":{\"result\":[{\"meta\":{\"currency\":\"JPY\",\"symbol\":\"6723.T\",\"exchangeName\":\"JPX\",\"instrumentType\":\"EQUITY\",\"firstTradeDate\":-2230000000,"
+        "\"regularMarketTime\":1795579752,\"gmtoffset\":32400,\"timezone\":\"JST\",\"exchangeTimezoneName\":\"Asia/Tokyo\",\"regularMarketPrice\":%s,"
+        "\"fiftyTwoWeekHigh\":2999.0,\"fiftyTwoWeekLow\":1500.5,\"regularMarketDayHigh\":2450.0,\"regularMarketDayLow\":2400.0,\"regularMarketVolume\":1234567,"
+        "\"longName\":\"" BODY_MARK "\",\"shortName\":\"" BODY_MARK "\",\"chartPreviousClose\":%s,\"priceHint\":1,"
+        "\"currentTradingPeriod\":{\"pre\":{\"timezone\":\"JST\",\"start\":1795536000,\"end\":1795564800,\"gmtoffset\":32400},"
+        "\"regular\":{\"timezone\":\"JST\",\"start\":1795564800,\"end\":1795588200,\"gmtoffset\":32400},"
+        "\"post\":{\"timezone\":\"JST\",\"start\":1795588200,\"end\":1795600800,\"gmtoffset\":32400}},"
+        "\"dataGranularity\":\"1d\",\"range\":\"2d\",\"validRanges\":[\"1d\",\"5d\",\"1mo\",\"3mo\",\"6mo\",\"1y\",\"2y\",\"5y\",\"10y\",\"ytd\",\"max\"]},"
+        "\"timestamp\":[1795479000,1795579752],\"indicators\":{\"quote\":[{\"open\":[2380.0,2400.0],\"low\":[2370.0,2400.0],\"high\":[2440.0,2450.0],"
+        "\"volume\":[5000000,1234567],\"close\":[%s,%s]}]}}],\"error\":null}}",
+        status, (extra != NULL) ? extra : "", price, prev, prev, price);
 }
 
 static void rp_add(const char *s, size_t n)
@@ -1771,7 +1782,7 @@ static void rp_start(void)
 {
     g_reply_n = 0u;
     g_reply[0] = '\0';
-    RP_LIT("\r\nRecv 190 bytes\r\n\r\nSEND OK\r\n\r\n");
+    RP_LIT("\r\nRecv 144 bytes\r\n\r\nSEND OK\r\n\r\n");
 }
 
 /* 通常の返事: Recv … SEND OK の後に +IPD(split バイト目で 2 つに分ける。0 = 分けない)、CLOSED。closed = 0 なら CLOSED を出さない */
@@ -1794,8 +1805,8 @@ static void wx_rules(uint32_t get_delay)
 {
     rule("AT+CIPMUX=0",   0, 20, "OK\r\n");
     rule("AT+CIPCLOSE",   0, 20, "ERROR\r\n");
-    rule("AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80", 0, 300, "CONNECT\r\n\r\nOK\r\n");
-    rule("AT+CIPSEND=190", 0, 20, "\r\nOK\r\n> ");
+    rule("AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443", 0, 300, "CONNECT\r\n\r\nOK\r\n");
+    rule("AT+CIPSEND=144", 0, 20, "\r\nOK\r\n> ");
     rule("GET *", 0, get_delay, g_reply);
 }
 
@@ -1807,7 +1818,7 @@ static int wx_step_ok(const char *name)
     return count_with(k);
 }
 
-/* 正常終了の共通の確認(天気 12.7℃・WMO 0・晴れ・obs 1330・JST 13:24:13) */
+/* 正常終了の共通の確認(6723.T = 銘柄 0: 現在値 2,433.0・前日の終値 2,378.0・JST 13:24:13) */
 static void expect_ok(unsigned closed)
 {
     const wx_result_t *r = wifi_core_wx(&g_c);
@@ -1815,45 +1826,53 @@ static void expect_ok(unsigned closed)
 
     CHECK(last_is("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"));
     CHECK(wifi_core_pass(&g_c)); CHECK_EQ(wifi_core_fail_stage(&g_c), WIFI_STEP_NONE);
-    CHECK_EQ(wx_step_ok("wx_mux"), 1); CHECK_EQ(wx_step_ok("wx_close"), 1); CHECK_EQ(wx_step_ok("wx_tcp"), 1);
-    CHECK_EQ(wx_step_ok("wx_send"), 1); CHECK_EQ(wx_step_ok("wx_recv"), 1);
-    CHECK_EQ(r->ok, 1); CHECK_EQ(r->err, 0); CHECK_EQ(r->http, 200); CHECK_EQ(r->temp_x10, 127); CHECK_EQ(r->wmo, 0); CHECK_EQ(r->kind, WX_KIND_SUN);
-    CHECK_EQ(r->obs, 1330); CHECK_EQ(r->have_date, 1); CHECK_EQ(r->closed, closed);
+    CHECK_EQ(r->ok, 1); CHECK_EQ(r->err, 0); CHECK_EQ(r->http, 200);
+    CHECK_EQ(r->sym, 0); CHECK_EQ(r->price_x100, 243300); CHECK_EQ(r->prev_x100, 237800); CHECK_EQ(r->has_bar_prev, 1); CHECK_EQ(r->cur, WX_CUR_JPY);
+    CHECK_EQ(r->mtime, 1795579752u); CHECK_EQ(r->rs, 1795564800u); CHECK_EQ(r->re, 1795588200u);
+    CHECK_EQ(r->have_date, 1); CHECK_EQ(r->closed, closed);
     wx_date_fields(r->jst_s, &d);
     CHECK_EQ(d.hour, 13); CHECK_EQ(d.min, 24); CHECK_EQ(d.sec, 13);
     CHECK(r->ms > 300u); CHECK(r->ms < 20000u);
     CHECK(r->first_ms > 1000u);                                      /* 最初のデータを受けた時刻(world の開始 1000 より後) */
-    CHECK(!core_has(BODY_MARK)); CHECK(!core_has("latitude"));      /* 本文は残らない */
+    CHECK(!core_has(BODY_MARK)); CHECK(!core_has("regularMarket")); /* 本文は残らない */
     CHECK(!core_has_secret());
     CHECK_EQ(log_has_secret(), 0);
     CHECK_EQ(count_with(BODY_MARK), 0);
 }
 
+/* 5 step が全部 ok(quiet でない時) */
+static void expect_5steps(void)
+{
+    CHECK_EQ(wx_step_ok("wx_mux"), 1); CHECK_EQ(wx_step_ok("wx_close"), 1); CHECK_EQ(wx_step_ok("wx_tcp"), 1);
+    CHECK_EQ(wx_step_ok("wx_send"), 1); CHECK_EQ(wx_step_ok("wx_recv"), 1);
+}
+
 static void t_wx_normal(void)
 {
-    char req[WX_REQ_LEN + 1u];
+    char req[200];
 
-    TEST("H-X5-1 取得: 正常(5 step。要求は 190 バイトで CRLF を足さない。> は改行なし)");
+    TEST("H-X5-1 取得: 正常(5 step。要求は 144 バイトで CRLF を足さない。> は改行なし。既定の接続先は Yahoo の SSL・銘柄 0)");
     begin(SSID_MARK, PASS_MARK);
     wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     mk_reply(0u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
+    expect_5steps();
     CHECK_EQ(count_with("res=start"), 5);
     CHECK_EQ(g_nsend, 5);
     CHECK(strcmp(g_sent[0], "AT+CIPMUX=0\r\n") == 0);
     CHECK(strcmp(g_sent[1], "AT+CIPCLOSE\r\n") == 0);
-    CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") == 0);
-    CHECK(strcmp(g_sent[3], "AT+CIPSEND=190\r\n") == 0);
-    CHECK_EQ(wx_build_request(req, sizeof req, WX_TGT_METEO, 0), 190u);
+    CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") == 0);
+    CHECK(strcmp(g_sent[3], "AT+CIPSEND=144\r\n") == 0);
+    CHECK_EQ(wx_build_request(req, sizeof req, 0u), 144u);
     CHECK(strcmp(g_sent[4], req) == 0);                              /* 要求本体そのまま(\r\n を足さない。末尾は \r\n\r\n) */
-    CHECK_EQ(strlen(g_sent[4]), 190u);
+    CHECK_EQ(strlen(g_sent[4]), 144u);
     CHECK_EQ(count_with("step=reset"), 0); CHECK_EQ(count_with("step=join"), 0);       /* 範囲外の step は動かない */
     CHECK_EQ(g_en_n, 0);                                                                /* EN に触れない */
     CHECK_EQ(wifi_core_wx_seq(&g_c), 1u); CHECK_EQ(wifi_core_done_seq(&g_c), 1u);
-    CHECK(first_with("[wifiv] key=oth val=") >= 0);                  /* 想定外の行(Recv 190 bytes など)は形だけ記録する */
-    CHECK(first_with("[wifiv] key=oth val=aaaa_999_aaaaa\r\n") >= 0);
+    CHECK(first_with("[wifiv] key=oth val=") >= 0);                  /* 想定外の行(Recv 144 bytes など)は形だけ記録する */
+    CHECK(first_with("[wifiv] key=oth val=aaaa_999_aaaaa\r\n") >= 0);   /* "Recv 144 bytes" の形 */
     CHECK_EQ(count_with("res=fail"), 0); CHECK_EQ(count_with("res=timeout"), 0);
 
     TEST("H-X5-1b 2 回続けて取得(結果が置き換わり、seq が増える)");
@@ -1861,11 +1880,11 @@ static void t_wx_normal(void)
         uint32_t first1 = wifi_core_wx(&g_c)->first_ms;
 
         g_nsend = 0; g_npend = 0;
-        mk_http("HTTP/1.0 200 OK", NULL, "-3.4", "61");
+        mk_http("HTTP/1.0 200 OK", NULL, "57953.84", "57499.16");
         mk_reply(0u, NULL, 1);
         run(WIFI_RANGE_WX, 30000u);
         CHECK_EQ(wifi_core_wx_seq(&g_c), 2u); CHECK_EQ(wifi_core_done_seq(&g_c), 2u);
-        CHECK_EQ(wifi_core_wx(&g_c)->temp_x10, -34); CHECK_EQ(wifi_core_wx(&g_c)->kind, WX_KIND_RAIN);
+        CHECK_EQ(wifi_core_wx(&g_c)->price_x100, 5795384); CHECK_EQ(wifi_core_wx(&g_c)->prev_x100, 5749916);
         CHECK(wifi_core_wx(&g_c)->first_ms > first1);
         CHECK_EQ(g_nsend, 5);
     }
@@ -1879,21 +1898,21 @@ static void t_wx_split(void)
     TEST("H-X5-2 +IPD が複数に分かれる(100 + 残り など)・1 tick に 1 バイト(見出しも本文も tick をまたぐ)・3 つに分ける");
     for (i = 0u; i < (sizeof SPL / sizeof SPL[0]); i++) {
         begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-        mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+        mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
         mk_reply(SPL[i], NULL, 1);
         run(WIFI_RANGE_WX, 30000u);
         expect_ok(1u);
     }
     begin(SSID_MARK, PASS_MARK);
-    g_rate = 1u;                                                      /* 以降の返事は 1 tick(10ms)に 1 バイト。629 バイトで約 6.3 秒(wx_recv の 10 秒以内) */
+    g_rate = 2u;                                                      /* 以降の返事は 1 tick(10ms)に 2 バイト。約 1,500 バイトで約 7.5 秒(wx_recv の 15 秒以内) */
     wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     mk_reply(100u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
-    CHECK(wifi_core_wx(&g_c)->ms > 6000u);                           /* 1 バイトずつ流れた証拠 */
+    CHECK(wifi_core_wx(&g_c)->ms > 6000u);                           /* 少しずつ流れた証拠 */
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     rp_start();
     rp_ipd(g_http, 50u, NULL); rp_ipd(g_http + 50, 300u, NULL); rp_ipd(g_http + 350, g_http_n - 350u, NULL);
     RP_LIT("CLOSED\r\n");
@@ -1905,18 +1924,18 @@ static void t_wx_order(void)
 {
     TEST("H-X5-3 SEND OK より先に +IPD / CLOSED が来る");
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     g_reply_n = 0u; g_reply[0] = '\0';
-    RP_LIT("\r\nRecv 190 bytes\r\n\r\n");
+    RP_LIT("\r\nRecv 144 bytes\r\n\r\n");
     rp_ipd(g_http, g_http_n, NULL);
     RP_LIT("\r\nSEND OK\r\n");                                       /* +IPD が先 */
     RP_LIT("CLOSED\r\n");
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     g_reply_n = 0u; g_reply[0] = '\0';
-    RP_LIT("\r\nRecv 190 bytes\r\n\r\n");
+    RP_LIT("\r\nRecv 144 bytes\r\n\r\n");
     rp_ipd(g_http, g_http_n, NULL);
     RP_LIT("CLOSED\r\n");                                            /* CLOSED まで先。SEND OK は最後 */
     RP_LIT("\r\nSEND OK\r\n");
@@ -1928,27 +1947,27 @@ static void t_wx_data_mode(void)
 {
     TEST("H-X5-4 データの中の OK / CLOSED / +IPD, / SEND OK / > を解釈しない(データモード)");
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", "X-Pad: a\r\nOK\r\nCLOSED\r\n0,CLOSED\r\n+IPD,5:xyzab\r\nSEND OK\r\nERROR\r\n>\r\nFAIL\r\nb\r\n", "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", "X-Pad: a\r\nOK\r\nCLOSED\r\n0,CLOSED\r\n+IPD,5:xyzab\r\nSEND OK\r\nERROR\r\n>\r\nFAIL\r\nb\r\n", "2433.0", "2378.0");
     mk_reply(0u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
     CHECK(g_http_n > 400u);
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);                       /* 境目をデータの中の CLOSED の途中にする */
-    mk_http("HTTP/1.0 200 OK", "X-Pad: a\r\nOK\r\nCLOSED\r\n+IPD,5:xyzab\r\nSEND OK\r\nb\r\n", "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", "X-Pad: a\r\nOK\r\nCLOSED\r\n+IPD,5:xyzab\r\nSEND OK\r\nb\r\n", "2433.0", "2378.0");
     mk_reply((size_t)(strstr(g_http, "CLOSED") - g_http) + 3u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
 
     TEST("H-X5-5 +IPD,<n>,<ip>,<port>:(AT+CIPDINFO=1 の形)");
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     mk_reply(300u, ",203.0.113.7,80", 1);
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
 
     TEST("H-X5-5b 壊れた +IPD の行(数字なし・0・大きすぎる)は捨て、次の正しい +IPD は読む");
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     rp_start();
     RP_LIT("+IPD,:junk\r\n+IPD,0:junk\r\n+IPD,9999:junk\r\n+IPD,x:junk\r\n");
     rp_ipd(g_http, g_http_n, NULL);
@@ -1985,12 +2004,12 @@ static void t_wx_tcp_fail(void)
     run(WIFI_RANGE_WX, 30000u);
     CHECK(last_is("[wifi] result=fail stage=wx_tcp ping_ip=0 ping_dns=0\r\n")); CHECK_EQ(count_with("step=wx_tcp res=timeout"), 1);
     begin(SSID_MARK, PASS_MARK);                                                   /* OK が先、<n>,CONNECT が後 */
-    wx_rules(100u); mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0"); mk_reply(0u, NULL, 1);
+    wx_rules(100u); mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1);
     g_rules[2].reply = "OK\r\n0,CONNECT\r\n";
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
     begin(SSID_MARK, PASS_MARK);                                                   /* wx_mux が ERROR・wx_close が OK でも先へ進む */
-    wx_rules(100u); mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0"); mk_reply(0u, NULL, 1);
+    wx_rules(100u); mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1);
     g_rules[0].reply = "ERROR\r\n"; g_rules[1].reply = "link is not valid\r\n\r\nOK\r\n";
     run(WIFI_RANGE_WX, 30000u);
     CHECK(last_is("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"));
@@ -2020,7 +2039,7 @@ static void t_wx_send_fail(void)
     CHECK(last_is("[wifi] result=fail stage=wx_send ping_ip=0 ping_dns=0\r\n")); CHECK_EQ(g_nsend, 4);
 
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    g_rules[4].reply = "\r\nRecv 190 bytes\r\n\r\nSEND FAIL\r\n";
+    g_rules[4].reply = "\r\nRecv 144 bytes\r\n\r\nSEND FAIL\r\n";
     run(WIFI_RANGE_WX, 30000u);
     CHECK(last_is("[wifi] result=fail stage=wx_send ping_ip=0 ping_dns=0\r\n"));
     CHECK_EQ(wifi_core_wx(&g_c)->err, 2); CHECK_EQ(g_nsend, 5);
@@ -2032,28 +2051,28 @@ static void t_wx_send_fail(void)
     CHECK_EQ(count_with("step=wx_send res=fail"), 1); CHECK_EQ(count_with("step=wx_send res=timeout"), 0);      /* すぐ失敗(5 秒待たない) */
 
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);                      /* 要求を送った後、SEND OK が来ない */
-    g_rules[4].reply = "\r\nRecv 190 bytes\r\n";
+    g_rules[4].reply = "\r\nRecv 144 bytes\r\n";
     run(WIFI_RANGE_WX, 30000u);
     CHECK(last_is("[wifi] result=fail stage=wx_send ping_ip=0 ping_dns=0\r\n")); CHECK_EQ(count_with("step=wx_send res=timeout"), 1);
 
     TEST("H-X5-7b 要求本体・CIPSEND の送信が BUSY の間は同じものを渡し直し、1 回だけ送る(op_send の約束)・送信 FAIL");
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0"); mk_reply(0u, NULL, 1);
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1);
     g_busy_idx = 4; g_busy_n = 5;                                       /* 5 つ目の送信(要求本体)を 5 回 BUSY */
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
     CHECK_EQ(g_nsend, 5); CHECK_EQ(g_busy_n, 0);
-    CHECK_EQ(strlen(g_sent[4]), 190u);
+    CHECK_EQ(strlen(g_sent[4]), 144u);
 
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0"); mk_reply(0u, NULL, 1);
-    g_busy_idx = 3; g_busy_n = 3;                                       /* AT+CIPSEND=190 も BUSY で待てる */
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1);
+    g_busy_idx = 3; g_busy_n = 3;                                       /* AT+CIPSEND=144 も BUSY で待てる */
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
     CHECK_EQ(g_nsend, 5);
 
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);                        /* 要求本体の送信が FAIL */
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0"); mk_reply(0u, NULL, 1);
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1);
     {
         int guard = 0;
 
@@ -2071,7 +2090,7 @@ static void t_wx_recv(void)
 {
     TEST("H-X5-8 CLOSED が来ずにタイムアウト + 解析成功 = 成功(closed=0)");
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0"); mk_reply(0u, NULL, 0);
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 0);
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(0u);
     CHECK(wifi_core_wx(&g_c)->ms >= 15000u);                         /* wx_recv のタイムアウト 15 秒を待った(design.md §5.5.2 の 0-4) */
@@ -2085,7 +2104,7 @@ static void t_wx_recv(void)
 
         for (i = 0u; i < 3u; i++) {
             begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-            mk_http(ST[i], NULL, "12.7", "0"); mk_reply(0u, NULL, 1);
+            mk_http(ST[i], NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1);
             run(WIFI_RANGE_WX, 30000u);
             CHECK(last_is("[wifi] result=fail stage=wx_recv ping_ip=0 ping_dns=0\r\n"));
             CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 4); CHECK_EQ(wifi_core_wx(&g_c)->http, H[i]);
@@ -2097,13 +2116,13 @@ static void t_wx_recv(void)
         }
     }
 
-    TEST("H-X5-10 キー・値の異常(err=5 / 6)と、応答が無い(err=3)・途中までしか来ない・受信中の ERROR");
+    TEST("H-X5-10 キー・値の異常(err=5 / 6)と、応答が無い(err=3)・途中で CLOSED / 途中までしか来ない(err=3。成功にしない)・受信中の ERROR");
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "99.9", "0"); mk_reply(0u, NULL, 1);
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "0.0"); mk_reply(0u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
     CHECK_EQ(wifi_core_wx(&g_c)->err, 6); CHECK_EQ(wifi_core_wx(&g_c)->ok, 0);
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "null", "0"); mk_reply(0u, NULL, 1);
+    mk_http("HTTP/1.0 200 OK", NULL, "null", "2378.0"); mk_reply(0u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
     CHECK_EQ(wifi_core_wx(&g_c)->err, 5);
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);                       /* CLOSED だけ: データなし */
@@ -2117,12 +2136,28 @@ static void t_wx_recv(void)
     run(WIFI_RANGE_WX, 30000u);
     CHECK_EQ(wifi_core_wx(&g_c)->err, 3); CHECK_EQ(wifi_core_wx(&g_c)->closed, 0);
     CHECK_EQ(count_with("step=wx_recv res=timeout"), 1);
-    begin(SSID_MARK, PASS_MARK); wx_rules(100u);                       /* ヘッダーの途中までで止まる */
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    begin(SSID_MARK, PASS_MARK); wx_rules(100u);                       /* ヘッダーの途中までで止まる(空行が無い = 途切れ。Date: は拾う) */
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     rp_start();
-    rp_ipd(g_http, 200u, NULL);
+    rp_ipd(g_http, 100u, NULL);
     run(WIFI_RANGE_WX, 30000u);
-    CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 5); CHECK_EQ(wifi_core_wx(&g_c)->have_date, 1);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 3); CHECK_EQ(wifi_core_wx(&g_c)->have_date, 1); CHECK_EQ(wifi_core_wx(&g_c)->http, 200);
+    begin(SSID_MARK, PASS_MARK); wx_rules(100u);                       /* 本文の途中(close 配列の手前)で CLOSED: 閉じた JSON でない = 途切れ。成功にしない(前日比が誤る) */
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
+    rp_start();
+    rp_ipd(g_http, g_http_n - 40u, NULL);
+    RP_LIT("CLOSED\r\n");
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 3); CHECK_EQ(wifi_core_wx(&g_c)->closed, 1); CHECK_EQ(wifi_core_wx(&g_c)->http, 200);
+    CHECK_EQ(wifi_core_wx(&g_c)->len, g_http_n - 40u);
+    CHECK(last_is("[wifi] result=fail stage=wx_recv ping_ip=0 ping_dns=0\r\n"));
+    begin(SSID_MARK, PASS_MARK); wx_rules(100u);                       /* 全体が届き、最後の 1 バイトだけ足りない(} が無い)+ CLOSED */
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
+    rp_start();
+    rp_ipd(g_http, g_http_n - 1u, NULL);
+    RP_LIT("CLOSED\r\n");
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 3);
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);                       /* 受信中に ERROR */
     rp_start();
     RP_LIT("ERROR\r\n");
@@ -2139,21 +2174,22 @@ static void t_wx_overflow(void)
     CHECK_EQ(WX_BUF_SIZE, 3072u);
     TEST("H-X5-11 バッファ(3072 バイト)ちょうどは成功、1 バイト超えたら err=7(キーが先頭にあっても失敗。http は残る)・巨大な +IPD");
     memset(pad, 'a', sizeof pad - 1u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     CHECK(g_http_n < WX_BUF_SIZE);
     need = WX_BUF_SIZE - g_http_n;                                     /* ヘッダーの X-Pad(7 + N + 2 バイト)で 3072 にする */
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
     (void)snprintf(extra, sizeof extra, "X-Pad: %.*s\r\n", (int)(need - 9u), pad);
-    mk_http("HTTP/1.0 200 OK", extra, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", extra, "2433.0", "2378.0");
     CHECK_EQ(g_http_n, WX_BUF_SIZE);
     mk_reply(1500u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
     CHECK_EQ(wifi_core_wx(&g_c)->len, WX_BUF_SIZE);
+    CHECK_EQ(wifi_core_wx(&g_c)->price_x100, 243300);
 
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
     (void)snprintf(extra, sizeof extra, "X-Pad: %.*s\r\n", (int)(need - 8u), pad);
-    mk_http("HTTP/1.0 200 OK", extra, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", extra, "2433.0", "2378.0");
     CHECK_EQ(g_http_n, WX_BUF_SIZE + 1u);
     mk_reply(1500u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
@@ -2177,6 +2213,7 @@ static void t_wx_overflow(void)
     CHECK_EQ(wifi_core_wx(&g_c)->closed, 1);                            /* 超過のデータを捨てても、その後の CLOSED は読める */
 }
 
+#if APP_WIFI_TEST   /* 専用モードの t y g z(製品には無い接続先) */
 /* ---- Phase 0: TLS の検証(design.md §5.5.2): 接続先の選択・SSL のタイムアウト・z の sslconf・ready = err 9・len ---- */
 
 /* Yahoo / Google ふうの応答(天気のキーが無い)。total バイトになるまで本文を埋める。本文の目印は BODY_MARK(消えているかの検査用) */
@@ -2192,14 +2229,14 @@ static void mk_http_plain(const char *status, size_t total)
     g_http_n = total;
 }
 
-/* 取得の台本(接続先 t)。cipstart = AT+CIPSTART の全文(\r\n なし)、conn_delay = CONNECT までの ms。CIPSEND の長さは wx_build_request から作る。
+/* 取得の台本(接続先 t)。cipstart = AT+CIPSTART の全文(\r\n なし)、conn_delay = CONNECT までの ms。CIPSEND の長さは wx_build_request_t(g_c.sym の銘柄)から作る。
  * g_rules の順: 0 MUX、1 CLOSE、2 SSLCCONF、3 CIPSTART、4 CIPSEND、5 GET */
 static void tgt_rules(wx_target_t t, const char *cipstart, uint32_t conn_delay, uint32_t get_delay)
 {
     static char snd[40];
     char        req[300];
 
-    CHECK(wx_build_request(req, sizeof req, t, 1u) > 0u);
+    CHECK(wx_build_request_t(req, sizeof req, t, g_c.sym) > 0u);
     (void)snprintf(snd, sizeof snd, "AT+CIPSEND=%u", (unsigned)strlen(req));
     rule("AT+CIPMUX=0",   0, 20, "OK\r\n");
     rule("AT+CIPCLOSE",   0, 20, "ERROR\r\n");
@@ -2217,6 +2254,7 @@ static void t_wx_target(void)
 {
     TEST("P0-1 y(Yahoo SSL): CIPSTART=SSL 443・CIPSEND=145・要求は ^N225 の chart・http=200 err=5(天気のキーが無い)・len = 受信バイト数・本文は消える");
     begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 1u);                                    /* t y g z の要求は ^N225(Phase 0 と同じ) */
     wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
     tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 3000u, 300u);
     mk_http_plain("HTTP/1.0 200 OK", 1840u);
@@ -2238,6 +2276,7 @@ static void t_wx_target(void)
 
     TEST("P0-2 t(Yahoo 平文): CIPSTART=TCP 80・301 → err=4 http=301・TCP の接続は 10 秒で時間切れ");
     begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 1u);                                    /* t y g z の要求は ^N225(Phase 0 と同じ) */
     wifi_core_set_target(&g_c, WX_TGT_YAHOO_TCP);
     tgt_rules(WX_TGT_YAHOO_TCP, CIPSTART_YTCP, 300u, 300u);
     mk_http_plain("HTTP/1.1 301 Moved Permanently", 400u);
@@ -2247,6 +2286,7 @@ static void t_wx_target(void)
     CHECK(strncmp(g_sent[4], "GET /v8/finance/chart/%5EN225?range=2d&interval=1d HTTP/1.0\r\n", 61u) == 0);
     CHECK_EQ(wifi_core_wx(&g_c)->err, 4); CHECK_EQ(wifi_core_wx(&g_c)->http, 301u); CHECK_EQ(wifi_core_wx(&g_c)->len, 400u);
     begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 1u);                                    /* t y g z の要求は ^N225(Phase 0 と同じ) */
     wifi_core_set_target(&g_c, WX_TGT_YAHOO_TCP);
     tgt_rules(WX_TGT_YAHOO_TCP, CIPSTART_YTCP, 12000u, 300u);
     run(WIFI_RANGE_WX, 60000u);
@@ -2255,6 +2295,7 @@ static void t_wx_target(void)
 
     TEST("P0-3 SSL の接続は 20 秒まで待つ(19 秒で CONNECT は成功、25 秒は時間切れ err=1)");
     begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 1u);                                    /* t y g z の要求は ^N225(Phase 0 と同じ) */
     wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
     tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 19000u, 300u);
     mk_http_plain("HTTP/1.0 200 OK", 1800u);
@@ -2262,6 +2303,7 @@ static void t_wx_target(void)
     run(WIFI_RANGE_WX, 60000u);
     CHECK_EQ(wx_step_ok("wx_tcp"), 1); CHECK_EQ(wifi_core_wx(&g_c)->http, 200u);
     begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 1u);                                    /* t y g z の要求は ^N225(Phase 0 と同じ) */
     wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
     tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 25000u, 300u);
     run(WIFI_RANGE_WX, 60000u);
@@ -2271,6 +2313,7 @@ static void t_wx_target(void)
 
     TEST("P0-4 z: wx_close の後に AT+CIPSSLCCONF=0,0,0(ERROR でも先へ)→ y と同じ。時間切れでも先へ。y に戻すと走らない");
     begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 1u);                                    /* t y g z の要求は ^N225(Phase 0 と同じ) */
     wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL_NOAUTH);
     tgt_rules(WX_TGT_YAHOO_SSL_NOAUTH, CIPSTART_YSSL, 2000u, 300u);
     mk_http_plain("HTTP/1.0 200 OK", 1850u);
@@ -2292,6 +2335,7 @@ static void t_wx_target(void)
     CHECK(first_with("step=wx_sslconf res=timeout") >= 0);
     CHECK_EQ(wx_step_ok("wx_tcp"), 1); CHECK_EQ(wifi_core_wx(&g_c)->http, 200u);
     begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 1u);                                    /* t y g z の要求は ^N225(Phase 0 と同じ) */
     wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL_NOAUTH);
     wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
     tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 2000u, 300u);
@@ -2302,6 +2346,7 @@ static void t_wx_target(void)
 
     TEST("P0-5 g(Google SSL): GET / の要求。応答がバッファを超えても http=301 と len=3072(err=7)が残る");
     begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 1u);                                    /* t y g z の要求は ^N225(Phase 0 と同じ) */
     wifi_core_set_target(&g_c, WX_TGT_GOOGLE_SSL);
     tgt_rules(WX_TGT_GOOGLE_SSL, CIPSTART_GSSL, 2000u, 300u);
     mk_http_plain("HTTP/1.0 301 Moved Permanently", 3500u);
@@ -2314,6 +2359,7 @@ static void t_wx_target(void)
 
     TEST("P0-6 取得中に ready = ESP32 の再起動 → err=9(wx_recv・wx_tcp・wx_send)。len はそこまでに溜めた分。以後は無視");
     begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 1u);                                    /* t y g z の要求は ^N225(Phase 0 と同じ) */
     wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
     tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 2000u, 300u);
     mk_http_plain("HTTP/1.0 200 OK", 1000u);
@@ -2342,23 +2388,25 @@ static void t_wx_target(void)
     CHECK_EQ(wifi_core_wx(&g_c)->err, 9);
     CHECK(last_is("[wifi] result=fail stage=wx_send ping_ip=0 ping_dns=0\r\n"));
 
-    TEST("P0-7 wifi_core_set_target: 実行中・範囲外は無視。既定は METEO(CIPSTART は天気の TCP 80・要求は 190 バイト)");
+    TEST("P0-7 wifi_core_set_target: 実行中・範囲外は無視。既定は YAHOO_SSL(CIPSTART は SSL 443・要求は 144 バイト)");
     begin(SSID_MARK, PASS_MARK);
     wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     mk_reply(0u, NULL, 1);
     CHECK(wifi_core_start(&g_c, WIFI_RANGE_WX, g_now));
-    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);                      /* 実行中: 無視 */
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_TCP);                      /* 実行中: 無視 */
     run_until_done(30000u);
     expect_ok(1u);
-    CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") == 0);
+    CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") == 0);
     wifi_core_set_target(&g_c, WX_TGT_END);                            /* 範囲外: 無視 */
     wifi_core_set_target(&g_c, (wx_target_t)200);
     g_nsend = 0; g_npend = 0; g_nlog = 0; memset(g_used, 0, sizeof g_used);
     mk_reply(0u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
-    CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") == 0);
+    CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") == 0);
 }
+
+#endif /* APP_WIFI_TEST */
 
 static void t_wx_ranges(void)
 {
@@ -2398,7 +2446,7 @@ static void t_wx_ranges(void)
 
     begin(SSID_MARK, PASS_MARK);                                     /* ALL → WX(同じコアで続けて) */
     normal_rules(); wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0"); mk_reply(0u, NULL, 1);
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1);
     run(WIFI_RANGE_ALL, 60000u);
     CHECK(last_is("[wifi] result=pass stage=none ping_ip=23 ping_dns=31\r\n"));
     CHECK_EQ(count_with("res=start"), 14); CHECK_EQ(count_with("step=wx_"), 0);                    /* ALL は取得を含まない */
@@ -2418,7 +2466,7 @@ static void t_wx_classify(void)
         /* 誤認しない */
         { "CONNECTED", WIFI_L_OTHER }, { "CLOSED ", WIFI_L_OTHER }, { "closed", WIFI_L_OTHER }, { ",CONNECT", WIFI_L_OTHER }, { "x,CONNECT", WIFI_L_OTHER },
         { "10,CONNECT", WIFI_L_OTHER }, { "0,CONNECTX", WIFI_L_OTHER }, { "0, CLOSED", WIFI_L_OTHER }, { "SEND OK ", WIFI_L_OTHER },
-        { "SEND", WIFI_L_OTHER }, { ">>", WIFI_L_OTHER }, { "> ", WIFI_L_OTHER }, { "Recv 190 bytes", WIFI_L_OTHER }, { "DNS FAIL", WIFI_L_OTHER },
+        { "SEND", WIFI_L_OTHER }, { ">>", WIFI_L_OTHER }, { "> ", WIFI_L_OTHER }, { "Recv 144 bytes", WIFI_L_OTHER }, { "DNS FAIL", WIFI_L_OTHER },
         { "+IPD,5:abcde", WIFI_L_OTHER }, { "busy s...", WIFI_L_OTHER }
     };
     wifi_ev_t ev;
@@ -2446,34 +2494,185 @@ static void t_wx_classify(void)
 
 static void t_wx_quiet(void)
 {
-    TEST("H-X5-14 製品(wifi_core_set_quiet): res=start と key=oth の行を出さない(ok / result / [wifiv] key=ip は出す)。既定(専用モード)は今までどおり出す");
+    TEST("H-X5-14 製品(wifi_core_set_quiet): res=start・res=ok と key=oth の行を出さない(失敗・skip・result・[wifiv] key=ip は出す)。既定(専用モード)は今までどおり出す");
     begin(SSID_MARK, PASS_MARK);
     wifi_core_set_quiet(&g_c, true);
     normal_rules();
     run(WIFI_RANGE_CONNECT, 60000u);
     CHECK(last_is("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"));
     CHECK_EQ(count_with("res=start"), 0);
-    CHECK_EQ(count_with("res=ok"), 8);
+    CHECK_EQ(count_with("res=ok"), 0);
     CHECK(first_with("[wifiv] key=ip val=192.168.1.23\r\n") >= 0);
     CHECK_EQ(count_with("key=oth"), 0);
     CHECK_EQ(log_has_secret(), 0);
     g_nsend = 0; g_npend = 0;
     wx_rules(100u);
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     mk_reply(0u, NULL, 1);
-    run(WIFI_RANGE_WX, 30000u);                                      /* 取得: Recv 190 bytes などの行がある(専用モードでは key=oth に形が出る) */
+    g_nlog = 0;
+    run(WIFI_RANGE_WX, 30000u);                                      /* 取得: Recv 144 bytes などの行がある(専用モードでは key=oth に形が出る) */
     expect_ok(1u);
-    CHECK_EQ(count_with("res=start"), 0);
+    CHECK_EQ(g_nlog, 1);                                             /* 成功した取得は result=pass の 1 行だけ(1 銘柄 5 step の行を出さない) */
+    CHECK_EQ(count_with("res="), 0);
     CHECK_EQ(count_with("key=oth"), 0);
-    CHECK_EQ(count_with("res=ok"), 8 + 5);
     CHECK_EQ(wifi_core_wx_seq(&g_c), 1u);
+    /* 失敗は出す(res=fail / res=timeout / res=skip) */
+    g_nsend = 0; g_npend = 0; g_nlog = 0;
+    rp_start();
+    RP_LIT("CLOSED\r\n");                                            /* 本文なし = err 3 */
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(count_with("step=wx_recv res=fail"), 1);
+    CHECK_EQ(count_with("res=start"), 0); CHECK_EQ(count_with("res=ok"), 0);
+    CHECK(last_is("[wifi] result=fail stage=wx_recv ping_ip=0 ping_dns=0\r\n"));
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_quiet(&g_c, true);
+    rule("AT+CIPMUX=0", 0, 20, "OK\r\n"); rule("AT+CIPCLOSE", 0, 20, "OK\r\n"); rule("AT+CIPSTART=*", 0, 300, NULL);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(count_with("step=wx_tcp res=timeout"), 1); CHECK_EQ(count_with("res=start"), 0); CHECK_EQ(count_with("res=ok"), 0);
+    begin(NULL, NULL);                                               /* 秘密なし: join の skip は出る */
+    wifi_core_set_quiet(&g_c, true);
+    normal_rules();
+    run(WIFI_RANGE_CONNECT, 60000u);
+    CHECK_EQ(count_with("step=join res=skip"), 1); CHECK_EQ(count_with("res=ok"), 0); CHECK_EQ(count_with("res=start"), 0);
     wifi_core_set_quiet(&g_c, false);                                /* 戻すと出る */
+    begin(SSID_MARK, PASS_MARK);
     g_nsend = 0; g_npend = 0;
-    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    wx_rules(100u);
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0");
     mk_reply(0u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
-    CHECK_EQ(count_with("res=start"), 5);
+    CHECK_EQ(count_with("res=start"), 5); CHECK_EQ(count_with("res=ok"), 5);
     CHECK(first_with("[wifiv] key=oth val=") >= 0);
+}
+
+/* ================================================================ 銘柄・3 銘柄の連続(製品の使い方: 銘柄を選んで WIFI_RANGE_WX を 1 回ずつ。design.md §5.7・§5.9) */
+
+/* 銘柄 sym の取得の台本。g_rules[0..4] = mux / close / cipstart / cipsend / GET。要求の長さと CIPSEND は wx_build_request から作る */
+static void sym_rules(uint8_t sym, uint32_t get_delay)
+{
+    static char snd[40];
+    char        req[200];
+    size_t      n = wx_build_request(req, sizeof req, sym);
+
+    CHECK(n > 0u);
+    (void)snprintf(snd, sizeof snd, "AT+CIPSEND=%u", (unsigned)n);
+    rule("AT+CIPMUX=0",   0, 20, "OK\r\n");
+    rule("AT+CIPCLOSE",   0, 20, "ERROR\r\n");
+    rule("AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443", 0, 300, "CONNECT\r\n\r\nOK\r\n");
+    rule(snd,             0, 20, "\r\nOK\r\n> ");
+    rule("GET *",         0, get_delay, g_reply);
+}
+
+static void t_wx_symbol(void)
+{
+    static const char *const PATH[3] = { "6723.T", "%5EN225", "%5EGSPC" };
+    static const char *const PRICE[3] = { "2433.0", "57953.84", "7182.78" };
+    static const char *const PREV[3]  = { "2378.0", "57499.16", "7201.09" };
+    char   want[100];
+    int    sym;
+
+    TEST("H-P3-1 銘柄の選択: wifi_core_set_symbol(0 / 1 / 2)で CIPSEND = 144 / 145 / 145・要求のパス = 6723.T / %5EN225 / %5EGSPC・結果の sym が同じ。既定は 0");
+    begin(SSID_MARK, PASS_MARK);
+    CHECK_EQ(g_c.sym, 0);
+    for (sym = 0; sym < 3; sym++) {
+        begin(SSID_MARK, PASS_MARK);
+        wifi_core_set_symbol(&g_c, (uint8_t)sym);
+        mk_http("HTTP/1.0 200 OK", NULL, PRICE[sym], PREV[sym]);
+        mk_reply(0u, NULL, 1);
+        sym_rules((uint8_t)sym, 100u);
+        run(WIFI_RANGE_WX, 30000u);
+        (void)snprintf(want, sizeof want, "AT+CIPSEND=%d\r\n", (sym == 0) ? 144 : 145);
+        CHECK(strcmp(g_sent[3], want) == 0);
+        (void)snprintf(want, sizeof want, "GET /v8/finance/chart/%s?range=2d&interval=1d HTTP/1.0\r\n", PATH[sym]);
+        CHECK(strncmp(g_sent[4], want, strlen(want)) == 0);
+        CHECK_EQ(wifi_core_wx(&g_c)->ok, 1); CHECK_EQ(wifi_core_wx(&g_c)->sym, sym);
+        CHECK(last_is("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"));
+    }
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 2u); wifi_core_set_symbol(&g_c, 3u); wifi_core_set_symbol(&g_c, 255u);   /* 範囲外は無視 */
+    CHECK_EQ(g_c.sym, 2);
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1); sym_rules(1u, 100u);
+    wifi_core_set_symbol(&g_c, 1u);
+    CHECK(wifi_core_start(&g_c, WIFI_RANGE_WX, g_now));
+    wifi_core_set_symbol(&g_c, 0u);                                                                       /* 実行中は無視 */
+    CHECK_EQ(g_c.sym, 1);
+    run_until_done(30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->sym, 1);
+
+    TEST("H-P3-2 3 銘柄を続けて(製品の 1 周期): 銘柄ごとに mux → close → tcp → send → recv。結果が銘柄ごとに出る(seq +1)。本文は残らない。接続先は毎回 SSL");
+    begin(SSID_MARK, PASS_MARK);
+    for (sym = 0; sym < 3; sym++) {
+        const wx_result_t *r;
+
+        g_nsend = 0; g_npend = 0; memset(g_used, 0, sizeof g_used); g_nrules = 0;
+        mk_http("HTTP/1.0 200 OK", NULL, PRICE[sym], PREV[sym]);
+        mk_reply(0u, NULL, 1);
+        sym_rules((uint8_t)sym, 100u);
+        wifi_core_set_symbol(&g_c, (uint8_t)sym);
+        run(WIFI_RANGE_WX, 30000u);
+        r = wifi_core_wx(&g_c);
+        CHECK_EQ(wifi_core_wx_seq(&g_c), (uint32_t)sym + 1u); CHECK_EQ(wifi_core_done_seq(&g_c), (uint32_t)sym + 1u);
+        CHECK_EQ(r->ok, 1); CHECK_EQ(r->sym, sym); CHECK_EQ(g_nsend, 5);
+        CHECK(strcmp(g_sent[1], "AT+CIPCLOSE\r\n") == 0);                                    /* 銘柄の間に前の接続を閉じる */
+        CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") == 0);
+        CHECK(!core_has(BODY_MARK));
+    }
+    CHECK_EQ(wifi_core_wx(&g_c)->price_x100, 718278); CHECK_EQ(wifi_core_wx(&g_c)->prev_x100, 720109);
+    CHECK_EQ(log_has_secret(), 0);
+
+    TEST("H-P3-3 1 銘柄が失敗しても次の銘柄は取れる(失敗の後の状態が残らない): sym 1 の ready(err=9)・sym 1 の CLOSED だけ・TCP 失敗の後に sym 2 が成功");
+    begin(SSID_MARK, PASS_MARK);
+    g_nsend = 0; g_npend = 0; memset(g_used, 0, sizeof g_used); g_nrules = 0;
+    mk_http("HTTP/1.0 200 OK", NULL, PRICE[0], PREV[0]); mk_reply(0u, NULL, 1); sym_rules(0u, 100u);
+    wifi_core_set_symbol(&g_c, 0u); run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 1);
+    g_nsend = 0; g_npend = 0; memset(g_used, 0, sizeof g_used); g_nrules = 0;                /* sym 1: 受信中に ready */
+    mk_http("HTTP/1.0 200 OK", NULL, PRICE[1], PREV[1]);
+    rp_start(); rp_ipd(g_http, 600u, NULL); RP_LIT("\r\nready\r\n");
+    sym_rules(1u, 100u);
+    wifi_core_set_symbol(&g_c, 1u); run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 9); CHECK_EQ(wifi_core_wx(&g_c)->sym, 1); CHECK_EQ(wifi_core_wx(&g_c)->len, 600u);
+    CHECK(last_is("[wifi] result=fail stage=wx_recv ping_ip=0 ping_dns=0\r\n")); CHECK(!wifi_core_pass(&g_c));
+    CHECK(!core_has(BODY_MARK));
+    g_nsend = 0; g_npend = 0; memset(g_used, 0, sizeof g_used); g_nrules = 0;                /* sym 1 のやり直し: CLOSED だけ(本文なし) */
+    rp_start(); RP_LIT("CLOSED\r\n"); sym_rules(1u, 100u);
+    wifi_core_set_symbol(&g_c, 1u); run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 3); CHECK_EQ(wifi_core_wx(&g_c)->len, 0u);
+    g_nsend = 0; g_npend = 0; memset(g_used, 0, sizeof g_used); g_nrules = 0;                /* sym 2: TCP が張れない */
+    rule("AT+CIPMUX=0", 0, 20, "OK\r\n"); rule("AT+CIPCLOSE", 0, 20, "OK\r\n"); rule("AT+CIPSTART=*", 0, 300, "DNS Fail\r\n\r\nERROR\r\n");
+    wifi_core_set_symbol(&g_c, 2u); run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 1); CHECK_EQ(wifi_core_wx(&g_c)->sym, 2); CHECK_EQ(wifi_core_wx(&g_c)->http, 0);
+    g_nsend = 0; g_npend = 0; memset(g_used, 0, sizeof g_used); g_nrules = 0;                /* 直った: sym 2 が成功 */
+    mk_http("HTTP/1.0 200 OK", NULL, PRICE[2], PREV[2]); mk_reply(0u, NULL, 1); sym_rules(2u, 100u);
+    wifi_core_set_symbol(&g_c, 2u); run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 1); CHECK_EQ(wifi_core_wx(&g_c)->sym, 2); CHECK_EQ(wifi_core_wx(&g_c)->price_x100, 718278);
+    CHECK_EQ(wifi_core_wx_seq(&g_c), 5u);
+
+    TEST("H-P3-4 429(状態 429 の応答)は err=4 http=429 で、その銘柄の結果に sym と http が残る。本文は残らない");
+    begin(SSID_MARK, PASS_MARK);
+    mk_http("HTTP/1.0 429 Too Many Requests", NULL, PRICE[1], PREV[1]); mk_reply(0u, NULL, 1); sym_rules(1u, 100u);
+    wifi_core_set_symbol(&g_c, 1u); run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 4); CHECK_EQ(wifi_core_wx(&g_c)->http, 429); CHECK_EQ(wifi_core_wx(&g_c)->sym, 1); CHECK_EQ(wifi_core_wx(&g_c)->have_date, 1);
+    CHECK(!core_has(BODY_MARK));
+
+    TEST("H-P3-5 CLOSED が先に来る(送信前 = err 2、送信後 = 取得の終わり)・タイムアウト(wx_send 5 秒 / wx_recv 15 秒 / SSL の wx_tcp 20 秒)");
+    begin(SSID_MARK, PASS_MARK);
+    rule("AT+CIPMUX=0", 0, 20, "OK\r\n"); rule("AT+CIPCLOSE", 0, 20, "OK\r\n");
+    rule("AT+CIPSTART=*", 0, 300, "CONNECT\r\n\r\nOK\r\n"); rule("AT+CIPSEND=144", 0, 20, "CLOSED\r\n");
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 2); CHECK_EQ(count_with("step=wx_send res=fail"), 1);
+    begin(SSID_MARK, PASS_MARK);                                                                /* wx_send: > が来ないまま 5 秒 */
+    sym_rules(0u, 100u); g_rules[3].reply = "\r\nOK\r\n";
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK(first_with("step=wx_send res=timeout try=1 ms=5000 code=2") >= 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 2);
+    begin(SSID_MARK, PASS_MARK);                                                                /* wx_recv: 応答が来ないまま 15 秒 */
+    sym_rules(0u, 100u); rp_start();
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(first_with("step=wx_recv res=timeout try=1 ms=15000 code=3") >= 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 3); CHECK_EQ(wifi_core_wx(&g_c)->closed, 0);
+    begin(SSID_MARK, PASS_MARK);                                                                /* wx_tcp: SSL は 20 秒 */
+    sym_rules(0u, 100u); g_rules[2].delay = 25000u;
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(first_with("step=wx_tcp res=timeout try=1 ms=20000 code=1") >= 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 1);
 }
 
 int main(void)
@@ -2503,9 +2702,12 @@ int main(void)
     t_wx_send_fail();
     t_wx_recv();
     t_wx_overflow();
+#if APP_WIFI_TEST
     t_wx_target();
+#endif
     t_wx_ranges();
     t_wx_quiet();
+    t_wx_symbol();
     t_secret();                          /* 最後: g_all(全ログ)を調べる */
     TEST_REPORT("test_wifi_core");
 }

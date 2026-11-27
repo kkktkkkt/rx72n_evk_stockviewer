@@ -1,10 +1,10 @@
 /* wifi_core.h - Wi-Fi(ESP32 AT)試作の論理部(標準Cのみ。FIT・platform.h を include しない。ホストで試験する)
- * 仕様: docs/design.md §21.4・§22.3〜§22.4、docs/design-uart.md §12・§13。wifi_core.c は APP_WIFI_ON(APP_WIFI_TEST か APP_WX)= 0 の時は中身が消える。
+ * 仕様: docs/design.md §21.4(Wi-Fi)・§5(株価の取得)、docs/design-uart.md §12。wifi_core.c は APP_WIFI_ON(APP_WIFI_TEST か APP_WX)= 0 の時は中身が消える。
  *
  * 使い方(wifi_at.c から):
  *   static wifi_core_t g;
  *   wifi_core_init(&g, &ops, WIFI_SSID, WIFI_PASS);   // 秘密が無ければ NULL, NULL(join 以降を skip)
- *   wifi_core_start(&g, WIFI_RANGE_ALL, ms);          // d / n / p(取得は WIFI_RANGE_WX = x。結果は wifi_core_wx_seq / wifi_core_wx)
+ *   wifi_core_start(&g, WIFI_RANGE_ALL, ms);          // d / n / p(取得は wifi_core_set_symbol の後に WIFI_RANGE_WX。1 回 = 1 銘柄。結果は wifi_core_wx_seq / wifi_core_wx)
  *   毎周回: 受信バイトごとに wifi_core_rx(&g, b, ms)、続けて wifi_core_poll(&g, ms)
  *   ops.en / ops.send / ops.log は、状態機械が必要な時に呼ぶ(下)。ms = 単調増加の ms(10ms tick x 10 でよい。32bit 一周に対応)。 */
 #ifndef WIFI_CORE_H
@@ -36,9 +36,9 @@ typedef enum {                   /* 値はそのまま [hb] の scr(0 = 待機) 
     WIFI_STEP_DNS,
     WIFI_STEP_PING_IP,
     WIFI_STEP_PING_DNS,
-    WIFI_STEP_WX_MUX,            /* 15: AT+CIPMUX=0(天気の取得。docs/design.md §22.3) */
+    WIFI_STEP_WX_MUX,            /* 15: AT+CIPMUX=0(株価の取得。docs/design.md §5.7) */
     WIFI_STEP_WX_CLOSE,          /* 16: AT+CIPCLOSE(前回の接続の掃除。ERROR でも成功) */
-    WIFI_STEP_WX_SSLCONF,        /* 17: AT+CIPSSLCCONF=0,0,0(認証なし。WX_TGT_YAHOO_SSL_NOAUTH = z の時だけ。ERROR でも先へ。design.md §5.5.2) */
+    WIFI_STEP_WX_SSLCONF,        /* 17: AT+CIPSSLCCONF=0,0,0(認証なし。専用モード APP_WIFI_TEST の z = WX_TGT_YAHOO_SSL_NOAUTH の時だけ。製品の範囲には入れない。ERROR でも先へ。番号は変えない) */
     WIFI_STEP_WX_TCP,            /* 18: AT+CIPSTART="TCP"|"SSL",... → CONNECT と OK(接続先は wifi_core_set_target) */
     WIFI_STEP_WX_SEND,           /* 19: AT+CIPSEND=<n> → OK と > → 要求 → SEND OK */
     WIFI_STEP_WX_RECV,           /* 20: +IPD の連続 → CLOSED。解析して成功・失敗 */
@@ -56,7 +56,7 @@ typedef enum {
     WIFI_RANGE_BOOT,             /* reset 〜 at(n) */
     WIFI_RANGE_AT,               /* at だけ(p。リセットなし) */
     WIFI_RANGE_CONNECT,          /* 製品の接続: reset boot at echo mode qap join ip(gmr lapopt scan dns ping を省く) */
-    WIFI_RANGE_WX                /* 取得: wx_mux 〜 wx_recv(x。接続先は wifi_core_set_target。z の時だけ wx_sslconf が入る) */
+    WIFI_RANGE_WX                /* 取得 1 回(1 銘柄。wifi_core_set_symbol): wx_mux 〜 wx_recv(接続先は wifi_core_set_target。専用モードの z の時だけ wx_sslconf が入る) */
 } wifi_range_t;
 
 /* ---- ログ行の整形(UART。秘密を引数に取らない) ----
@@ -172,7 +172,7 @@ typedef struct {
     uint8_t     done;
     uint8_t     ping_seen;
     uint32_t    mask;                             /* この実行に含める step のビット(1u << step) */
-    /* 天気の取得(WX step)。応答の生の本文は wx_buf にだけ置き、解析のあと消す */
+    /* 株価の取得(WX step)。応答の生の本文は wx_buf にだけ置き、解析のあと消す */
     uint32_t    wx_t0;                            /* 取得の開始(wx_mux)の時刻 */
     uint32_t    wx_first_ms;                      /* 最初のデータを受けた時刻 */
     uint32_t    wx_seq;                           /* 取得の結果が出るたびに +1 */
@@ -180,10 +180,11 @@ typedef struct {
     uint16_t    wx_len;
     uint16_t    ipd_left;                         /* データモード: 残りのバイト数 */
     uint8_t     wx_flags;
-    uint8_t     target;                           /* wx_target_t。0 = METEO(既定)。wifi_core_set_target */
+    uint8_t     target;                           /* wx_target_t。0 = YAHOO_SSL(既定。製品)。wifi_core_set_target */
+    uint8_t     sym;                              /* 取得する銘柄 0〜2(wifi_core_set_symbol。既定 0) */
     uint8_t     res_pass;
     uint8_t     res_stage;
-    uint8_t     quiet;                            /* 1 = 製品: res=start と key=oth の行を出さない(wifi_core_set_quiet) */
+    uint8_t     quiet;                            /* 1 = 製品: res=start・res=ok と key=oth の行を出さない(wifi_core_set_quiet) */
     wx_result_t wx;
     char        wx_buf[WX_BUF_SIZE];
     char        line[WIFI_LINE_MAX + 1u];
@@ -196,11 +197,16 @@ typedef struct {
  * どちらかが NULL なら、join を [wifi] step=join res=skip にして、そこで result=pass で終える */
 void wifi_core_init(wifi_core_t *c, const wifi_ops_t *ops, const char *ssid, const char *pass);
 
-/* 製品(APP_WX_PRODUCT)用: [wifi] step=... res=start と [wifiv] key=oth を出さない(ログキュー 8 行の drop を避ける。design.md §22.4 の 6)。既定は出す(専用モード)。init の後に呼ぶ */
+/* 製品(APP_WX_PRODUCT)用: [wifi] step=... の res=start と res=ok、[wifiv] key=oth を出さない(失敗・時間切れ・skip と result= は出す。
+ * ログキュー 8 行の drop を避ける。design.md §5.9)。既定は出す(専用モード)。init の後に呼ぶ */
 void wifi_core_set_quiet(wifi_core_t *c, bool quiet);
 
-/* 取得(WIFI_RANGE_WX)の接続先を選ぶ。次の wifi_core_start から有効。実行中・範囲外は無視。init の既定は WX_TGT_METEO(今までどおり) */
+/* 取得(WIFI_RANGE_WX)の接続先を選ぶ。次の wifi_core_start から有効。実行中・範囲外は無視。init の既定は WX_TGT_YAHOO_SSL(製品) */
 void wifi_core_set_target(wifi_core_t *c, wx_target_t t);
+
+/* 取得(WIFI_RANGE_WX)の銘柄(0 = 6723.T、1 = ^N225、2 = ^GSPC)を選ぶ。次の wifi_core_start から有効。実行中・範囲外(3 以上)は無視。init の既定は 0。
+ * 結果の wx_result_t.sym にこの値が入る */
+void wifi_core_set_symbol(wifi_core_t *c, uint8_t sym);
 
 /* 実行を始める。実行中なら何もせず false(d n p の無視)。始めると [wifi] step=<最初> res=start を log へ出す */
 bool wifi_core_start(wifi_core_t *c, wifi_range_t range, uint32_t now_ms);
@@ -212,7 +218,7 @@ void wifi_core_rx(wifi_core_t *c, uint8_t b, uint32_t now_ms);
 /* 時間を進める(毎周回。10ms ごとでよい)。タイムアウト・再試行・EN・送信を処理する */
 void wifi_core_poll(wifi_core_t *c, uint32_t now_ms);
 
-/* 取得の結果。wifi_core_wx_seq が増えたら wifi_core_wx(c) が新しい結果(失敗を含む)。本文は持たない(数値だけ) */
+/* 取得の結果(1 銘柄 = 1 回)。wifi_core_wx_seq が増えたら wifi_core_wx(c) が新しい結果(失敗を含む)。本文は持たない(数値だけ) */
 uint32_t            wifi_core_wx_seq(const wifi_core_t *c);
 const wx_result_t  *wifi_core_wx(const wifi_core_t *c);
 /* 実行の結果。done_seq は 1 回の実行が終わるたびに +1。pass = 全 step が成功(続行可の失敗を含む)、fail_stage = 打ち切った step(pass の時は NONE) */

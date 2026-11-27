@@ -6,6 +6,7 @@
  *        バッファ不足は 0 で buf[0] = '\0'(1 バイトも余計に書かない)、実装と別の整形(snprintf + 文字列へのカンマ挿入)との乱数比較
  *   H-5  stk_market(§5.4): 現在時刻が取引時間帯なら取引中。昼休み(日本株だけ)は終値。寄り付き後 30 分(mtime < rs)と後場の開始直後は値が古くても取引中。
  *        1 日を 1 秒刻みで(§5.4 の時間帯の表と一致)、境界(now = rs / re、now − mtime = 7200 / 7201、now − rs = 1800 / 1801、昼休みの前後)、時計未同期、32bit の巻き戻り
+ *   H-7(残り) stk_view_make: 取得結果(銘柄ごとの最後の成功)→ stk_view_t(stale / stale_all / fail / partial / have_any、32bit の巻き戻り、乱数 20,000 通りの別実装との memcmp)
  * 浮動小数点を使っていないこと(stk_core.c に float / double が無い)は run.sh が grep で見る。 */
 #include <stdint.h>
 #include <stddef.h>
@@ -412,10 +413,120 @@ static void t_market(void)
     }
 }
 
+/* ---------------------------------------------------------------- H-7(残り) stk_view_make: 取得結果の保持 → 表示値(§3.9・§4.4) */
+
+static stk_slot_t mk_slot(int32_t p, int32_t d, int32_t bp, uint8_t mkt, uint32_t ok_ms)
+{
+    stk_slot_t s;
+    memset(&s, 0, sizeof s);
+    s.have = 1u; s.mkt = mkt; s.price_x100 = p; s.diff_x100 = d; s.pct_bp = bp; s.ok_ms = ok_ms;
+    return s;
+}
+
+static void t_view(void)
+{
+    stk_slot_t  sl[3];
+    stk_view_t  v, w;
+    uint32_t    now = 5000000u;
+    unsigned    i, k;
+
+    TEST("H-7(残り) stk_view_make: 値なし(起動中)= 全部 0・net と時計だけ。パディングも 0(memcmp で比べられる)");
+    memset(sl, 0, sizeof sl);
+    memset(&v, 0xAA, sizeof v);
+    stk_view_make(&v, STK_NET_CONN, 1u, 0u, sl, now, STK_NONE16, STK_NONE16);
+    memset(&w, 0, sizeof w); w.net = STK_NET_CONN; w.busy = 1u; w.clock_min = STK_NONE16; w.upd_min = STK_NONE16;
+    CHECK(memcmp(&v, &w, sizeof v) == 0);
+    CHECK_EQ(v.have_any, 0); CHECK_EQ(v.stale_all, 0); CHECK_EQ(v.partial, 0);
+
+    TEST("H-7(残り) 通常: 3 銘柄の値・前日比・騰落率・市場の状態がそのまま行へ。stale なし・fail なし。net / busy / 時計 / 更新時刻をそのまま");
+    sl[0] = mk_slot(243300, 5500, 231, STK_MKT_TRADING, now - 1000u);
+    sl[1] = mk_slot(5795384, 45468, 79, STK_MKT_TRADING, now - 2000u);
+    sl[2] = mk_slot(718278, -1831, -25, STK_MKT_CLOSED, now - 3000u);
+    stk_view_make(&v, STK_NET_ON, 0u, 0u, sl, now, 13u * 60u + 30u, 13u * 60u + 24u);
+    CHECK_EQ(v.net, STK_NET_ON); CHECK_EQ(v.busy, 0); CHECK_EQ(v.have_any, 1); CHECK_EQ(v.stale_all, 0); CHECK_EQ(v.partial, 0); CHECK_EQ(v.rsv, 0); CHECK_EQ(v.rsv2, 0);
+    CHECK_EQ(v.clock_min, 810); CHECK_EQ(v.upd_min, 804);
+    for (i = 0u; i < 3u; i++) { CHECK_EQ(v.row[i].have, 1); CHECK_EQ(v.row[i].stale, 0); CHECK_EQ(v.row[i].fail, 0); }
+    CHECK_EQ(v.row[0].price_x100, 243300); CHECK_EQ(v.row[0].diff_x100, 5500); CHECK_EQ(v.row[0].pct_bp, 231); CHECK_EQ(v.row[0].mkt, STK_MKT_TRADING);
+    CHECK_EQ(v.row[2].price_x100, 718278); CHECK_EQ(v.row[2].diff_x100, -1831); CHECK_EQ(v.row[2].pct_bp, -25); CHECK_EQ(v.row[2].mkt, STK_MKT_CLOSED);
+
+    TEST("H-7(残り) 古い: 最後の成功から 1,800 秒以上(ちょうども)で行が stale。全体の stale_all は最新の成功で決まる。値は消えない");
+    sl[0] = mk_slot(243300, 5500, 231, STK_MKT_TRADING, now - 1800u * 1000u);          /* ちょうど 1,800 秒 = 古い */
+    sl[1] = mk_slot(5795384, 45468, 79, STK_MKT_TRADING, now - 1799u * 1000u - 999u);  /* 1,799.999 秒 = まだ新しい */
+    sl[2] = mk_slot(718278, -1831, -25, STK_MKT_CLOSED, now - 5000u * 1000u);
+    stk_view_make(&v, STK_NET_ON, 0u, 0u, sl, now, 0u, 0u);
+    CHECK_EQ(v.row[0].stale, 1); CHECK_EQ(v.row[1].stale, 0); CHECK_EQ(v.row[2].stale, 1);
+    CHECK_EQ(v.stale_all, 0);                                                           /* 最新(銘柄 1)がまだ新しい */
+    CHECK_EQ(v.row[0].have, 1); CHECK_EQ(v.row[0].price_x100, 243300);
+    sl[1].ok_ms = now - 1800u * 1000u;
+    stk_view_make(&v, STK_NET_ON, 0u, 0u, sl, now, 0u, 0u);
+    CHECK_EQ(v.stale_all, 1); CHECK_EQ(v.row[1].stale, 1);                              /* 全部が 1,800 秒以上 */
+    sl[2].ok_ms = now - 10u * 1000u;
+    stk_view_make(&v, STK_NET_ON, 0u, 0u, sl, now, 0u, 0u);
+    CHECK_EQ(v.stale_all, 0); CHECK_EQ(v.row[2].stale, 0);                              /* 1 つでも新しければ全体は古くない */
+
+    TEST("H-7(残り) 銘柄ごとの失敗: fail_mask のビットが row.fail、partial = 1。値のない行(取得失敗)と値のある行(古い値を残す)");
+    memset(sl, 0, sizeof sl);
+    sl[0] = mk_slot(243300, 5500, 231, STK_MKT_TRADING, now - 20000u);
+    sl[2] = mk_slot(718278, -1831, -25, STK_MKT_CLOSED, now - 20000u);
+    stk_view_make(&v, STK_NET_ON, 0u, 2u, sl, now, 800u, 800u);                         /* 銘柄 1 だけ失敗(一度も取れていない) */
+    CHECK_EQ(v.partial, 1); CHECK_EQ(v.row[1].fail, 1); CHECK_EQ(v.row[1].have, 0); CHECK_EQ(v.row[1].price_x100, 0); CHECK_EQ(v.row[1].mkt, STK_MKT_NONE);
+    CHECK_EQ(v.row[0].fail, 0); CHECK_EQ(v.row[2].fail, 0); CHECK_EQ(v.row[0].have, 1); CHECK_EQ(v.have_any, 1);
+    stk_view_make(&v, STK_NET_ON, 0u, 5u, sl, now, 800u, 800u);                         /* 銘柄 0 と 2 が失敗(古い値は残る) */
+    CHECK_EQ(v.partial, 1); CHECK_EQ(v.row[0].fail, 1); CHECK_EQ(v.row[2].fail, 1); CHECK_EQ(v.row[1].fail, 0);
+    CHECK_EQ(v.row[0].have, 1); CHECK_EQ(v.row[0].price_x100, 243300);
+    stk_view_make(&v, STK_NET_ON, 0u, 0xF8u, sl, now, 800u, 800u);                      /* 範囲外のビットは見ない */
+    CHECK_EQ(v.partial, 0); CHECK_EQ(v.row[0].fail, 0);
+    stk_view_make(&v, STK_NET_ERR, 1u, 7u, sl, now, STK_NONE16, 800u);
+    CHECK_EQ(v.net, STK_NET_ERR); CHECK_EQ(v.busy, 1); CHECK_EQ(v.partial, 1); CHECK_EQ(v.clock_min, STK_NONE16);
+
+    TEST("H-7(残り) 32bit の巻き戻り: ok_ms が折り返しの手前・now が折り返しの後でも、経過は差で出る");
+    sl[0] = mk_slot(243300, 5500, 231, STK_MKT_TRADING, 0xFFFFFF00u);
+    sl[2].have = 0u;
+    stk_view_make(&v, STK_NET_ON, 0u, 0u, sl, 0xFFFFFF00u + 1799000u, 0u, 0u);
+    CHECK_EQ(v.row[0].stale, 0);
+    stk_view_make(&v, STK_NET_ON, 0u, 0u, sl, 0xFFFFFF00u + 1800000u, 0u, 0u);
+    CHECK_EQ(v.row[0].stale, 1); CHECK_EQ(v.stale_all, 1);
+    CHECK(0xFFFFFF00u + 1800000u < 0xFFFFFF00u);
+
+    TEST("H-7(残り) 乱数 20,000 通り: 別の書き方の期待値と memcmp で一致(全フィールド)・引数が NULL なら何も書かない");
+    for (k = 0u; k < 20000u; k++) {
+        uint8_t  net = (uint8_t)(rnd() % 4u), busy = (uint8_t)(rnd() & 3u), fm = (uint8_t)(rnd() & 0xFFu);
+        uint32_t base = rnd(), nowx = base + (rnd() % 4000000u);
+        uint16_t cm = (rnd() & 1u) ? (uint16_t)(rnd() % 1440u) : STK_NONE16, um = (rnd() & 1u) ? (uint16_t)(rnd() % 1440u) : STK_NONE16;
+        uint32_t newest = 0xFFFFFFFFu;
+        int      any = 0;
+
+        memset(&w, 0, sizeof w);
+        w.net = net; w.busy = (uint8_t)(busy != 0u); w.clock_min = cm; w.upd_min = um; w.partial = (uint8_t)((fm & 7u) != 0u);
+        for (i = 0u; i < 3u; i++) {
+            memset(&sl[i], 0, sizeof sl[i]);
+            w.row[i].fail = (uint8_t)((fm >> i) & 1u);
+            if ((rnd() % 4u) != 0u) {
+                uint32_t age_s = rnd() % 4000u, ok_ms = nowx - (age_s * 1000u + (rnd() % 1000u));
+                int32_t  p = (int32_t)(1u + rnd() % 99999999u), d = (int32_t)(rnd() % 1000000u) - 500000, bp = (int32_t)(rnd() % 20001u) - 10000;
+                uint8_t  mk = (uint8_t)(rnd() % 3u);
+
+                sl[i] = mk_slot(p, d, bp, mk, ok_ms);
+                w.row[i].have = 1u; w.row[i].stale = (uint8_t)(age_s >= 1800u); w.row[i].mkt = mk; w.row[i].price_x100 = p; w.row[i].diff_x100 = d; w.row[i].pct_bp = bp;
+                if (!any || age_s < newest) { newest = age_s; any = 1; }
+            }
+        }
+        w.have_any = (uint8_t)any; w.stale_all = (uint8_t)(any && (newest >= 1800u));
+        memset(&v, 0x55, sizeof v);
+        stk_view_make(&v, net, busy, fm, sl, nowx, cm, um);
+        if (memcmp(&v, &w, sizeof v) != 0) { CHECK(0); break; }
+    }
+    memset(&v, 0x5A, sizeof v);
+    stk_view_make(NULL, 0u, 0u, 0u, sl, 0u, 0u, 0u);
+    stk_view_make(&v, 0u, 0u, 0u, NULL, 0u, 0u, 0u);
+    { unsigned char *q = (unsigned char *)&v; size_t z; int same = 1; for (z = 0u; z < sizeof v; z++) { if (q[z] != 0x5Au) { same = 0; } } CHECK(same); }
+}
+
 int main(void)
 {
     t_calc();
     t_fmt();
     t_market();
+    t_view();
     TEST_REPORT("test_stk_core");
 }

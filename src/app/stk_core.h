@@ -20,6 +20,7 @@ enum { STK_KIND_YEN = 0, STK_KIND_INDEX = 1 };      /* 銘柄の種類(§4.2)。
 #define STK_BP_MAX     (99999)       /* 騰落率の絶対値の上限(0.01% 単位。999.99%) */
 #define STK_FRESH_S    (7200u)       /* データ(mtime)の鮮度の上限(秒)。取引時間帯の中でこれ以内なら「取引中」(§5.4。設計の WX_FRESH_S) */
 #define STK_OPEN_GRACE_S (1800u)     /* 寄り付き(rs)から、今日の最初の足が届くまでの猶予(秒)。mtime < rs でも「取引中」(設計の WX_OPEN_GRACE_S) */
+#define STK_STALE_S    (1800u)       /* 最後の成功からこの秒数以上で「古い」(§3.9。設計の WX_STALE_S) */
 #define STK_LUNCH_S    (41400u)      /* 日本株の昼休み(JST の 0 時からの秒)の始まり 11:30 */
 #define STK_LUNCH_E    (45000u)      /* 終わり 12:30 */
 
@@ -74,6 +75,22 @@ size_t stk_fmt_pct(char *buf, size_t size, int32_t pct_bp);                     
 /* 丸めた金額 A(YEN: |diff| を 0.5 円で四捨五入した整数、INDEX: 小数 2 桁)。矢印 \x01 / \x02 は dir が UP / DOWN で A ≠ 0 のときだけ(符号 + − は付けない)。
  * A = 0 は YEN: 0、INDEX: 0.00。|diff| ≦ STK_X100_MAX、kind / dir は範囲内 */
 size_t stk_fmt_amt(char *buf, size_t size, int32_t diff_x100, uint8_t kind, uint8_t dir);
+
+/* ---- 表示用データの組み立て(§3.9・§4.4)---- */
+typedef struct {               /* 1 銘柄の最後の成功(取得側が保持する) */
+    uint8_t  have;             /* 一度でも成功した */
+    uint8_t  mkt;              /* 成功した時に stk_market で決めた STK_MKT_* */
+    int32_t  price_x100;
+    int32_t  diff_x100;
+    int32_t  pct_bp;
+    uint32_t ok_ms;            /* 最後の成功の時刻(単調増加の ms。32bit の巻き戻りは差で扱う) */
+} stk_slot_t;
+
+/* v を組み立てる。fail_mask = 失敗が残っている銘柄のビット(bit0 = 行 0)。clock_min / upd_min は STK_NONE16 か 0〜1439。
+ * row.stale = have かつ最後の成功から STK_STALE_S 秒以上。stale_all = have_any かつ 3 銘柄のうち最新の成功が STK_STALE_S 秒以上前。
+ * partial = fail_mask ≠ 0。値のない行(have = 0)は値・mkt を 0 にする。v は全部書く(パディングも 0)。v か slot が NULL なら何もしない */
+void stk_view_make(stk_view_t *v, uint8_t net, uint8_t busy, uint8_t fail_mask, const stk_slot_t slot[STK_ROWS],
+                   uint32_t now_ms, uint16_t clock_min, uint16_t upd_min);
 
 /* ---- 市場の状態(§5.4)。now_jst = ソフト時計の JST の通算秒(now_utc = now_jst − 32,400)。mtime / rs / re は UTC 秒。
  * synced = 時計が同期済みか(設計の署名に無い引数。未同期 → NONE)。sym が NULL も NONE。

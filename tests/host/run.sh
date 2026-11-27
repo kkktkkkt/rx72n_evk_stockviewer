@@ -317,7 +317,7 @@ fi
 
 # ---------------------------------------------------------------- S22
 if sel S22; then
-  echo "### S22 Wi-Fi(ESP32 AT)試作(docs/design.md §21.7 の H-W1〜H-W13): wifi_core の標準C条件・APP_WIFI_TEST = 0 で中身が消える・単体試験(行・分類・値・CWJAP・書式・状態機械・秘密がログに出ない)・静的検査(wifi_secret.h の include 範囲、.gitignore)"
+  echo "### S22 Wi-Fi(ESP32 AT)試作(docs/design.md §21.7 の H-W1〜H-W13)と株価の取得(H-10): wifi_core の標準C条件・APP_WIFI_TEST = 0 かつ APP_WX = 0 で中身が消える・単体試験(行・分類・値・CWJAP・書式・状態機械・秘密がログに出ない・銘柄ごとの取得・err=9・タイムアウト・CLOSED の途切れ・quiet)を専用モード(APP_WIFI_TEST=1)と製品(APP_WX=1)の 2 通りで・静的検査(wifi_secret.h の include 範囲、.gitignore)"
   rc=0
   for std in "-std=gnu99" "-std=c99 -pedantic-errors" "-std=c11"; do
     cc_nowarn $std $WARN -DAPP_WIFI_TEST=1 -I"$APP" -c "$APP/wifi_core.c" -o "$BUILD/wifi_core.o" || rc=1
@@ -338,6 +338,8 @@ if sel S22; then
   if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c -DAPP_WIFI_TEST=1 -DAPP_CLUT8_TEST=1 -I"$APP" - >/dev/null 2>&1; then echo "  NG: #error が出ない"; rc=1; else echo "  ok (#error 発生)"; fi
   cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core" || rc=1
   [ -x "$BUILD/test_wifi_core" ] && { timeout 300 "$BUILD/test_wifi_core" || rc=1; }
+  cc_nowarn $STD $WARN -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core_wx" || rc=1     # 製品(接続先は Yahoo の SSL だけ。z の step は範囲に入らない)
+  [ -x "$BUILD/test_wifi_core_wx" ] && { timeout 300 "$BUILD/test_wifi_core_wx" || rc=1; }
   echo "  H-W8: wifi_secret.h を include するのは wifi_at.c だけ(ファイル名だけ出す。中身は読まない)"
   inc="$(grep -rlE '^\s*#\s*include\s*[<"]wifi_secret\.h[>"]' "$ROOT/src" --include='*.c' --include='*.h' --exclude=wifi_secret.h --exclude-dir=smc_gen 2>/dev/null | sed 's#.*/##' | sort -u)"
   echo "  include している: ${inc:-(なし)}"
@@ -391,10 +393,12 @@ fi
 
 # ---------------------------------------------------------------- S24
 if sel S24; then
-  echo "### S24 天気・気温の取得(docs/design.md §22.12 の H-X1〜H-X4・H-X7・H-X11): wx_core の単体試験(要求 190 バイト・HTTP 解析・Date: と時刻・WMO 表・ソフト時計・ログ書式・取得の予定表)。wifi_core の WX step・データモード・範囲(H-X5・H-X6)は S22、wifi_at の x は S23"
+  echo "### S24 株価の取得の論理(docs/design.md H-6・H-11): wx_core の単体試験(要求 144 / 145 / 145 バイト・接続先・[stk] の書式 R-STK-*・取得の予定表(3 銘柄・失敗分のやり直し・429・全部失敗・周期・更新要求・32bit の巻き戻り)・Date: と時刻・ソフト時計)。専用モード(APP_WIFI_TEST=1)と製品(APP_WX=1)の 2 通り。wifi_core の WX step・範囲(H-10)は S22、wifi_at は S23 / S26"
   rc=0
   cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wx_core" || rc=1
   [ -x "$BUILD/test_wx_core" ] && { timeout 300 "$BUILD/test_wx_core" || rc=1; }
+  cc_nowarn $STD $WARN -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wx_core_wx" || rc=1
+  [ -x "$BUILD/test_wx_core_wx" ] && { timeout 300 "$BUILD/test_wx_core_wx" || rc=1; }
   result S24 $rc
 fi
 
@@ -402,7 +406,7 @@ fi
 
 # ---------------------------------------------------------------- S26
 if sel S26; then
-  echo "### S26 天気・時刻同期の製品への組み込み(docs/design.md §22.7・§22.12・§22.16 の順 5): APP_WX = 1(APP_WIFI_TEST = 0)の wifi_at.c(wx_init / wx_poll / wx_request / wx_ui / wx_log_state)を偽の ESP32 で試験(秘密あり / なし)、app_main.c の組み込み(偽の wifi_at API)、APP_WX = 0 / APP_WIFI_TEST = 0 の組み合わせで中身が消えること"
+  echo "### S26 株価の取得の製品への組み込み(docs/design.md §5.7・§5.9・§7.5・Phase 3): APP_WX = 1(APP_WIFI_TEST = 0)の wifi_at.c(wx_init / wx_poll / wx_request / stk_ui / wx_log_state)を偽の ESP32 で試験(秘密あり / なし。3 銘柄の周期・失敗分のやり直し・全部失敗の再接続・[stk] ログ・表示値 stk_view_t)、app_main.c の組み込み(偽の wifi_at API)、APP_WX = 0 / APP_WIFI_TEST = 0 の組み合わせで中身が消えること"
   rc=0
   echo "  APP_WX = 1 かつ APP_WIFI_TEST = 0 の wifi_at.c(WIFI_AT_HOST_TEST。秘密あり / なし)・app_main.c の -fsyntax-only"
   for f in app_main wifi_at; do
@@ -415,7 +419,7 @@ if sel S26; then
   echo "  APP_WX = 1 だけ(APP_WIFI_TEST = 0)では wifi_at.o に製品の API が入り、専用モード(wifi_test_main)は入らない。APP_WX = 0 かつ APP_WIFI_TEST = 0 では空(S23)"
   o="$("$CC" $STD -Wall -Wextra $RXDEF -DAPP_WX=1 -DWIFI_AT_HOST_TEST -I"$APP" $FIT_INC -c "$APP/wifi_at.c" -o "$BUILD/wifi_at_wx.o" 2>&1)"; crc=$?
   [ $crc -eq 0 ] || { echo "$o" | head; rc=1; }
-  for sym in wx_init wx_poll wx_request wx_ui wx_log_state; do nm "$BUILD/wifi_at_wx.o" | grep -qE " [Tt] _?$sym\$" || { echo "  NG: $sym が無い"; rc=1; }; done
+  for sym in wx_init wx_poll wx_request stk_ui wx_ui wx_log_state; do nm "$BUILD/wifi_at_wx.o" | grep -qE " [Tt] _?$sym\$" || { echo "  NG: $sym が無い"; rc=1; }; done
   if nm "$BUILD/wifi_at_wx.o" | grep -qE " [Tt] _?wifi_test_main\$"; then echo "  NG: APP_WX = 1 だけで wifi_test_main が入っている"; rc=1; fi
   echo "  結合試験 test_wifi_at.c の製品版(2種: 秘密あり / -DT_NOSECRET)"
   W23="$APP/wifi_core.c $APP/wx_core.c $APP/stk_core.c $APP/app_logfmt.c"
@@ -423,7 +427,7 @@ if sel S26; then
   [ -x "$BUILD/test_wifi_at_wx" ] && { timeout 300 "$BUILD/test_wifi_at_wx" || rc=1; }
   EXTRA_CFLAGS="-DAPP_WX=1 -DWIFI_AT_HOST_TEST -DT_NOSECRET" build_fit_test "$BUILD/test_wifi_at_wx_ns" "$HERE/test_wifi_at.c" $W23 || rc=1
   [ -x "$BUILD/test_wifi_at_wx_ns" ] && { timeout 300 "$BUILD/test_wifi_at_wx_ns" || rc=1; }
-  echo "  wifi_core の quiet(製品: res=start と key=oth を出さない)は S22(test_wifi_core.c)"
+  echo "  wifi_core の quiet(製品: res=start・res=ok と key=oth を出さない)は S22(test_wifi_core.c)"
   result S26 $rc
 fi
 
@@ -525,7 +529,45 @@ if sel S31; then
 fi
 
 # S32(不具合の可能性の別枠)は、設計の修正で SUSPECT が 0 になったので、試験を S31(test_stk_indep の I)へ格上げして廃止した。
-# 新しい「不具合の可能性」を見つけたら、落ちる試験を test_stk_indep の t_suspect に足し、ここへ S32(--suspect を走らせ、落ちたら SUSPECTS を増やす)を作り直す。
+# 新しい「不具合の可能性」を見つけたら、落ちる試験を test_stk_indep の t_suspect に足し、ここへ(--suspect を走らせ、落ちたら SUSPECTS を増やす)作り直す。
+
+# ---------------------------------------------------------------- S33
+if sel S33; then
+  echo "### S33 変異試験(Phase 3: 取得と予定表の試験が本当に効いているか。docs/design.md H-6・H-10): 製品コードの複製($BUILD/mut)に 1 か所だけ誤りを入れ、試験が失敗することを確かめる。製品のファイルは書き換えない"
+  rc=0
+  MUT="$BUILD/mut"
+  mut_run() { # $1=名前 $2=変えるファイル $3=sed 式 $4=試験(.c) $5..=リンクするソース(MUT の中の名前)
+    local name="$1" file="$2" expr="$3" tsrc="$4" f srcs=""
+    shift 4
+    rm -rf "$MUT"; mkdir -p "$MUT"
+    cp "$APP/wx_core.h" "$APP/wx_core.c" "$APP/stk_core.h" "$APP/stk_core.c" "$APP/wifi_sw.h" "$APP/clut8_sw.h" "$APP/wifi_core.h" "$APP/wifi_core.c" "$MUT/"
+    cp "$MUT/$file" "$MUT/$file.orig"
+    sed -i "$expr" "$MUT/$file"
+    if cmp -s "$MUT/$file" "$MUT/$file.orig"; then echo "  NG: 変異が当たっていない: $name"; rc=1; return; fi
+    for f in "$@"; do srcs="$srcs $MUT/$f"; done
+    if ! "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/$tsrc" $srcs -o "$MUT/t" >"$MUT/cc.log" 2>&1; then echo "  NG: 変異版がコンパイルできない: $name"; head -5 "$MUT/cc.log"; rc=1; return; fi
+    if timeout 300 "$MUT/t" >"$MUT/run.log" 2>&1; then echo "  NG: 変異 [$name] を試験が検出しなかった(合格してしまった)"; rc=1
+    else echo "  ok: 変異 [$name] で試験が失敗した($(grep -c 'FAIL' "$MUT/run.log") 件)"; fi
+  }
+  echo "  まず無変更の複製で試験が通ること(変異試験の前提)"
+  rm -rf "$MUT"; mkdir -p "$MUT"
+  cp "$APP/wx_core.h" "$APP/wx_core.c" "$APP/stk_core.h" "$APP/stk_core.c" "$APP/wifi_sw.h" "$APP/clut8_sw.h" "$APP/wifi_core.h" "$APP/wifi_core.c" "$MUT/"
+  "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$MUT/wx_core.c" "$MUT/stk_core.c" -o "$MUT/t0" >/dev/null 2>&1 && "$MUT/t0" >/dev/null 2>&1 || { echo "  NG: 無変更の複製で test_wx_core が通らない"; rc=1; }
+  "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$MUT/wifi_core.c" "$MUT/wx_core.c" "$MUT/stk_core.c" -o "$MUT/t1" >/dev/null 2>&1 && "$MUT/t1" >/dev/null 2>&1 || { echo "  NG: 無変更の複製で test_wifi_core が通らない"; rc=1; }
+  # 予定表(H-6)
+  mut_run "やり直しの回数 2 回 → 3 回"        wx_core.c 's/s->retry_n < WX_RETRY_MAX/s->retry_n <= WX_RETRY_MAX/' test_wx_core.c wx_core.c stk_core.c
+  mut_run "429 の待ち 300 秒 → 20 秒"          wx_core.c 's/wait_ms(s, WX_ACT_FETCH, WX_RATE_MS, now_ms)/wait_ms(s, WX_ACT_FETCH, WX_RETRY_MS, now_ms)/' test_wx_core.c wx_core.c stk_core.c
+  mut_run "周期の判定 >= 10 分 → > 10 分"      wx_core.c 's/(uint32_t)(now_ms - s->t_fetch0) >= WX_INTERVAL_MS/(uint32_t)(now_ms - s->t_fetch0) > WX_INTERVAL_MS/' test_wx_core.c wx_core.c stk_core.c
+  mut_run "全部失敗の再接続の条件(応答なしだけ)を外す" wx_core.c 's/(s->nomask == WX_SYM_ALL)/(1)/' test_wx_core.c wx_core.c stk_core.c
+  mut_run "周期の始まりを銘柄 1 からにする"    wx_core.c 's/s->todo      = (uint8_t)WX_SYM_ALL;/s->todo      = (uint8_t)(WX_SYM_ALL \& 6u);/' test_wx_core.c wx_core.c stk_core.c
+  # wifi_core(H-10)
+  mut_run "SSL の接続の待ち 20 秒 → 10 秒"      wifi_core.c 's/#define SSL_TCP_TIMEOUT_MS (20000u)/#define SSL_TCP_TIMEOUT_MS (10000u)/' test_wifi_core.c wifi_core.c wx_core.c stk_core.c
+  mut_run "ready の err=9 を err=8 にする"      wifi_core.c 's/c->wx.err  = 9u;/c->wx.err  = 8u;/' test_wifi_core.c wifi_core.c wx_core.c stk_core.c
+  mut_run "結果に銘柄 sym を入れない"           wifi_core.c 's/c->wx.sym      = c->sym;//' test_wifi_core.c wifi_core.c wx_core.c stk_core.c
+  # 書式(H-11)
+  mut_run "[stk] res=ok のキー名 http= を変える" wx_core.c 's/ http=%u ms=%lu sync=/ htp=%u ms=%lu sync=/' test_wx_core.c wx_core.c stk_core.c
+  result S33 $rc
+fi
 
 echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS SUSPECT(不具合の可能性)=$SUSPECTS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"
 [ $FAILS -eq 0 ]

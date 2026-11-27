@@ -1,5 +1,5 @@
-/* wx_core.c - 株価(Yahoo chart API)・天気の取得と時刻同期の論理部。標準Cのみ。FITのヘッダを include しない。
- * 仕様: 株価 = docs/design.md §4・§5。天気(旧)= docs/base/design.md §22、docs/design-uart.md §13。
+/* wx_core.c - 株価(Yahoo chart API)の取得と時刻同期の論理部。標準Cのみ。FITのヘッダを include しない。
+ * 仕様: docs/design.md §4・§5・§7.5。
  * 応答の本文は解析して数値だけを取り出す。ログ関数(wx_fmt_*)は本文・SSID・パスワードを引数に取らない。 */
 #include <stdio.h>
 #include <string.h>
@@ -10,10 +10,8 @@
 #if APP_WIFI_ON   /* 0 の時は中身を消す(wifi_sw.h) */
 
 #define JST_OFFSET_S   (32400u)    /* +9 時間 */
-#define TEMP_LIM_X10   (600u)      /* ±60.0℃ */
 
-static const char *const k_kind_name[WX_KIND_END] = { "sun", "partly", "cloud", "fog", "rain", "snow", "thunder", "unknown" };
-static const char *const k_src_name[WX_SRC_END]   = { "boot", "timer", "touch", "uart" };
+static const char *const k_src_name[WX_SRC_END]   = { "boot", "timer", "touch", "uart", "retry" };
 static const char *const k_net_name[4]            = { "off", "conn", "on", "err" };
 static const char *const k_req_name[4]            = { "ok", "ignored", "busy", "off" };
 static const char *const k_month[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
@@ -40,13 +38,14 @@ static bool arg_ok(char *buf, size_t size)
 /* 接続先の表(wx_target_t の並び)。要求の Host も同じ host を使う */
 typedef struct { const char *type; const char *host; uint16_t port; } tgt_t;
 static const tgt_t k_tgt[WX_TGT_END] = {
-    { "TCP", "api.open-meteo.com",         80u  },
-    { "TCP", "query1.finance.yahoo.com",   80u  },
-    { "SSL", "query1.finance.yahoo.com",   443u },
-    { "SSL", "www.google.com",             443u },
-    { "SSL", "query1.finance.yahoo.com",   443u }
+    { "SSL", WX_HOST, 443u }
+#if APP_WIFI_TEST
+    , { "TCP", WX_HOST, 80u }
+    , { "SSL", "www.google.com", 443u }
+    , { "SSL", WX_HOST, 443u }
+#endif
 };
-static const char *const k_sym_enc[3] = { "6723.T", "%5EN225", "%5EGSPC" };   /* ^ は %5E */
+static const char *const k_sym_enc[WX_NSYM] = { "6723.T", "%5EN225", "%5EGSPC" };   /* ^ は %5E */
 
 size_t wx_build_cipstart(char *buf, size_t size, wx_target_t t)
 {
@@ -61,65 +60,26 @@ bool wx_target_ssl(wx_target_t t)
     return ((unsigned)t < (unsigned)WX_TGT_END) && (k_tgt[t].type[0] == 'S');
 }
 
-/* 天気の要求は固定文字列。外部の入力を含めない(190 バイト) */
-#define WX_REQUEST \
-    "GET /v1/forecast?latitude=35.68&longitude=139.76&current=temperature_2m,weather_code&timezone=Asia%2FTokyo HTTP/1.0\r\n" \
-    "Host: api.open-meteo.com\r\nUser-Agent: rx72n-demo/1\r\nConnection: close\r\n\r\n"
-
-size_t wx_build_request(char *buf, size_t size, wx_target_t t, uint8_t sym)
+size_t wx_build_request_t(char *buf, size_t size, wx_target_t t, uint8_t sym)
 {
     if (!arg_ok(buf, size) || ((unsigned)t >= (unsigned)WX_TGT_END)) {
         return 0u;
     }
-    if (t == WX_TGT_METEO) {
-        if (size < (sizeof(WX_REQUEST))) {        /* sizeof = 長さ + NUL */
-            return 0u;
-        }
-        memcpy(buf, WX_REQUEST, sizeof(WX_REQUEST));
-        return sizeof(WX_REQUEST) - 1u;
-    }
+#if APP_WIFI_TEST
     if (t == WX_TGT_GOOGLE_SSL) {                 /* TLS が通るかだけを見る対照(design.md §5.5.2 の g) */
         return fin(buf, size, snprintf(buf, size, "GET / HTTP/1.0\r\nHost: %s\r\nUser-Agent: " WX_UA "\r\nConnection: close\r\n\r\n", k_tgt[t].host));
     }
-    if (sym >= 3u) {
+#endif
+    if (sym >= (uint8_t)WX_NSYM) {
         return 0u;
     }
     return fin(buf, size, snprintf(buf, size, "GET /v8/finance/chart/%s?range=" WX_RANGE_STR "&interval=1d HTTP/1.0\r\nHost: %s\r\n"
                                    "User-Agent: " WX_UA "\r\nConnection: close\r\n\r\n", k_sym_enc[sym], k_tgt[t].host));
 }
 
-const char *wx_kind_name(uint8_t kind)
+size_t wx_build_request(char *buf, size_t size, uint8_t sym)
 {
-    return (kind < (uint8_t)WX_KIND_END) ? k_kind_name[kind] : NULL;
-}
-
-/* WMO コード → アイコン(design.md §22.5 の表) */
-uint8_t wx_kind_of(uint32_t w)
-{
-    if (w <= 1u) {
-        return (uint8_t)WX_KIND_SUN;
-    }
-    if (w == 2u) {
-        return (uint8_t)WX_KIND_PARTLY;
-    }
-    if (w == 3u) {
-        return (uint8_t)WX_KIND_CLOUD;
-    }
-    if ((w == 45u) || (w == 48u)) {
-        return (uint8_t)WX_KIND_FOG;
-    }
-    /* 表にあるコードだけ(52・54・62・64・72・74 などの未定義は UNKNOWN) */
-    if ((w == 51u) || (w == 53u) || (w == 55u) || (w == 56u) || (w == 57u) || (w == 61u) || (w == 63u) || (w == 65u) || (w == 66u) || (w == 67u)
-        || ((w >= 80u) && (w <= 82u))) {
-        return (uint8_t)WX_KIND_RAIN;
-    }
-    if ((w == 71u) || (w == 73u) || (w == 75u) || (w == 77u) || (w == 85u) || (w == 86u)) {
-        return (uint8_t)WX_KIND_SNOW;
-    }
-    if ((w == 95u) || (w == 96u) || (w == 99u)) {
-        return (uint8_t)WX_KIND_THUNDER;
-    }
-    return (uint8_t)WX_KIND_UNKNOWN;
+    return wx_build_request_t(buf, size, WX_TGT_YAHOO_SSL, sym);
 }
 
 /* ================================================================ 日付 */
@@ -328,85 +288,7 @@ static bool find_date(const char *h, size_t hn, uint32_t *utc_s)
     return false;
 }
 
-static bool is_term(char c)
-{
-    return (c == ',') || (c == '}') || (c == ' ') || (c == '\r') || (c == '\n');
-}
-
-/* 気温。0 = 成功、5 = 無い・読めない・途切れ、6 = 範囲外 */
-static uint8_t read_temp(const char *p, const char *end, int16_t *out)
-{
-    bool     neg = false;
-    unsigned id  = 0u;
-    unsigned fd  = 0u;
-    uint32_t iv  = 0u;
-    uint32_t fv  = 0u;
-    uint32_t t10;
-
-    if ((p < end) && (*p == '-')) {
-        neg = true;
-        p++;
-    }
-    while ((p < end) && is_dig(*p)) {
-        if (iv < 1000u) {
-            iv = (iv * 10u) + (uint32_t)(*p - '0');
-        }
-        id++;
-        p++;
-    }
-    if ((p < end) && (*p == '.')) {
-        p++;
-        while ((p < end) && is_dig(*p)) {
-            if (fd == 0u) {
-                fv = (uint32_t)(*p - '0');                 /* 2 桁目以降は切り捨て */
-            }
-            fd++;
-            p++;
-        }
-    }
-    if (((id + fd) == 0u) || (p >= end) || !is_term(*p)) {
-        return 5u;                                          /* null・文字列・数字なし・途切れ・指数表記 */
-    }
-    t10 = (iv * 10u) + fv;
-    if ((id > 2u) || (t10 > TEMP_LIM_X10)) {
-        return 6u;
-    }
-    *out = neg ? (int16_t)(-(int32_t)t10) : (int16_t)t10;
-    return 0u;
-}
-
-/* 天気コード。0 = 成功、5 = 途切れ、6 = null・負・100 以上 */
-static uint8_t read_code(const char *p, const char *end, uint8_t *out)
-{
-    bool     neg = false;
-    unsigned n   = 0u;
-    uint32_t v   = 0u;
-
-    if ((p < end) && (*p == '-')) {
-        neg = true;
-        p++;
-    }
-    while ((p < end) && is_dig(*p)) {
-        if (v < 1000u) {
-            v = (v * 10u) + (uint32_t)(*p - '0');
-        }
-        n++;
-        p++;
-    }
-    if (n == 0u) {
-        return ((end - p) < 4) ? 5u : 6u;                   /* null 等は範囲外。4 文字に満たない = 途切れ */
-    }
-    if (p >= end) {
-        return 5u;
-    }
-    if (neg || (v > 99u) || !is_term(*p)) {
-        return 6u;
-    }
-    *out = (uint8_t)v;
-    return 0u;
-}
-
-/* 状態行・Date:・本文の位置を調べる。out の結果の項目(天気・株価とも)を初期値にする(ms / first_ms / closed / len / sym は触らない)。
+/* 状態行・Date:・本文の位置を調べる。out の結果の項目を初期値にする(ms / first_ms / closed / len / sym は触らない)。
  * 戻り値 = 状態が 200 で、本文の解析へ進める。失敗は out->err(3 = 状態行まで届かない / 4 = 状態が 200 でない・状態行の形が違う) */
 static bool parse_head(const char *buf, size_t len, wx_result_t *out, const char **bodyp)
 {
@@ -418,11 +300,7 @@ static bool parse_head(const char *buf, size_t len, wx_result_t *out, const char
     out->ok            = 0u;
     out->err           = 0u;
     out->have_date     = 0u;
-    out->wmo           = 0u;
-    out->kind          = (uint8_t)WX_KIND_UNKNOWN;
-    out->temp_x10      = 0;
     out->http          = 0u;
-    out->obs           = 0u;
     out->jst_s         = 0u;
     out->has_bar_prev  = 0u;
     out->cur           = (uint8_t)WX_CUR_NONE;
@@ -458,53 +336,6 @@ static bool parse_head(const char *buf, size_t len, wx_result_t *out, const char
         out->err = 4u;
         return false;
     }
-    return true;
-}
-
-bool wx_parse_weather(const char *buf, size_t len, wx_result_t *out)
-{
-    const char *end;
-    const char *body;
-    const char *cur;
-    const char *v;
-
-    if (!parse_head(buf, len, out, &body)) {
-        return false;
-    }
-    if (body == NULL) {
-        body = buf;
-    }
-    end = buf + len;
-    cur = find_after(body, (size_t)(end - body), "\"current\":");          /* "current_units": は一致しない */
-    if (cur == NULL) {
-        out->err = 5u;
-        return false;
-    }
-    v = find_after(cur, (size_t)(end - cur), "\"temperature_2m\":");
-    if (v == NULL) {
-        out->err = 5u;
-        return false;
-    }
-    out->err = read_temp(v, end, &out->temp_x10);
-    if (out->err != 0u) {
-        return false;
-    }
-    v = find_after(cur, (size_t)(end - cur), "\"weather_code\":");
-    if (v == NULL) {
-        out->err = 5u;
-        return false;
-    }
-    out->err = read_code(v, end, &out->wmo);
-    if (out->err != 0u) {
-        return false;
-    }
-    out->kind = wx_kind_of(out->wmo);
-    v = find_after(cur, (size_t)(end - cur), "\"time\":\"");
-    if ((v != NULL) && ((end - v) >= 16) && is_dig(v[0]) && is_dig(v[1]) && is_dig(v[2]) && is_dig(v[3]) && (v[4] == '-') && (v[7] == '-')
-        && (v[10] == 'T') && is_dig(v[11]) && is_dig(v[12]) && (v[13] == ':') && is_dig(v[14]) && is_dig(v[15])) {
-        out->obs = (uint16_t)((((v[11] - '0') * 10) + (v[12] - '0')) * 100 + ((v[14] - '0') * 10) + (v[15] - '0'));
-    }
-    out->ok = 1u;
     return true;
 }
 
@@ -825,36 +656,59 @@ uint16_t wx_clock_min(const wx_clock_t *k, uint32_t now_ms)
     return (uint16_t)((s % 86400u) / 60u);
 }
 
-/* ================================================================ ログ行 */
+/* ================================================================ ログ行([stk]。design.md §7.5) */
 
-size_t wx_fmt_ok(char *buf, size_t size, wx_src_t src, const wx_result_t *r)
+static char mkt_ch(uint8_t m)
+{
+    return (m == (uint8_t)STK_MKT_TRADING) ? 't' : ((m == (uint8_t)STK_MKT_CLOSED) ? 'c' : 'n');
+}
+
+/* jst_s の時刻を hhmmss(7 文字 = 6 + NUL)で o へ */
+static void put_hms(char *o, size_t n, uint32_t jst_s)
 {
     wx_date_t d;
-    char      jst[8];
 
-    if (!arg_ok(buf, size) || ((unsigned)src >= (unsigned)WX_SRC_END) || (r == NULL) || (r->kind >= (uint8_t)WX_KIND_END)
-        || (r->temp_x10 < -(int16_t)TEMP_LIM_X10) || (r->temp_x10 > (int16_t)TEMP_LIM_X10) || (r->wmo > 99u) || (r->http > 999u) || (r->obs > 9999u)) {
+    wx_date_fields(jst_s, &d);
+    (void)snprintf(o, n, "%02u%02u%02u", (unsigned)(d.hour % 100u), (unsigned)(d.min % 100u), (unsigned)(d.sec % 100u));
+}
+
+size_t wx_fmt_ok(char *buf, size_t size, wx_src_t src, const wx_result_t *r, uint8_t mkt)
+{
+    char       jst[8];
+    stk_calc_t c;
+
+    if (!arg_ok(buf, size) || ((unsigned)src >= (unsigned)WX_SRC_END) || (r == NULL) || (r->sym >= (uint8_t)WX_NSYM) || (mkt > (uint8_t)STK_MKT_CLOSED)
+        || (r->http < 100u) || (r->http > 999u) || !stk_calc(r->price_x100, r->prev_x100, &c)) {
         return 0u;
     }
     if (r->have_date != 0u) {
-        wx_date_fields(r->jst_s, &d);
-        (void)snprintf(jst, sizeof jst, "%02u%02u%02u", (unsigned)(d.hour % 100u), (unsigned)(d.min % 100u), (unsigned)(d.sec % 100u));
+        put_hms(jst, sizeof jst, r->jst_s);
     } else {
         (void)snprintf(jst, sizeof jst, "none");
     }
-    return fin(buf, size, snprintf(buf, size, "[wx] res=ok src=%s temp10=%d wmo=%u kind=%s http=%u ms=%lu sync=%u jst=%s obs=%04u closed=%u\r\n",
-                                   k_src_name[src], (int)r->temp_x10, (unsigned)r->wmo, k_kind_name[r->kind], (unsigned)r->http,
-                                   (unsigned long)r->ms, (unsigned)((r->have_date != 0u) ? 1u : 0u), jst, (unsigned)r->obs,
+    return fin(buf, size, snprintf(buf, size, "[stk] res=ok sym=%u src=%s p100=%ld c100=%ld bp=%ld mkt=%c http=%u ms=%lu sync=%u jst=%s len=%u closed=%u\r\n",
+                                   (unsigned)r->sym, k_src_name[src], (long)r->price_x100, (long)r->prev_x100, (long)c.pct_bp, mkt_ch(mkt),
+                                   (unsigned)r->http, (unsigned long)r->ms, (unsigned)((r->have_date != 0u) ? 1u : 0u), jst, (unsigned)r->len,
                                    (unsigned)((r->closed != 0u) ? 1u : 0u)));
 }
 
 size_t wx_fmt_fail(char *buf, size_t size, wx_src_t src, const wx_result_t *r)
 {
-    if (!arg_ok(buf, size) || ((unsigned)src >= (unsigned)WX_SRC_END) || (r == NULL) || (r->err < 1u) || (r->err > 9u) || (r->http > 999u)) {
+    if (!arg_ok(buf, size) || ((unsigned)src >= (unsigned)WX_SRC_END) || (r == NULL) || (r->sym >= (uint8_t)WX_NSYM)
+        || (r->err < 1u) || (r->err > 9u) || (r->http > 999u)) {
         return 0u;
     }
-    return fin(buf, size, snprintf(buf, size, "[wx] res=fail src=%s err=%u http=%u ms=%lu len=%u\r\n",
-                                   k_src_name[src], (unsigned)r->err, (unsigned)r->http, (unsigned long)r->ms, (unsigned)r->len));
+    return fin(buf, size, snprintf(buf, size, "[stk] res=fail sym=%u src=%s err=%u http=%u ms=%lu len=%u\r\n",
+                                   (unsigned)r->sym, k_src_name[src], (unsigned)r->err, (unsigned)r->http, (unsigned long)r->ms, (unsigned)r->len));
+}
+
+size_t wx_fmt_cycle(char *buf, size_t size, uint32_t n, uint8_t ok_mask, uint8_t fail_mask, uint32_t ms)
+{
+    if (!arg_ok(buf, size) || (ok_mask > WX_SYM_ALL) || (fail_mask > WX_SYM_ALL)) {
+        return 0u;
+    }
+    return fin(buf, size, snprintf(buf, size, "[stk] cycle=%lu ok=%u fail=%u ms=%lu\r\n",
+                                   (unsigned long)n, (unsigned)ok_mask, (unsigned)fail_mask, (unsigned long)ms));
 }
 
 size_t wx_fmt_req(char *buf, size_t size, wx_req_t req, wx_src_t src)
@@ -862,41 +716,58 @@ size_t wx_fmt_req(char *buf, size_t size, wx_req_t req, wx_src_t src)
     if (!arg_ok(buf, size) || ((unsigned)req < 1u) || ((unsigned)req > 3u) || ((src != WX_SRC_TOUCH) && (src != WX_SRC_UART))) {
         return 0u;
     }
-    return fin(buf, size, snprintf(buf, size, "[wx] req=%s src=%s\r\n", k_req_name[req], k_src_name[src]));
+    return fin(buf, size, snprintf(buf, size, "[stk] req=%s src=%s\r\n", k_req_name[req], k_src_name[src]));
 }
 
-size_t wx_fmt_state(char *buf, size_t size, const wx_view_t *v)
+size_t wx_fmt_net(char *buf, size_t size, const wx_netlog_t *v)
 {
-    wx_date_t d;
-    char      clk[8];
-    char      date[12];
-    unsigned  wd;
-    long      age;
-    int       n1;
+    char clk[8];
+    char upd[8];
 
-    if (!arg_ok(buf, size) || (v == NULL) || (v->net > 3u) || ((v->have != 0u) && (v->kind >= (uint8_t)WX_KIND_END))
-        || (v->temp_x10 < -(int16_t)TEMP_LIM_X10) || (v->temp_x10 > (int16_t)TEMP_LIM_X10)) {
+    if (!arg_ok(buf, size) || (v == NULL) || (v->net > 3u) || (v->have_mask > WX_SYM_ALL) || (v->stale_mask > WX_SYM_ALL)) {
         return 0u;
     }
     if (v->synced != 0u) {
-        wx_date_fields(v->jst_s, &d);
-        (void)snprintf(clk, sizeof clk, "%02u%02u%02u", (unsigned)(d.hour % 100u), (unsigned)(d.min % 100u), (unsigned)(d.sec % 100u));
-        (void)snprintf(date, sizeof date, "%04u%02u%02u", (unsigned)(d.year % 10000u), (unsigned)(d.month % 100u), (unsigned)(d.day % 100u));
-        wd = d.wday;
+        put_hms(clk, sizeof clk, v->jst_s);
     } else {
         (void)snprintf(clk, sizeof clk, "none");
-        (void)snprintf(date, sizeof date, "none");
-        wd = 9u;
     }
-    age = (v->age_s < 0) ? -1L : (long)((v->age_s > 99999999L) ? 99999999L : v->age_s);
-    n1 = snprintf(buf, size, "[wx] net=%s busy=%u have=%u temp10=%d", k_net_name[v->net], (unsigned)((v->busy != 0u) ? 1u : 0u),
-                  (unsigned)((v->have != 0u) ? 1u : 0u), (int)v->temp_x10);
-    if ((n1 <= 0) || ((size_t)n1 >= size)) {
-        buf[0] = '\0';
+    if (v->upd_min <= (uint16_t)STK_MINUTES_MAX) {
+        (void)snprintf(upd, sizeof upd, "%02u%02u", (unsigned)(v->upd_min / 60u), (unsigned)(v->upd_min % 60u));
+    } else {
+        (void)snprintf(upd, sizeof upd, "none");
+    }
+    return fin(buf, size, snprintf(buf, size, "[stk] net=%s busy=%u have=%u stale=%u clk=%s upd=%s\r\n", k_net_name[v->net],
+                                   (unsigned)((v->busy != 0u) ? 1u : 0u), (unsigned)v->have_mask, (unsigned)v->stale_mask, clk, upd));
+}
+
+size_t wx_fmt_sym(char *buf, size_t size, const wx_symlog_t *v)
+{
+    static const char dir_ch[3] = { 'u', 'd', 'f' };
+    long p100 = 0;
+    long d100 = 0;
+    long bp   = 0;
+    long age  = -1;
+    char dir  = 'f';
+    char mk   = 'n';
+
+    if (!arg_ok(buf, size) || (v == NULL) || (v->sym >= (uint8_t)WX_NSYM)) {
         return 0u;
     }
-    return fin(buf, size, n1 + snprintf(buf + n1, size - (size_t)n1, " kind=%s age=%ld clk=%s date=%s wd=%u sync=%u\r\n",
-                                        (v->have != 0u) ? k_kind_name[v->kind] : "none", age, clk, date, wd, (unsigned)((v->synced != 0u) ? 1u : 0u)));
+    if (v->have != 0u) {
+        if ((v->dir > (uint8_t)STK_FLAT) || (v->mkt > (uint8_t)STK_MKT_CLOSED) || (v->p100 < 0) || (v->p100 > STK_X100_MAX)
+            || (v->d100 > STK_X100_MAX) || (v->d100 < -STK_X100_MAX) || (v->bp > STK_BP_MAX) || (v->bp < -STK_BP_MAX) || (v->age_s < -1)) {
+            return 0u;
+        }
+        p100 = (long)v->p100;
+        d100 = (long)v->d100;
+        bp   = (long)v->bp;
+        age  = (long)v->age_s;
+        dir  = dir_ch[v->dir];
+        mk   = mkt_ch(v->mkt);
+    }
+    return fin(buf, size, snprintf(buf, size, "[stk] sym=%u have=%u p100=%ld d100=%ld bp=%ld dir=%c mkt=%c age=%ld\r\n",
+                                   (unsigned)v->sym, (unsigned)((v->have != 0u) ? 1u : 0u), p100, d100, bp, dir, mk, age));
 }
 
 /* ================================================================ 取得の予定表 */
@@ -915,25 +786,41 @@ void wx_sched_init(wx_sched_t *s, bool enabled, uint32_t now_ms)
     }
 }
 
+static bool due(const wx_sched_t *s, uint32_t now_ms)
+{
+    return (uint32_t)(now_ms - s->t_due) < 0x80000000u;          /* 期限を過ぎた(32bit の巻き戻りに対応) */
+}
+
 wx_act_t wx_sched_poll(wx_sched_t *s, uint32_t now_ms)
 {
+    uint8_t i;
+
     switch (s->state) {
     case (uint8_t)WX_S_BOOT_WAIT:
-        if ((uint32_t)(now_ms - s->t_due) < 0x80000000u) {      /* 期限を過ぎた(32bit の巻き戻りに対応) */
+        if (due(s, now_ms)) {
             s->state = (uint8_t)WX_S_CONNECT;
         }
         break;
     case (uint8_t)WX_S_IDLE:
         if ((uint32_t)(now_ms - s->t_fetch0) >= WX_INTERVAL_MS) {
-            s->state = (uint8_t)WX_S_FETCH;
-            s->src   = (uint8_t)WX_SRC_TIMER;
+            s->state     = (uint8_t)WX_S_FETCH;
+            s->src       = (uint8_t)WX_SRC_TIMER;
+            s->new_cycle = 1u;
         }
         break;
     case (uint8_t)WX_S_RETRY:
-        if ((uint32_t)(now_ms - s->t_due) < 0x80000000u) {
-            s->state = (s->want == (uint8_t)WX_ACT_FETCH) ? (uint8_t)WX_S_FETCH : (uint8_t)WX_S_CONNECT;
-            if (s->state == (uint8_t)WX_S_FETCH) {
-                s->src = (uint8_t)WX_SRC_TIMER;                  /* やり直しは timer */
+        if (due(s, now_ms)) {
+            if (s->want != (uint8_t)WX_ACT_FETCH) {
+                s->state = (uint8_t)WX_S_CONNECT;
+            } else {
+                s->state = (uint8_t)WX_S_FETCH;
+                if (s->rate != 0u) {                              /* 429 の待ちが終わった: 周期を最初からやり直す */
+                    s->rate      = 0u;
+                    s->src       = (uint8_t)WX_SRC_TIMER;
+                    s->new_cycle = 1u;
+                } else {
+                    s->src = (uint8_t)WX_SRC_RETRY;              /* 失敗した銘柄だけ(todo は done が用意済み) */
+                }
             }
         }
         break;
@@ -944,29 +831,48 @@ wx_act_t wx_sched_poll(wx_sched_t *s, uint32_t now_ms)
         return WX_ACT_NONE;
     }
     if (s->state == (uint8_t)WX_S_CONNECT) {
-        s->started = 1u;
-        s->net     = (uint8_t)WX_NET_CONN;
+        s->started = 1u;                                         /* net は変えない: 起動直後 = conn、失敗の後の再接続 = err のまま(接続できるまでオフライン表示。ちらつかせない) */
         return WX_ACT_CONNECT;
     }
     if (s->state == (uint8_t)WX_S_FETCH) {
-        s->started  = 1u;
-        s->t_fetch0 = now_ms;
+        if ((s->new_cycle != 0u) || ((s->todo & WX_SYM_ALL) == 0u)) {
+            s->new_cycle = 0u;
+            s->todo      = (uint8_t)WX_SYM_ALL;
+            s->failed    = 0u;
+            s->okmask    = 0u;
+            s->nomask    = 0u;
+            s->retry_n   = 0u;
+            s->t_fetch0  = now_ms;
+        }
+        for (i = 0u; (i < (uint8_t)WX_NSYM) && (((s->todo >> i) & 1u) == 0u); i++) {
+            /* 最も小さい未取得の銘柄 */
+        }
+        s->sym     = i;
+        s->started = 1u;
         return WX_ACT_FETCH;
     }
     return WX_ACT_NONE;
 }
 
-static void retry_in(wx_sched_t *s, wx_act_t want, uint32_t wait_ms, uint32_t now_ms)
+static void wait_ms(wx_sched_t *s, wx_act_t want, uint32_t wait, uint32_t now_ms)
 {
     s->state = (uint8_t)WX_S_RETRY;
     s->want  = (uint8_t)want;
-    s->t_due = now_ms + wait_ms;
-    s->net   = (uint8_t)WX_NET_ERR;
+    s->t_due = now_ms + wait;
+}
+
+static void cycle_end(wx_sched_t *s, uint32_t now_ms)
+{
+    s->cyc.n++;
+    s->cyc.ms   = now_ms - s->t_fetch0;
+    s->cyc.ok   = s->okmask;
+    s->cyc.fail = s->failed;
 }
 
 void wx_sched_done(wx_sched_t *s, wx_act_t act, bool ok, uint16_t http, uint32_t now_ms)
 {
     static const uint32_t k_conn_wait[3] = { 60000u, 120000u, 300000u };
+    uint8_t bit;
 
     if ((s->started == 0u) || ((act == WX_ACT_CONNECT) && (s->state != (uint8_t)WX_S_CONNECT))
         || ((act == WX_ACT_FETCH) && (s->state != (uint8_t)WX_S_FETCH)) || (act == WX_ACT_NONE)) {
@@ -977,30 +883,55 @@ void wx_sched_done(wx_sched_t *s, wx_act_t act, bool ok, uint16_t http, uint32_t
         if (ok) {
             s->conn_fail = 0u;
             s->net       = (uint8_t)WX_NET_ON;
-            s->state     = (uint8_t)WX_S_FETCH;                  /* 直ちに最初の取得 */
+            s->state     = (uint8_t)WX_S_FETCH;                  /* 直ちに最初の周期 */
+            s->new_cycle = 1u;
         } else {
-            retry_in(s, WX_ACT_CONNECT, k_conn_wait[(s->conn_fail < 2u) ? s->conn_fail : 2u], now_ms);
+            wait_ms(s, WX_ACT_CONNECT, k_conn_wait[(s->conn_fail < 2u) ? s->conn_fail : 2u], now_ms);
+            s->net = (uint8_t)WX_NET_ERR;
             if (s->conn_fail < 2u) {
                 s->conn_fail++;
             }
         }
         return;
     }
+    bit = (uint8_t)(1u << s->sym);
+    s->todo = (uint8_t)(s->todo & (uint8_t)~bit);
     if (ok) {
-        s->fetch_fail = 0u;
-        s->have       = 1u;
-        s->net        = (uint8_t)WX_NET_ON;
-        s->state      = (uint8_t)WX_S_IDLE;
-    } else if (http == 429u) {
-        retry_in(s, WX_ACT_FETCH, WX_RATE_MS, now_ms);
+        s->okmask = (uint8_t)(s->okmask | bit);
+        s->failed = (uint8_t)(s->failed & (uint8_t)~bit);
+        s->nomask = (uint8_t)(s->nomask & (uint8_t)~bit);
+        s->have   = 1u;
+        s->net    = (uint8_t)WX_NET_ON;
     } else {
-        s->fetch_fail++;
-        if (s->fetch_fail >= 3u) {                               /* 3 回目も失敗: ESP32 を再接続 */
-            s->fetch_fail = 0u;
-            s->net        = (uint8_t)WX_NET_ERR;
-            s->state      = (uint8_t)WX_S_CONNECT;
+        s->failed = (uint8_t)(s->failed | bit);
+        s->nomask = (http == 0u) ? (uint8_t)(s->nomask | bit) : (uint8_t)(s->nomask & (uint8_t)~bit);
+        if (http == 429u) {                                      /* 周期を打ち切る(残りは取らない)。300 秒後に周期をやり直す。値は残す */
+            s->failed = (uint8_t)(s->failed | s->todo);
+            s->todo   = 0u;
+            cycle_end(s, now_ms);
+            wait_ms(s, WX_ACT_FETCH, WX_RATE_MS, now_ms);
+            s->rate = 1u;
+            return;
+        }
+    }
+    if (s->todo != 0u) {
+        return;                                                  /* 次の銘柄(state は FETCH のまま) */
+    }
+    if (s->failed == 0u) {
+        cycle_end(s, now_ms);
+        s->state = (uint8_t)WX_S_IDLE;
+    } else if (s->retry_n < WX_RETRY_MAX) {                      /* 失敗した銘柄だけを 20 秒後に */
+        s->retry_n++;
+        s->todo = s->failed;
+        wait_ms(s, WX_ACT_FETCH, WX_RETRY_MS, now_ms);
+    } else {
+        cycle_end(s, now_ms);
+        if ((s->okmask == 0u) && (s->nomask == WX_SYM_ALL)) {     /* 3 銘柄とも、応答すら無かった: ESP32 を再接続 */
+            s->net   = (uint8_t)WX_NET_ERR;
+            s->state = (uint8_t)WX_S_CONNECT;
+            s->src   = (uint8_t)WX_SRC_TIMER;                    /* 再接続の後の周期のきっかけ */
         } else {
-            retry_in(s, WX_ACT_FETCH, WX_RETRY_MS, now_ms);
+            s->state = (uint8_t)WX_S_IDLE;                       /* 次の定期の周期まで待つ(失敗した銘柄は古い値のまま) */
         }
     }
 }
@@ -1014,13 +945,17 @@ wx_req_t wx_sched_request(wx_sched_t *s, wx_src_t src, uint32_t now_ms)
         if ((uint32_t)(now_ms - s->t_fetch0) < WX_MIN_GAP_MS) {
             return WX_REQ_IGNORED;
         }
-        s->state = (uint8_t)WX_S_FETCH;
-        s->src   = (uint8_t)src;
+        s->state     = (uint8_t)WX_S_FETCH;
+        s->src       = (uint8_t)src;
+        s->new_cycle = 1u;
         return WX_REQ_OK;
     case (uint8_t)WX_S_RETRY:
-        s->state = (uint8_t)WX_S_CONNECT;                        /* エラー中は直ちに再接続 */
-        s->src   = (uint8_t)src;
-        return WX_REQ_OK;
+        if (s->want != (uint8_t)WX_ACT_FETCH) {
+            s->state = (uint8_t)WX_S_CONNECT;                    /* 接続の待ち中は直ちに再接続 */
+            s->src   = (uint8_t)src;
+            return WX_REQ_OK;
+        }
+        return (s->rate != 0u) ? WX_REQ_IGNORED : WX_REQ_BUSY;   /* 429 の待ちは無視(Yahoo に当てない)。失敗分のやり直しの待ちは周期の途中 */
     default:
         return WX_REQ_BUSY;                                      /* BOOT_WAIT / CONNECT / FETCH */
     }
@@ -1039,6 +974,21 @@ wx_net_t wx_sched_net(const wx_sched_t *s)
 bool wx_sched_busy(const wx_sched_t *s)
 {
     return (s->state == (uint8_t)WX_S_CONNECT) || (s->state == (uint8_t)WX_S_FETCH);
+}
+
+uint8_t wx_sched_sym(const wx_sched_t *s)
+{
+    return s->sym;
+}
+
+uint8_t wx_sched_failed_mask(const wx_sched_t *s)
+{
+    return s->failed;
+}
+
+const wx_cycle_t *wx_sched_cycle(const wx_sched_t *s)
+{
+    return &s->cyc;
 }
 
 #endif /* APP_WIFI_ON */

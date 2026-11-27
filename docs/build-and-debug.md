@@ -538,3 +538,33 @@ cd D:\workspace\rx72n\rx72n_gcc
 ### 退避・後始末
 - 変更したファイルは無し(`wifi_sw.h` `ui_assets.h` などの製品コードは触っていない)。
 - 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。
+
+## 追記: 2026-11-27 17:54〜17:56 (JST) Phase 3(取得と予定表)のコンパイル確認。既定 → `APP_WX` = 1 → 既定(ビルド担当)
+
+| 時刻(JST) | コマンド | 結果 | 備考 |
+|---|---|---|---|
+| 17:54:06 | 前提確認: e2studio / e2studioc / make / rfp-cli / e2-server-gdb / rx-elf-gdb のプロセス無し。`jobs/runner.alive` 17:54:02(新しい)、`jobs/inbox` 空。`wifi_sw.h` の `APP_WX` = (0)、`git diff -- src/app/wifi_sw.h` 0 行 | OK | `wifi_secret.h` は開いていない・内容を出していない |
+| 17:54:10〜17:55:26 | 既定構成(`APP_WX` = 0)。`tools/submit-job.sh build '{"mode":"Headless"}' 400`(ジョブ `175410-build`、exit 0、74 秒) | **成功**(`Build Finished. 0 errors, 0 warnings`) | 再コンパイル 7 ファイル(`wifi_at.c` `wx_core.c` `wifi_core.c` `ui_render.c` `ui_logic.c` `stk_core.c` `app_main.c`)。smc_gen は再コンパイルなし。clean ではない |
+| 17:55:34〜17:56:00 | `wifi_sw.h` の `APP_WX` (0) → (1)(手で書いた 1 行だけ)→ 同コマンド(ジョブ `175535-build`、exit 0、24 秒) | **成功**(`Build Finished. 0 errors, 1 warnings`) | **警告 1 件**: `src/app/wx_core.c:675` `wx_fmt_ok` の stack usage が **116 バイト**(`-Wstack-usage=100` の超過)。Phase 3 のファイルのエラーは 0。`wifi_at.c` `wifi_core.c` `stk_core.c` `app_main.c` に警告・エラーなし。Phase 4 の結合前でも全体はリンクできた |
+| 17:56:08〜17:56:33 | `wifi_sw.h` の `APP_WX` (1) → (0) に戻す → 同コマンド(ジョブ `175608-build`、exit 0、24 秒) | **成功**(`Build Finished. 0 errors, 0 warnings`) | 戻した後の `git diff -- src/app/wifi_sw.h` は 0 行。`git` の「LF will be replaced by CRLF」の注意は出たが、差分は無い |
+
+### 成果物と構成の比較
+| 項目 | 既定(17:55、1 回目) | `APP_WX` = 1(17:55:57) | 既定(17:56、最終成果物) | 前回の既定(13:21) |
+|---|---|---|---|---|
+| `rx72n_stockview.elf` | 1,617,840 バイト | 1,775,228 バイト | **1,617,840 バイト**(17:56:28) | 1,614,180 バイト |
+| `rx72n_stockview.mot` | 1,453,842 バイト | 未記録(成果物は既定で上書き) | **1,453,842 バイト**(17:56:28) | 1,452,826 バイト |
+| `rx-elf-size` text / data / bss | 481,684 / 2,876 / 18,368 | 498,480 / 2,876 / 22,592 | **481,684 / 2,876 / 18,368** | 481,344 / 2,876 / 18,368 |
+| ROM(text + data) | 484,560 | 501,356 | 484,560 | 484,220 |
+
+- 既定の差(前回 13:21 との比): text **+340**、data 0、bss 0。ELF +3,660、MOT +1,016。既定を 2 回ビルドし、値は一致した(再現性あり)。
+- `APP_WX` = 1 と既定の差: text +16,796、bss +4,224(`wifi_at` / `wx_core` / `wifi_core` / `stk_core` の追加)。`.data` は変化なし。
+- RAM2(`0x00800000` 台)の出力セクションは既定の ELF で **0 個**(`rx-elf-objdump -h` の VMA/LMA で確認)。
+
+### 警告の内訳
+- 既定(2 回とも): 0 件。`-Wstack-usage=100` の警告も出ていない。増分ビルドのため、smc_gen の既知 2 件(`r_bsp_common.c:105` `delay_wait`、`r_rx_intrinsic_functions.c:347` `R_BSP_ChangeToUserMode`)は今回は未確認。
+- `APP_WX` = 1: `src/app/wx_core.c:675` `wx_fmt_ok` が stack usage 116 バイト(**要対応。Phase 3 のコードのため、コーディング担当へ差し戻し候補**)。エラーは無し。
+- ログ末尾の llvm の manifest メッセージは従来どおり(影響なし)。
+
+### 注意
+- 最終成果物(`HardwareDebug\`)は既定構成(`APP_WX` = 0)。`APP_WX` = 1 の ELF は上書きで残していない。`APP_WX` = 1 の成果物には、Wi-Fi の設定が入りうるので、残すなら `jobs\` 以下へ退避すること(今回は退避していない)。
+- 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。

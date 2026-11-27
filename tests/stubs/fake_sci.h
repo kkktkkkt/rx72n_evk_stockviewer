@@ -61,7 +61,15 @@ static void fake_sci_reset(void)
     g_fs.tx_idle  = true;
 }
 static void fake_sci_tx_done(void) { g_fs.tx_idle = true; }
-static void fake_sci_rx_put(uint8_t c) { if (g_fs.rx_w < sizeof(g_fs.rx)) { g_fs.rx[g_fs.rx_w++] = c; } }
+static void fake_sci_rx_put(uint8_t c)
+{
+    if (g_fs.rx_r == g_fs.rx_w) { g_fs.rx_r = 0u; g_fs.rx_w = 0u; }                                  /* 読み切ったら先頭へ戻す(長い走行で 4096 バイトを超えて流せる) */
+    else if ((g_fs.rx_w >= sizeof(g_fs.rx)) && (g_fs.rx_r > 0u)) {                                     /* 満杯で、前に空きがあれば詰める */
+        memmove(g_fs.rx, &g_fs.rx[g_fs.rx_r], g_fs.rx_w - g_fs.rx_r);
+        g_fs.rx_w -= g_fs.rx_r; g_fs.rx_r = 0u;
+    }
+    if (g_fs.rx_w < sizeof(g_fs.rx)) { g_fs.rx[g_fs.rx_w++] = c; }
+}
 
 void R_SCI_PinSet_SCI2(void) { g_fs.pinset_calls++; }
 void R_SCI_PinSet_SCI1(void) { g_fs.pinset_calls++; }

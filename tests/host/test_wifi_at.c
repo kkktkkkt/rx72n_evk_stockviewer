@@ -146,31 +146,75 @@ static bool     g_tcp_fail;        /* AT+CIPSTART に ERROR を返す */
 static bool     g_tcp_nodata;      /* 要求を受けても +IPD を返さず CLOSED だけ */
 static bool     g_join_fail;       /* AT+CWJAP に FAIL を返す */
 static unsigned g_http_min = 24u, g_http_sec = 13u;   /* 応答の Date: の UTC の分・秒(04:mm:ss) */
-static uint32_t g_cipstart_tick[16];
+static uint32_t g_cipstart_tick[32];
 static unsigned g_n_cipstart;
-static unsigned g_req_len = 190u;  /* 直近の AT+CIPSEND=<n> の n。190 以外(Phase 0 の Yahoo・Google)なら天気のキーが無い応答を返す */
+static bool     g_conn_tcp;        /* 直近の AT+CIPSTART が "TCP"(平文 80。Yahoo は 301 を返す) */
+static int      g_fail_sym = -1;   /* この銘柄の要求には 404 を返す(-1 = なし。APP_STK_FAULT と同じ試験) */
+static char     g_req[300];        /* 直近の要求本体(銘柄の判定用) */
+static unsigned g_req_n;
+static unsigned g_req_len;         /* 直近の AT+CIPSEND=<n> の n */
 
-/* 要求本体を受け終わった: SEND OK、+IPD(HTTP 応答。分割)、CLOSED を返す。応答は設計 §22.1 の実測と同じ形(本文の目印 BODY_SENTINEL を足してある) */
+/* 3 銘柄の Yahoo ふうの値(design.md §2.1。2026-11-25 13:24 JST 時点)。6723.T と ^N225 は東京の取引時間帯の中(遅れ 15 分)、^GSPC は閉場 */
+static const char *const K_PRICE[3] = { "2433.0", "57953.84", "7182.78" };
+static const char *const K_PREV[3]  = { "2378.0", "57499.16", "7201.09" };
+static const char *const K_CUR[3]   = { "JPY", "JPY", "USD" };
+static const char *const K_ENC[3]   = { "6723.T", "%5EN225", "%5EGSPC" };
+static const unsigned long K_MT[3]  = { 1795579752ul, 1795579752ul, 1795553940ul };
+static const unsigned long K_RS[3]  = { 1795564800ul, 1795564800ul, 1795617000ul };
+static const unsigned long K_RE[3]  = { 1795588200ul, 1795588200ul, 1795640400ul };
+
+/* 直近の要求の銘柄(0〜2)。chart の要求でなければ -1(Google の GET / など) */
+static int req_sym(void)
+{
+    int i;
+
+    if (strstr(g_req, "GET /v8/finance/chart/") == NULL) { return -1; }
+    for (i = 0; i < 3; i++) {
+        char key[40];
+
+        snprintf(key, sizeof key, "chart/%s?", K_ENC[i]);
+        if (strstr(g_req, key) != NULL) { return i; }
+    }
+    return -1;
+}
+
+/* 要求本体を受け終わった: SEND OK、+IPD(HTTP 応答。分割)、CLOSED を返す。応答は Yahoo の chart API ふう(本文・ヘッダーに目印 BODY_SENTINEL を入れてある) */
 static void esp_http(void)
 {
-    static char http[800];
+    static char http[2600];
     char        piece[320];
     unsigned    d = C.resp_delay_iters + (10u * g_ipt);
     size_t      n, k, m;
+    int         sym = req_sym();
 
-    if (g_req_len != 190u) {                            /* Phase 0(TLS の検証): 天気のキーが無い 200 */
-        n = (size_t)snprintf(http, sizeof(http), "HTTP/1.0 200 OK\r\ndate: Wed, 25 Nov 2026 04:24:13 GMT\r\nConnection: close\r\n\r\n{\"chart\":\"BODY_SENTINEL\"}");
-    } else
-    n = (size_t)snprintf(http, sizeof(http),
-        "HTTP/1.0 200 OK\r\nDate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nContent-Type: application/json; charset=utf-8\r\nX-Body: BODY_SENTINEL\r\nConnection: close\r\n\r\n"
-        "{\"latitude\":35.7,\"longitude\":139.75,\"generationtime_ms\":0.04,\"utc_offset_seconds\":32400,\"timezone\":\"Asia/Tokyo\","
-        "\"current_units\":{\"time\":\"iso8601\",\"interval\":\"seconds\",\"temperature_2m\":\"C\",\"weather_code\":\"wmo code\"},"
-        "\"current\":{\"time\":\"2026-11-25T13:30\",\"interval\":900,\"temperature_2m\":12.7,\"weather_code\":0}}", g_http_min % 100u, g_http_sec % 100u);
+    if (g_conn_tcp) {                                   /* 平文 80: Yahoo は HTTPS へ転送(301) */
+        n = (size_t)snprintf(http, sizeof(http), "HTTP/1.1 301 Moved Permanently\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>BODY_SENTINEL</html>", g_http_min % 100u, g_http_sec % 100u);
+    } else if (sym < 0) {                               /* Phase 0 の g(Google): chart のキーが無い 200 */
+        n = (size_t)snprintf(http, sizeof(http), "HTTP/1.0 200 OK\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nConnection: close\r\n\r\n{\"chart\":\"BODY_SENTINEL\"}", g_http_min % 100u, g_http_sec % 100u);
+    } else if (sym == g_fail_sym) {                     /* この銘柄だけ失敗(404) */
+        n = (size_t)snprintf(http, sizeof(http), "HTTP/1.0 404 Not Found\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+                             "{\"chart\":{\"result\":null,\"error\":{\"code\":\"Not Found\",\"description\":\"BODY_SENTINEL\"}}}", g_http_min % 100u, g_http_sec % 100u);
+    } else {
+        n = (size_t)snprintf(http, sizeof(http),
+            "HTTP/1.0 200 OK\r\ndate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nContent-Type: application/json;charset=utf-8\r\nX-Body: BODY_SENTINEL\r\nConnection: close\r\n\r\n"
+            "{\"chart\":{\"result\":[{\"meta\":{\"currency\":\"%s\",\"symbol\":\"%s\",\"exchangeName\":\"JPX\",\"instrumentType\":\"EQUITY\",\"firstTradeDate\":-2230000000,"
+            "\"regularMarketTime\":%lu,\"gmtoffset\":32400,\"timezone\":\"JST\",\"exchangeTimezoneName\":\"Asia/Tokyo\",\"regularMarketPrice\":%s,"
+            "\"fiftyTwoWeekHigh\":2999.0,\"fiftyTwoWeekLow\":1500.5,\"regularMarketDayHigh\":2450.0,\"regularMarketDayLow\":2400.0,\"regularMarketVolume\":1234567,"
+            "\"longName\":\"BODY_SENTINEL\",\"shortName\":\"BODY_SENTINEL\",\"chartPreviousClose\":%s,\"priceHint\":1,"
+            "\"currentTradingPeriod\":{\"pre\":{\"timezone\":\"JST\",\"start\":1795536000,\"end\":%lu,\"gmtoffset\":32400},"
+            "\"regular\":{\"timezone\":\"JST\",\"start\":%lu,\"end\":%lu,\"gmtoffset\":32400},"
+            "\"post\":{\"timezone\":\"JST\",\"start\":%lu,\"end\":1795600800,\"gmtoffset\":32400}},"
+            "\"dataGranularity\":\"1d\",\"range\":\"2d\",\"validRanges\":[\"1d\",\"5d\",\"1mo\",\"3mo\",\"6mo\",\"1y\",\"2y\",\"5y\",\"10y\",\"ytd\",\"max\"]},"
+            "\"timestamp\":[1795479000,%lu],\"indicators\":{\"quote\":[{\"open\":[2380.0,2400.0],\"low\":[2370.0,2400.0],\"high\":[2440.0,2450.0],"
+            "\"volume\":[5000000,1234567],\"close\":[%s,%s]}]}}],\"error\":null}}",
+            g_http_min % 100u, g_http_sec % 100u, K_CUR[sym], K_ENC[sym], K_MT[sym], K_PRICE[sym], K_PREV[sym], K_RS[sym], K_RS[sym], K_RE[sym], K_RE[sym], K_MT[sym], K_PREV[sym], K_PRICE[sym]);
+    }
+    CHECK(n < sizeof(http));
     if (g_tcp_nodata) {
-        esp_say(d, "\r\nRecv 190 bytes\r\n\r\nSEND OK\r\n\r\nCLOSED\r\n");
+        esp_say(d, "\r\nRecv 144 bytes\r\n\r\nSEND OK\r\n\r\nCLOSED\r\n");
         return;
     }
-    snprintf(piece, sizeof(piece), "\r\nRecv 190 bytes\r\n\r\nSEND OK\r\n\r\n+IPD,%u:", (unsigned)n);
+    snprintf(piece, sizeof(piece), "\r\nRecv 144 bytes\r\n\r\nSEND OK\r\n\r\n+IPD,%u:", (unsigned)n);
     esp_say(d, piece);
     for (k = 0u; k < n; k += m) {
         m = ((n - k) > 300u) ? 300u : (n - k);
@@ -197,8 +241,8 @@ static void esp_cmd(const char *cmd)
     else if (strncmp(cmd, "AT+PING=", 8) == 0) { resp = "+PING:31\r\nOK"; }
     else if (strcmp(cmd, "AT+CIPMUX=0") == 0) { resp = "OK"; }
     else if (strcmp(cmd, "AT+CIPCLOSE") == 0) { resp = "ERROR"; }                                         /* つながっていない */
-    else if (strncmp(cmd, "AT+CIPSTART=", 12) == 0) { if (g_n_cipstart < 16u) { g_cipstart_tick[g_n_cipstart] = g_hook_tick; } g_n_cipstart++; resp = g_tcp_fail ? "DNS Fail\r\n\r\nERROR" : "CONNECT\r\n\r\nOK"; d += 20u * g_ipt; }
-    else if (strncmp(cmd, "AT+CIPSEND=", 11) == 0) { resp = "\r\nOK\r\n> "; g_req_len = (unsigned)strtoul(cmd + 11, NULL, 10); g_data_left = g_req_len; }
+    else if (strncmp(cmd, "AT+CIPSTART=", 12) == 0) { if (g_n_cipstart < 32u) { g_cipstart_tick[g_n_cipstart] = g_hook_tick; } g_n_cipstart++; g_conn_tcp = (strstr(cmd, "\"TCP\"") != NULL); resp = g_tcp_fail ? "DNS Fail\r\n\r\nERROR" : "CONNECT\r\n\r\nOK"; d += 20u * g_ipt; }
+    else if (strncmp(cmd, "AT+CIPSEND=", 11) == 0) { resp = "\r\nOK\r\n> "; g_req_len = (unsigned)strtoul(cmd + 11, NULL, 10); g_data_left = g_req_len; g_req_n = 0u; g_req[0] = '\0'; }
     else if (strcmp(cmd, "AT+CIPSSLCCONF=0,0,0") == 0) { resp = "OK"; }
     snprintf(buf, sizeof(buf), "%s%s%s%s", g_echo_on ? cmd : "", g_echo_on ? "\r\r\n" : "", resp, (g_data_left > 0u) ? "" : "\r\n");   /* > の後は改行なし */
     if (strcmp(cmd, "ATE0") == 0) { g_echo_on = false; }
@@ -212,6 +256,7 @@ static void esp_scan(void)
 
     for (i = g_scan; i < g_fs.tx_len; i++) {
         if (g_data_left > 0u) {                         /* 要求本体(生のバイト。行として読まない) */
+            if ((g_req_n + 1u) < sizeof(g_req)) { g_req[g_req_n++] = (char)g_fs.tx[i]; g_req[g_req_n] = '\0'; }
             g_data_left--;
             g_scan = i + 1u;
             n = 0u;
@@ -313,14 +358,15 @@ static void reset_all(void)
     g_en_low_iter = 0u; g_en_high_iter = 0u; g_en_edges = 0u; g_dir_out_calls = 0u;
     g_iter = 0u; g_ipt = 3u; g_timer_on = false; g_cmt_ok = true;
     g_busy_iters = 0u; g_scan = 0u; g_echo_on = true; g_npend = 0u;
-    g_data_left = 0u; g_tcp_fail = false; g_tcp_nodata = false; g_req_len = 190u;
-    s_clk.synced = 0u; s_wx_seen = 0u; s_wx_ok_ms = 0u; s_wx_temp = 0; s_wx_kind = 0u; s_wx_have = 0u;
+    g_data_left = 0u; g_tcp_fail = false; g_tcp_nodata = false; g_req_len = 0u; g_conn_tcp = false; g_fail_sym = -1; g_req_n = 0u; g_req[0] = '\0';
+    s_wx_seen = 0u; memset(s_slot, 0, sizeof s_slot); s_upd_min = STK_NONE16;
 #if APP_WIFI_TEST
     s_wx_last_ok = 0u;
 #endif
     g_hook_tick = 0u; g_tick_seen = 0u; g_tick_lines = 0u; g_max_tick_lines = 0u; g_join_fail = false; g_http_min = 24u; g_http_sec = 13u; g_n_cipstart = 0u; memset(g_cipstart_tick, 0, sizeof g_cipstart_tick);
+    wx_clock_init(&s_clk);
 #if APP_WX_PRODUCT
-    memset(&s_sched, 0, sizeof s_sched); s_act = 0u; s_act_t0 = 0u; s_done_seen = 0u; s_last_net = 0u; s_last_busy = 0u; s_upd_min = 0xFFFFu; s_res_ok = 0u; s_res_http = 0u;
+    memset(&s_sched, 0, sizeof s_sched); s_act = 0u; s_act_t0 = 0u; s_done_seen = 0u; s_cycle_seen = 0u; s_last_net = 0u; s_last_busy = 0u; s_res_ok = 0u; s_res_http = 0u;
 #endif
     g_result_tick = 0u; g_result_seen = false; g_lastres[0] = '\0';
     C.stop_tick = 1000u; C.max_iter = 3000000u; C.esp = true; C.drain_iters = 1u;
@@ -328,12 +374,14 @@ static void reset_all(void)
 
 #if APP_WX_PRODUCT
 /* 製品のメインループの代わり(app_main.c の loop と同じ呼び方)。コマンド文字(1 tick に 1 文字):
- *   x = 更新ボタン(src=uart)、t = 更新ボタン(src=touch)、s = [wx] 状態行、
- *   z = 最後の成功を 31 分前にする(stale の確認。gdb の s_wx_ok_ms への書き込みと同じ)、
- *   a = 以後の応答の Date: を 04:40:50 UTC に(再同期の確認)、f = 以後 TCP を張れない、j = 以後 join に FAIL、g = 以後 join も TCP も正常 */
-static ui_wx_t  g_ui;                       /* 最後の wx_ui */
-static unsigned g_ui_net_seen[4];           /* 各 net の値が wx_ui に出た tick 数 */
-static bool     g_ui_stale_seen, g_ui_busy_seen;
+ *   x = 更新(src=uart)、t = 更新(src=touch)、s = [stk] 状態行(net と sym 3 本)、
+ *   z = 最後の成功を 31 分前にする(stale の確認。gdb の s_slot[].ok_ms への書き込みと同じ)、
+ *   a = 以後の応答の Date: を 04:40:50 UTC に(再同期の確認)、f = 以後 TCP を張れない、j = 以後 join に FAIL、g = 以後 join も TCP も正常、
+ *   k = 以後 ^N225(銘柄 1)の要求に 404、h = 銘柄 1 の失敗を直す */
+static stk_view_t g_v;                      /* 最後の stk_ui */
+static ui_wx_t    g_ui;                     /* 最後の wx_ui(暫定の旧 UI の枠。Phase 4 まで) */
+static unsigned g_v_net_seen[4];            /* 各 net の値が stk_ui に出た tick 数 */
+static bool     g_v_stale_seen, g_v_busy_seen, g_v_partial_seen;
 static unsigned g_req_ret[8], g_n_req;      /* wx_request の戻り値の列 */
 static void product_main(void)
 {
@@ -342,13 +390,15 @@ static void product_main(void)
     int      ch;
 
     g_timer_on = true;
-    memset(g_ui_net_seen, 0, sizeof g_ui_net_seen); g_ui_stale_seen = false; g_ui_busy_seen = false; g_n_req = 0u;
-    memset(&g_ui, 0, sizeof g_ui);
+    memset(g_v_net_seen, 0, sizeof g_v_net_seen); g_v_stale_seen = false; g_v_busy_seen = false; g_v_partial_seen = false; g_n_req = 0u;
+    memset(&g_v, 0, sizeof g_v); memset(&g_ui, 0, sizeof g_ui);
     wx_init(0u);
     for (;;) {
         loop_hook();
         now = s_tick;
         if (now != last) {                  /* 10ms ごと(app_main の tick_step) */
+            unsigned i;
+
             last = now;
             ch = app_log_getc();
             if ((ch == 'x') || (ch == 't')) {
@@ -357,16 +407,21 @@ static void product_main(void)
                 g_n_req++;
             }
             else if (ch == 's') { wx_log_state(now * 10u); }
-            else if (ch == 'z') { s_wx_ok_ms -= 1860000u; }
+            else if (ch == 'z') { for (i = 0u; i < 3u; i++) { s_slot[i].ok_ms -= 1860000u; } }
             else if (ch == 'a') { g_http_min = 40u; g_http_sec = 50u; }
             else if (ch == 'f') { g_tcp_fail = true; }
             else if (ch == 'j') { g_join_fail = true; }
             else if (ch == 'g') { g_join_fail = false; g_tcp_fail = false; }
+            else if (ch == 'k') { g_fail_sym = 1; }
+            else if (ch == 'h') { g_fail_sym = -1; }
             else { /* 無視 */ }
+            stk_ui(&g_v, now * 10u);
             wx_ui(&g_ui, now * 10u);
-            if (g_ui.net < 4u) { g_ui_net_seen[g_ui.net]++; }
-            if (g_ui.stale != 0u) { g_ui_stale_seen = true; }
-            if (g_ui.busy != 0u) { g_ui_busy_seen = true; }
+            if (g_v.net < 4u) { g_v_net_seen[g_v.net]++; }
+            if (g_v.stale_all != 0u) { g_v_stale_seen = true; }
+            if (g_v.busy != 0u) { g_v_busy_seen = true; }
+            if (g_v.partial != 0u) { g_v_partial_seen = true; }
+            CHECK_EQ(g_ui.net, g_v.net); CHECK_EQ(g_ui.busy, g_v.busy); CHECK_EQ(g_ui.clock_min, g_v.clock_min); CHECK_EQ(g_ui.upd_min, g_v.upd_min);   /* 暫定の枠が stk_ui と食い違わない */
         }
         wx_poll(now * 10u);
     }
@@ -400,6 +455,21 @@ static unsigned long field(const char *line, const char *key)
     const char *p = strstr(line, key);
     return (p == NULL) ? 0xFFFFFFFFul : strtoul(p + strlen(key), NULL, 10);
 }
+/* 失敗の調査用: 環境変数 T_DUMP があれば、今のシナリオのログを全部出す(秘密は偽の目印だけ) */
+static int starts(const char *l, const char *prefix) { return strncmp(l, prefix, strlen(prefix)) == 0; }
+static void dump_logs(void)
+{
+    unsigned i;
+    if (getenv("T_DUMP") == NULL) { return; }
+    for (i = 0u; i < g_nlogs; i++) { printf("    | %s", g_logs[i]); }
+}
+static unsigned tx_count(const char *s)
+{
+    size_t   i, n = strlen(s);
+    unsigned c = 0u;
+    for (i = 0u; (i + n) <= g_fs.tx_len; i++) { if (memcmp(&g_fs.tx[i], s, n) == 0) { c++; } }
+    return c;
+}
 static bool tx_has(const char *s)
 {
     size_t i, n = strlen(s);
@@ -415,9 +485,10 @@ static void check_lines_clean(void)
         const char *l = g_logs[i];
         if (!(strncmp(l, "[init] ", 7) == 0 || strncmp(l, "[hb] ", 5) == 0 || strncmp(l, "[wifi] ", 7) == 0 ||
               strncmp(l, "[wifiv] ", 8) == 0 || strncmp(l, "[st] ", 5) == 0 || strncmp(l, "[help] ", 7) == 0 ||
-              strncmp(l, "[err] ", 6) == 0 || strncmp(l, "[wx] ", 5) == 0)) { ok_kind = false; printf("  unexpected line kind: %.20s\n", l); }
+              strncmp(l, "[err] ", 6) == 0 || strncmp(l, "[stk] ", 6) == 0)) { ok_kind = false; printf("  unexpected line kind: %.20s\n", l); }
         if (strstr(l, "SENTINEL") != NULL || strstr(l, "NEIGHBOR") != NULL || strstr(l, "de:ad") != NULL || strstr(l, "CWLAP") != NULL || strstr(l, "CWJAP") != NULL || strstr(l, "PW_") != NULL || strstr(l, "SSID_") != NULL ||
-            strstr(l, "BODY_SENTINEL") != NULL || strstr(l, "latitude") != NULL || strstr(l, "generationtime") != NULL || strstr(l, "GET ") != NULL || strstr(l, "Date:") != NULL ||
+            strstr(l, "BODY_SENTINEL") != NULL || strstr(l, "regularMarket") != NULL || strstr(l, "chartPrevious") != NULL || strstr(l, "\"chart\"") != NULL || strstr(l, "HTTP/1") != NULL || strstr(l, "query1") != NULL ||
+            strstr(l, "+IPD") != NULL || strstr(l, "GET ") != NULL || strstr(l, "Date:") != NULL || strstr(l, "date:") != NULL ||
             strstr(l, "ready") != NULL || strstr(l, "ets ") != NULL) { no_secret = false; }
         if (strstr(l, "\r\n") != l + strlen(l) - 2) { ok_kind = false; }
     }
@@ -546,7 +617,7 @@ int main(void)
 #endif
 
 #if !APP_WIFI_AUTOSTART
-    TEST("F1 d の後に x: wx_mux〜wx_recv が ok、result=pass、[wx] res=ok(src=uart・jst・obs)、s に [wx] 状態行(時計)。本文・要求・Date は出ない");
+    TEST("F1 d の後に x: wx_mux〜wx_recv が ok、result=pass、[stk] res=ok(sym=1・src=uart・jst)、s に [stk] net= と sym= 3 本(時計)。本文・要求・Date は出ない");
     reset_all(); C.stop_tick = 1500u;
     { static const cmdev_t c[] = { { 20u, 'd' }, { 700u, 'x' }, { 1200u, 's' } }; C.cmds = c; C.n_cmds = 3u; run(); }
     CHECK_EQ(count_prefix("[wifi] result="), 2);
@@ -559,26 +630,27 @@ int main(void)
             snprintf(p, sizeof(p), "[wifi] step=%s res=ok try=1 ", nm[k]); CHECK_EQ(count_prefix(p), 1);
         }
     }
-    CHECK(tx_has("AT+CIPMUX=0\r\n") && tx_has("AT+CIPCLOSE\r\n") && tx_has("AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") && tx_has("AT+CIPSEND=190\r\n"));
-    CHECK(tx_has("GET /v1/forecast?latitude=35.68&longitude=139.76&current=temperature_2m,weather_code&timezone=Asia%2FTokyo HTTP/1.0\r\nHost: api.open-meteo.com\r\n"));
+    CHECK(tx_has("AT+CIPMUX=0\r\n") && tx_has("AT+CIPCLOSE\r\n") && tx_has("AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") && tx_has("AT+CIPSEND=145\r\n"));
+    CHECK(tx_has("GET /v8/finance/chart/%5EN225?range=2d&interval=1d HTTP/1.0\r\nHost: query1.finance.yahoo.com\r\nUser-Agent: rx72n-stockview/1\r\nConnection: close\r\n\r\n"));
     CHECK(tx_has("Connection: close\r\n\r\n") && !tx_has("Connection: close\r\n\r\n\r\n"));            /* 要求の後に \r\n を足さない */
-    k = find_idx("[wx] res=ok src=uart temp10=127 wmo=0 kind=sun http=200 ms=");
+    k = find_idx("[stk] res=ok sym=1 src=uart p100=5795384 c100=5749916 bp=79 mkt=t http=200 ms=");
     CHECK(k >= 0);
     if (k >= 0) {
-        CHECK(strstr(g_logs[k], " sync=1 jst=132413 obs=1330 closed=1\r\n") != NULL);
+        CHECK(strstr(g_logs[k], " sync=1 jst=132413 len=") != NULL); CHECK(strstr(g_logs[k], " closed=1\r\n") != NULL);
         CHECK(k > find_idx("[wifi] step=wx_recv res=ok "));
         CHECK(field(g_logs[k], " ms=") > 200u); CHECK(field(g_logs[k], " ms=") < 5000u);
+        CHECK(field(g_logs[k], " len=") > 1200u); CHECK(field(g_logs[k], " len=") < 2000u);
     }
-    CHECK_EQ(count_prefix("[wx] res="), 1);
-    k = find_idx("[wx] net=");
+    CHECK_EQ(count_prefix("[stk] res="), 1);
+    k = find_idx("[stk] net=");
     CHECK(k >= 0);
     if (k >= 0) {
         unsigned hh, mm, ss;
         const char *p = strstr(g_logs[k], " clk=");
         long expect_s, got_s;
 
-        CHECK(strncmp(g_logs[k], "[wx] net=on busy=0 have=1 temp10=127 kind=sun age=", 50) == 0);
-        CHECK(strstr(g_logs[k], " date=20261125 wd=3 sync=1\r\n") != NULL);
+        CHECK(starts(g_logs[k], "[stk] net=on busy=0 have=2 stale=0 clk="));          /* 銘柄 1 だけ取れた */
+        CHECK(strstr(g_logs[k], " upd=1324\r\n") != NULL);
         CHECK(p != NULL);
         if (p != NULL) {
             hh = (unsigned)(p[5] - '0') * 10u + (unsigned)(p[6] - '0'); mm = (unsigned)(p[7] - '0') * 10u + (unsigned)(p[8] - '0'); ss = (unsigned)(p[9] - '0') * 10u + (unsigned)(p[10] - '0');
@@ -589,19 +661,22 @@ int main(void)
             CHECK(got_s >= (expect_s - 1)); CHECK(got_s <= (expect_s + 1));
             CHECK(got_s > (13L * 3600L + 24L * 60L + 13L + 3L));                                           /* 時計は進んでいる */
         }
-        CHECK(field(g_logs[k], " age=") >= 4u);
+        CHECK(k + 3 < (int)g_nlogs);
+        CHECK(starts(g_logs[k + 1], "[stk] sym=0 have=0 p100=0 d100=0 bp=0 dir=f mkt=n age=-1\r\n"));
+        CHECK(starts(g_logs[k + 2], "[stk] sym=1 have=1 p100=5795384 d100=45468 bp=79 dir=u mkt=t age="));
+        CHECK(starts(g_logs[k + 3], "[stk] sym=2 have=0 "));
     }
     check_lines_clean();
     CHECK_EQ(g_log_drops, 0);
     CHECK_EQ(g_app_dbg.scr, 0);
 
-    TEST("F2 x だけ(d なし。EN に触れず、reset は走らない)・x の連続(2 回とも取得して [wx] が 2 行)");
+    TEST("F2 x だけ(d なし。EN に触れず、reset は走らない)・x の連続(2 回とも取得して [stk] res=ok が 2 行)");
     reset_all(); C.stop_tick = 1300u;
     { static const cmdev_t c[] = { { 20u, 'x' }, { 400u, 'x' } }; C.cmds = c; C.n_cmds = 2u; run(); }
     CHECK_EQ(count_prefix("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"), 2);
     CHECK_EQ(count_prefix("[wifi] step=reset"), 0);
     CHECK(strcmp(g_gpio_ev, "W1;D;") == 0);
-    CHECK_EQ(count_prefix("[wx] res=ok src=uart temp10=127 wmo=0 kind=sun http=200 ms="), 2);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=1 src=uart p100=5795384 c100=5749916 bp=79 mkt="), 2);
     CHECK_EQ(g_fs.send_ok, 10);                                                                     /* 5 回の送信 x 2 */
     check_lines_clean();
     CHECK_EQ(g_log_drops, 0);
@@ -610,63 +685,60 @@ int main(void)
     reset_all(); C.stop_tick = 250u;
     { static const cmdev_t c[] = { { 20u, 'd' }, { 30u, 'x' }, { 40u, 'x' } }; C.cmds = c; C.n_cmds = 3u; run(); }
     CHECK_EQ(count_prefix("[wifi] step=wx_"), 0);
-    CHECK_EQ(count_prefix("[wx] "), 0);
+    CHECK_EQ(count_prefix("[stk] "), 0);
     CHECK(!tx_has("CIPSTART"));
 
-    TEST("F4 TCP が張れない(DNS Fail): result=fail stage=wx_tcp と [wx] res=fail err=1。s の状態行は net=err have=0");
+    TEST("F4 TCP が張れない(DNS Fail): result=fail stage=wx_tcp と [stk] res=fail err=1。s の net= は err・have=0");
     reset_all(); g_tcp_fail = true; C.stop_tick = 600u;
     { static const cmdev_t c[] = { { 20u, 'x' }, { 400u, 's' } }; C.cmds = c; C.n_cmds = 2u; run(); }
     CHECK_EQ(count_prefix("[wifi] result=fail stage=wx_tcp ping_ip=0 ping_dns=0\r\n"), 1);
-    k = find_idx("[wx] res=fail src=uart err=1 http=0 ms=");
+    k = find_idx("[stk] res=fail sym=1 src=uart err=1 http=0 ms=");
     CHECK(k >= 0);
-    CHECK_EQ(count_prefix("[wx] res="), 1);
-    CHECK_EQ(count_prefix("[wx] net=err busy=0 have=0 temp10=0 kind=none age=-1 clk=none date=none wd=9 sync=0\r\n"), 1);
+    CHECK_EQ(count_prefix("[stk] res="), 1);
+    CHECK_EQ(count_prefix("[stk] net=err busy=0 have=0 stale=0 clk=none upd=none\r\n"), 1);
     CHECK(!tx_has("CIPSEND"));
     check_lines_clean();
 
     TEST("F5 応答が無い(CLOSED だけ): err=3。時刻は同期しない");
     reset_all(); g_tcp_nodata = true; C.stop_tick = 600u;
     { static const cmdev_t c[] = { { 20u, 'x' }, { 400u, 's' } }; C.cmds = c; C.n_cmds = 2u; run(); }
-    CHECK(find_idx("[wx] res=fail src=uart err=3 http=0 ms=") >= 0);
-    CHECK_EQ(count_prefix("[wx] net=err busy=0 have=0 temp10=0 kind=none age=-1 clk=none date=none wd=9 sync=0\r\n"), 1);
+    CHECK(find_idx("[stk] res=fail sym=1 src=uart err=3 http=0 ms=") >= 0);
+    CHECK_EQ(count_prefix("[stk] net=err busy=0 have=0 stale=0 clk=none upd=none\r\n"), 1);
     check_lines_clean();
 
-    TEST("F6 TLS の検証(design.md §5.5.2): t y g z は取得の接続先を選ぶ。y = SSL 443・CIPSEND=145・^N225 の chart。応答は http=200 err=5 len=<n>、本文は出ない。x は最後の対象でもう一度");
+    TEST("F6 TLS の検証(design.md §5.5.2): t y g z は取得の接続先を選ぶ。y = SSL 443・CIPSEND=145・^N225 の chart・応答は ok。t = 平文 80 で 301(err=4 http=301)、g = chart のキーが無い 200(err=5)。x は最後の対象でもう一度");
     reset_all(); C.stop_tick = 700u;
     { static const cmdev_t c[] = { { 20u, 'y' }, { 400u, 'x' } }; C.cmds = c; C.n_cmds = 2u; run(); }
     CHECK(tx_has("AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") && tx_has("AT+CIPSEND=145\r\n"));
     CHECK(tx_has("GET /v8/finance/chart/%5EN225?range=2d&interval=1d HTTP/1.0\r\nHost: query1.finance.yahoo.com\r\nUser-Agent: rx72n-stockview/1\r\nConnection: close\r\n\r\n"));
     CHECK(!tx_has("api.open-meteo.com") && !tx_has("CIPSSLCCONF") && !tx_has("\"TCP\""));
-    CHECK_EQ(count_prefix("[wx] res=fail src=uart err=5 http=200 ms="), 2);                        /* y と、x(最後に選んだ対象でもう一度) */
-    k = find_idx("[wx] res=fail src=uart err=5 http=200 ms=");
-    CHECK(k >= 0);
-    if (k >= 0) { CHECK_EQ(field(g_logs[k], " len="), 100u); }                                       /* 偽の応答の長さ(ヘッダー + 本文) */
-    CHECK_EQ(count_prefix("[wx] res=ok"), 0);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=1 src=uart p100=5795384 "), 2);                        /* y と、x(最後に選んだ対象でもう一度) */
+    CHECK_EQ(count_prefix("[stk] res=fail"), 0);
     check_lines_clean();
     CHECK_EQ(g_log_drops, 0);
 
     reset_all(); C.stop_tick = 500u;
     { static const cmdev_t c[] = { { 20u, 't' } }; C.cmds = c; C.n_cmds = 1u; run(); }
     CHECK(tx_has("AT+CIPSTART=\"TCP\",\"query1.finance.yahoo.com\",80\r\n") && tx_has("AT+CIPSEND=145\r\n") && !tx_has("\"SSL\""));
-    CHECK_EQ(count_prefix("[wx] res=fail src=uart err=5 http=200 ms="), 1);
+    CHECK_EQ(count_prefix("[stk] res=fail sym=1 src=uart err=4 http=301 ms="), 1);
 
     reset_all(); C.stop_tick = 500u;
     { static const cmdev_t c[] = { { 20u, 'g' } }; C.cmds = c; C.n_cmds = 1u; run(); }
     CHECK(tx_has("AT+CIPSTART=\"SSL\",\"www.google.com\",443\r\n") && tx_has("GET / HTTP/1.0\r\nHost: www.google.com\r\nUser-Agent: rx72n-stockview/1\r\nConnection: close\r\n\r\n"));
-    CHECK_EQ(count_prefix("[wx] res=fail src=uart err=5 http=200 ms="), 1);
+    CHECK_EQ(count_prefix("[stk] res=fail sym=1 src=uart err=5 http=200 ms="), 1);
     check_lines_clean();
 
     reset_all(); C.stop_tick = 500u;
     { static const cmdev_t c[] = { { 20u, 'z' } }; C.cmds = c; C.n_cmds = 1u; run(); }
     CHECK(tx_has("AT+CIPCLOSE\r\nAT+CIPSSLCCONF=0,0,0\r\nAT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n"));
     CHECK_EQ(count_prefix("[wifi] step=wx_sslconf res=ok "), 1);
-    CHECK_EQ(count_prefix("[wx] res=fail src=uart err=5 http=200 ms="), 1);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=1 src=uart p100=5795384 "), 1);
     CHECK_EQ(g_app_dbg.scr, 0);
 
     reset_all(); C.stop_tick = 300u;                                   /* 実行中(d の最中)の t y g z は無視。何も送らない */
     { static const cmdev_t c[] = { { 20u, 'd' }, { 30u, 't' }, { 31u, 'y' }, { 32u, 'g' }, { 33u, 'z' } }; C.cmds = c; C.n_cmds = 5u; run(); }
     CHECK(!tx_has("CIPSTART") && !tx_has("CIPSSLCCONF"));
-    CHECK_EQ(count_prefix("[wx] "), 0);
+    CHECK_EQ(count_prefix("[stk] "), 0);
 
     TEST("C1 受信は 1 周回に 64 バイトまで(200 バイトは 64 / 128 / 192 / 200)");
     reset_all(); C.esp = false;
@@ -746,7 +818,7 @@ int main(void)
 
 #if APP_WX_PRODUCT
 #ifndef T_NOSECRET
-    TEST("P1 起動: SCI1 を 1 回開く(115200・8N1・優先度 2)。EN は先に High → 出力。3 秒待つ間は何も送らない・何も出さない。UI は接続中・未同期(clk_ext = 1、時計 0xFFFF、日付なし)");
+    TEST("P1 起動: SCI1 を 1 回開く(115200・8N1・優先度 2)。EN は先に High → 出力。3 秒待つ間は何も送らない・何も出さない。表示値は接続中・未同期(時計・更新時刻 0xFFFF)");
     reset_all(); C.stop_tick = 250u;
     run();
     CHECK_EQ(g_fs.open_calls, 1);
@@ -757,132 +829,190 @@ int main(void)
     CHECK(strcmp(g_gpio_ev, "W1;D;") == 0);
     CHECK_EQ(g_fs.send_calls, 0);
     CHECK_EQ(g_nlogs, 0);
-    CHECK_EQ(g_ui.net, UI_NET_CONN);
-    CHECK_EQ(g_ui.busy, 0); CHECK_EQ(g_ui.have, 0); CHECK_EQ(g_ui.stale, 0); CHECK_EQ(g_ui.clk_ext, 1);
-    CHECK_EQ(g_ui.clock_min, 0xFFFF); CHECK_EQ(g_ui.upd_min, 0xFFFF); CHECK_EQ(g_ui.month, 0); CHECK_EQ(g_ui.day, 0);
-    CHECK(!g_ui_busy_seen);
+    CHECK_EQ(g_v.net, STK_NET_CONN);
+    CHECK_EQ(g_v.busy, 0); CHECK_EQ(g_v.have_any, 0); CHECK_EQ(g_v.stale_all, 0); CHECK_EQ(g_v.partial, 0);
+    CHECK_EQ(g_v.clock_min, 0xFFFF); CHECK_EQ(g_v.upd_min, 0xFFFF);
+    CHECK_EQ(g_v.row[0].have, 0); CHECK_EQ(g_v.row[1].have, 0); CHECK_EQ(g_v.row[2].have, 0);
+    CHECK(!g_v_busy_seen);
 
-    TEST("P2 起動 3 秒後に接続(reset〜ip の 8 step)→ すぐ最初の取得(5 step)。res=start と key=oth は出ない。[wx] res=ok src=boot。状態行 3 本。時計・日付・UI の値。秘密と本文は出ない");
-    reset_all(); C.stop_tick = 1800u;
+    TEST("P2 起動 3 秒後に接続(reset〜ip の 8 step)→ すぐ最初の周期(3 銘柄 x 5 step)。res=start・res=ok・key=oth は出ない。[stk] res=ok sym=0,1,2 src=boot・cycle・net= 3 行。時計・表示値。秘密と本文は出ない");
+    reset_all(); C.stop_tick = 2400u;
     run();
+    dump_logs();
     CHECK(strcmp(g_gpio_ev, "W1;D;W0;W1;") == 0);
-    {
-        static const char *const nm[] = { "reset", "boot", "at", "echo", "mode", "qap", "join", "ip", "wx_mux", "wx_close", "wx_tcp", "wx_send", "wx_recv" };
-        char p[64];
-        for (k = 0; k < 13; k++) { snprintf(p, sizeof(p), "[wifi] step=%s res=ok ", nm[k]); CHECK_EQ(count_prefix(p), 1); }
-    }
-    CHECK_EQ(count_prefix("[wifi] step="), 13);                                      /* ok だけ(start なし) */
+    CHECK_EQ(count_prefix("[wifi] step="), 0);                                       /* 失敗がないので、step の行は 1 本も出ない */
     for (i = 0u; i < g_nlogs; i++) { CHECK(strstr(g_logs[i], " res=start") == NULL); CHECK(strstr(g_logs[i], "key=oth") == NULL); }
-    CHECK_EQ(count_prefix("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"), 2);   /* 接続と取得 */
+    CHECK_EQ(count_prefix("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"), 1 + 3);   /* 接続 1 回と、3 銘柄の取得 */
     CHECK_EQ(count_prefix("[wifiv] key=ip val=192.168.1.23"), 1);
     CHECK(!tx_has("AT+GMR") && !tx_has("AT+CWLAP") && !tx_has("AT+PING") && !tx_has("AT+CIPDOMAIN") && !tx_has("CWLAPOPT"));   /* 製品の接続は gmr lapopt scan dns ping を省く */
     CHECK(tx_has("AT+CWQAP\r\n") && tx_has("AT+CWJAP=\"SSID_SENTINEL_7c1\",\"PW_SENTINEL_9f3\"\r\n") && tx_has("AT+CIFSR\r\n"));
-    CHECK(tx_has("AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") && tx_has("AT+CIPSEND=190\r\n"));
-    k = find_idx("[wx] res=ok src=boot temp10=127 wmo=0 kind=sun http=200 ms=");
-    CHECK(k >= 0);
-    if (k >= 0) { CHECK(strstr(g_logs[k], " sync=1 jst=132413 obs=1330 closed=1\r\n") != NULL); CHECK(k > find_idx("[wifi] step=wx_recv res=ok ")); }
-    CHECK_EQ(count_prefix("[wx] res="), 1);
-    CHECK_EQ(count_prefix("[wx] net="), 3);
+    CHECK_EQ(tx_count("AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n"), 3);   /* 銘柄ごとに TCP/SSL を開く */
+    CHECK_EQ(tx_count("AT+CIPCLOSE\r\n"), 3); CHECK_EQ(tx_count("AT+CIPMUX=0\r\n"), 3);
+    CHECK(tx_has("AT+CIPSEND=144\r\n") && tx_has("AT+CIPSEND=145\r\n"));
+    CHECK(!tx_has("CIPSSLCCONF") && !tx_has("api.open-meteo.com") && !tx_has("\"TCP\""));
+    CHECK_EQ(tx_count("GET /v8/finance/chart/6723.T?range=2d"), 1); CHECK_EQ(tx_count("GET /v8/finance/chart/%5EN225?range=2d"), 1); CHECK_EQ(tx_count("GET /v8/finance/chart/%5EGSPC?range=2d"), 1);
     {
-        int a = find_idx("[wx] net=conn busy=1 have=0 temp10=0 kind=none age=-1 clk=none date=none wd=9 sync=0\r\n");
-        int b = find_idx("[wx] net=on busy=1 have=0 ");
-        int c = find_idx("[wx] net=on busy=0 have=1 temp10=127 kind=sun age=");
-        CHECK(a >= 0); CHECK(b > a); CHECK(c > b);
-        CHECK(a < find_idx("[wifi] step=reset res=ok "));
-        CHECK(c > find_idx("[wx] res=ok "));
+        int a0 = find_idx("[stk] res=ok sym=0 src=boot p100=243300 c100=237800 bp=231 mkt=t http=200 ms=");
+        int a1 = find_idx("[stk] res=ok sym=1 src=boot p100=5795384 c100=5749916 bp=79 mkt=t http=200 ms=");
+        int a2 = find_idx("[stk] res=ok sym=2 src=boot p100=718278 c100=720109 bp=-25 mkt=c http=200 ms=");
+
+        CHECK(a0 >= 0); CHECK(a1 > a0); CHECK(a2 > a1);                               /* 6723.T → ^N225 → ^GSPC の順 */
+        if (a0 >= 0) { CHECK(strstr(g_logs[a0], " sync=1 jst=132413 len=") != NULL); CHECK(strstr(g_logs[a0], " closed=1\r\n") != NULL); }
     }
-    CHECK_EQ(g_ui.net, UI_NET_ON); CHECK_EQ(g_ui.busy, 0); CHECK_EQ(g_ui.have, 1); CHECK_EQ(g_ui.kind, 0); CHECK_EQ(g_ui.temp_x10, 127);
-    CHECK_EQ(g_ui.stale, 0); CHECK_EQ(g_ui.clk_ext, 1);
-    CHECK_EQ(g_ui.month, 11); CHECK_EQ(g_ui.day, 25); CHECK_EQ(g_ui.wday, 3);                    /* 2026-11-25 水 */
-    CHECK(g_ui.clock_min >= 13 * 60 + 24); CHECK(g_ui.clock_min <= 13 * 60 + 25);
-    CHECK_EQ(g_ui.upd_min, 13 * 60 + 24);
-    CHECK(g_ui_busy_seen); CHECK(g_ui_net_seen[UI_NET_CONN] > 0u); CHECK(g_ui_net_seen[UI_NET_ON] > 0u); CHECK_EQ(g_ui_net_seen[UI_NET_ERR], 0);
+    CHECK_EQ(count_prefix("[stk] res="), 3);
+    CHECK_EQ(count_prefix("[stk] cycle=1 ok=7 fail=0 ms="), 1);
+    CHECK_EQ(count_prefix("[stk] cycle="), 1);
+    CHECK(find_idx("[stk] cycle=") > find_idx("[stk] res=ok sym=2 "));
+    CHECK_EQ(count_prefix("[stk] net="), 3);
+    {
+        int a = find_idx("[stk] net=conn busy=1 have=0 stale=0 clk=none upd=none\r\n");
+        int b = find_idx("[stk] net=on busy=1 have=0 ");
+        int c = find_idx("[stk] net=on busy=0 have=7 stale=0 clk=");
+        CHECK(a >= 0); CHECK(b > a); CHECK(c > b);
+        CHECK(a < find_idx("[wifi] result=pass "));
+        CHECK(c > find_idx("[stk] res=ok sym=2 "));
+        CHECK(strstr(g_logs[c], " upd=1324\r\n") != NULL);
+    }
+    CHECK_EQ(g_v.net, STK_NET_ON); CHECK_EQ(g_v.busy, 0); CHECK_EQ(g_v.have_any, 1); CHECK_EQ(g_v.stale_all, 0); CHECK_EQ(g_v.partial, 0);
+    CHECK_EQ(g_v.row[0].have, 1); CHECK_EQ(g_v.row[0].price_x100, 243300); CHECK_EQ(g_v.row[0].diff_x100, 5500); CHECK_EQ(g_v.row[0].pct_bp, 231); CHECK_EQ(g_v.row[0].mkt, STK_MKT_TRADING);
+    CHECK_EQ(g_v.row[1].have, 1); CHECK_EQ(g_v.row[1].price_x100, 5795384); CHECK_EQ(g_v.row[1].diff_x100, 45468); CHECK_EQ(g_v.row[1].pct_bp, 79); CHECK_EQ(g_v.row[1].mkt, STK_MKT_TRADING);
+    CHECK_EQ(g_v.row[2].have, 1); CHECK_EQ(g_v.row[2].price_x100, 718278); CHECK_EQ(g_v.row[2].diff_x100, -1831); CHECK_EQ(g_v.row[2].pct_bp, -25); CHECK_EQ(g_v.row[2].mkt, STK_MKT_CLOSED);
+    CHECK_EQ(g_v.row[0].stale, 0); CHECK_EQ(g_v.row[0].fail, 0);
+    CHECK(g_v.clock_min >= 13 * 60 + 24); CHECK(g_v.clock_min <= 13 * 60 + 25);
+    CHECK_EQ(g_v.upd_min, 13 * 60 + 24);
+    CHECK(g_v_busy_seen); CHECK(g_v_net_seen[STK_NET_CONN] > 0u); CHECK(g_v_net_seen[STK_NET_ON] > 0u); CHECK_EQ(g_v_net_seen[STK_NET_ERR], 0);
+    CHECK(!g_v_partial_seen);
     CHECK_EQ(g_log_drops, 0);
     CHECK(g_max_tick_lines <= 6u);                                                   /* ログのキュー(8 行)に対して 1 tick の行数に余裕 */
     CHECK_EQ(count_prefix("[err] "), 0);
     CHECK_EQ(count_prefix("[hb] "), 0);                                              /* hb は app_main が出す */
     check_lines_clean();
 
-    TEST("P3 定期取得: 前回の取得開始から 10 分(60000 tick ± 3)で 1 回だけ。src=timer。その間 [wifi] [wx] の行は増えない");
+    TEST("P3 定期取得: 周期の開始から 10 分(60000 tick ± 3)で 1 周期。src=timer。その間 [wifi] [stk] の行は増えない。周期はずれない");
     reset_all(); C.stop_tick = 61800u;
     run();
-    CHECK_EQ(g_n_cipstart, 2);
-    CHECK(g_cipstart_tick[1] - g_cipstart_tick[0] >= 59997u); CHECK(g_cipstart_tick[1] - g_cipstart_tick[0] <= 60003u);
-    CHECK_EQ(count_prefix("[wx] res=ok src=boot "), 1);
-    CHECK_EQ(count_prefix("[wx] res=ok src=timer "), 1);
-    CHECK_EQ(count_prefix("[wifi] step="), 13 + 5);                                  /* 2 回目は取得の 5 step だけ(再接続しない) */
-    CHECK_EQ(count_prefix("[wx] net="), 3 + 2);                                      /* 取得ごとに busy 1 → 0 */
-    CHECK_EQ(g_ui_net_seen[UI_NET_ERR], 0);
+    CHECK_EQ(g_n_cipstart, 6);
+    CHECK(g_cipstart_tick[3] - g_cipstart_tick[0] >= 59997u); CHECK(g_cipstart_tick[3] - g_cipstart_tick[0] <= 60003u);
+    CHECK(g_cipstart_tick[4] - g_cipstart_tick[1] >= 59997u); CHECK(g_cipstart_tick[4] - g_cipstart_tick[1] <= 60003u);
+    CHECK_EQ(count_prefix("[stk] res=ok sym="), 6);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=0 src=boot "), 1); CHECK_EQ(count_prefix("[stk] res=ok sym=0 src=timer "), 1);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=2 src=timer "), 1);
+    CHECK_EQ(count_prefix("[stk] cycle="), 2);
+    CHECK_EQ(count_prefix("[stk] cycle=2 ok=7 fail=0 ms="), 1);
+    CHECK_EQ(count_prefix("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"), 1 + 3 + 3);   /* 2 回目は取得だけ(再接続しない) */
+    CHECK_EQ(count_prefix("[stk] net="), 3 + 2);                                     /* 周期ごとに busy 1 → 0 */
+    CHECK_EQ(g_v_net_seen[STK_NET_ERR], 0);
     CHECK_EQ(g_log_drops, 0);
     check_lines_clean();
 
-    TEST("P4 更新ボタン(x = src=uart、t = src=touch): 取得中は req=busy、前回の開始から 5 秒未満は req=ignored、5 秒後は取得 → 時計を Date: で合わせ直す");
+    TEST("P4 更新(x = src=uart、t = src=touch): 取得中は req=busy、周期の開始から 5 秒未満は req=ignored、5 秒後は 3 銘柄を取る → 時計を Date: で合わせ直す。s は net= と sym= 3 本");
     reset_all(); C.stop_tick = 5200u;
     { static const cmdev_t c[] = { { 2500u, 'x' }, { 2501u, 'x' }, { 2502u, 'a' }, { 2800u, 'x' }, { 3200u, 'x' }, { 4200u, 't' }, { 4900u, 's' } };
       C.cmds = c; C.n_cmds = sizeof(c) / sizeof(c[0]); run(); }
-    CHECK_EQ(count_prefix("[wx] res=ok src=boot "), 1);
-    CHECK_EQ(count_prefix("[wx] res=ok src=uart "), 2);                              /* 2500 の x と 3200 の x(2800 は ignored) */
-    CHECK_EQ(count_prefix("[wx] res=ok src=touch "), 1);
-    CHECK_EQ(count_prefix("[wx] req=busy src=uart\r\n"), 1);                         /* 2501: 取得中 */
-    CHECK_EQ(count_prefix("[wx] req=ignored src=uart\r\n"), 1);                      /* 2800: 2500 に始めた取得から 3 秒 */
-    CHECK_EQ(count_prefix("[wx] req="), 2);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=0 src=boot "), 1);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=0 src=uart "), 2);                       /* 2500 の x と 3200 の x(2800 は ignored) */
+    CHECK_EQ(count_prefix("[stk] res=ok sym=2 src=uart "), 2);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=0 src=touch "), 1);
+    CHECK_EQ(count_prefix("[stk] req=busy src=uart\r\n"), 1);                        /* 2501: 取得中 */
+    CHECK_EQ(count_prefix("[stk] req=ignored src=uart\r\n"), 1);                     /* 2800: 2500 に始めた周期から 3 秒 */
+    CHECK_EQ(count_prefix("[stk] req="), 2);
     CHECK_EQ(g_n_req, 5);
     CHECK_EQ(g_req_ret[0], WX_REQ_OK); CHECK_EQ(g_req_ret[1], WX_REQ_BUSY); CHECK_EQ(g_req_ret[2], WX_REQ_IGNORED); CHECK_EQ(g_req_ret[3], WX_REQ_OK); CHECK_EQ(g_req_ret[4], WX_REQ_OK);
-    CHECK_EQ(g_n_cipstart, 4);                                                       /* boot + 2 uart + touch(2800 の x は取得しない) */
-    CHECK_EQ(count_prefix("[wifi] step="), 13 + 15);                                 /* 再接続はしない */
+    CHECK_EQ(g_n_cipstart, 12);                                                      /* boot + 2 uart + touch の 4 周期 x 3 銘柄(2800 の x は取得しない) */
+    CHECK_EQ(count_prefix("[stk] cycle="), 4);
+    CHECK_EQ(tx_count("AT+CWQAP\r\n"), 1);                                           /* 再接続はしない */
     {
         unsigned n40 = 0u;
-        for (i = 0u; i < g_nlogs; i++) { if ((strncmp(g_logs[i], "[wx] res=ok ", 12) == 0) && (strstr(g_logs[i], "jst=134050") != NULL)) { n40++; } }
-        CHECK_EQ(n40, 3u);                                                           /* 'a' の後の 3 回は Date: = 04:40:50 UTC → 13:40:50 JST */
+        for (i = 0u; i < g_nlogs; i++) { if ((strncmp(g_logs[i], "[stk] res=ok ", 13) == 0) && (strstr(g_logs[i], "jst=134050") != NULL)) { n40++; } }
+        CHECK_EQ(n40, 9u);                                                           /* 'a' の後の 3 周期(9 回)は Date: = 04:40:50 UTC → 13:40:50 JST */
     }
     {
         int last = -1;
-        for (i = 0u; i < g_nlogs; i++) { if (strncmp(g_logs[i], "[wx] net=on busy=0 ", 19) == 0) { last = (int)i; } }
+        for (i = 0u; i < g_nlogs; i++) { if (strncmp(g_logs[i], "[stk] net=on busy=0 ", 20) == 0) { last = (int)i; } }
         CHECK(last >= 0);
         if (last >= 0) {                                                             /* s(4900)の応答: 時計は 13:40:50 + (4900 - 最後の取得)の数秒 = 13:40:5x〜13:41:0x。再同期しなければ 13:24 台のまま */
             const char *p = strstr(g_logs[last], " clk=");
             unsigned hh = (unsigned)(p[5] - '0') * 10u + (unsigned)(p[6] - '0'), mm = (unsigned)(p[7] - '0') * 10u + (unsigned)(p[8] - '0');
             CHECK_EQ(hh, 13u); CHECK(mm == 40u || mm == 41u);
-            CHECK(strstr(g_logs[last], " date=20261125 wd=3 sync=1\r\n") != NULL);
+            CHECK(starts(g_logs[last], "[stk] net=on busy=0 have=7 stale=0 "));
+            CHECK(strstr(g_logs[last], " upd=1340\r\n") != NULL);
+            CHECK(last + 3 < (int)g_nlogs);
+            CHECK(starts(g_logs[last + 1], "[stk] sym=0 have=1 p100=243300 d100=5500 bp=231 dir=u mkt=t age="));
+            CHECK(starts(g_logs[last + 2], "[stk] sym=1 have=1 p100=5795384 d100=45468 bp=79 dir=u mkt=t age="));
+            CHECK(starts(g_logs[last + 3], "[stk] sym=2 have=1 p100=718278 d100=-1831 bp=-25 dir=d mkt=c age="));
         }
     }
-    CHECK_EQ(g_ui.clock_min >= 13 * 60 + 40, 1);
+    CHECK_EQ(g_v.clock_min >= 13 * 60 + 40, 1);
     CHECK_EQ(g_log_drops, 0);
     CHECK(g_max_tick_lines <= 6u);
     check_lines_clean();
 
-    TEST("P5 古い値: 最後の成功から 30 分を超えると stale = 1(値は消えない)。次の成功で戻る");
+    TEST("P5 古い値: 最後の成功から 30 分以上で stale(行ごと・全体)。値は消えない。次の成功で戻る");
     reset_all(); C.stop_tick = 2400u;
     { static const cmdev_t c[] = { { 1800u, 'z' }, { 2000u, 'x' } }; C.cmds = c; C.n_cmds = 2u; run(); }
-    CHECK(g_ui_stale_seen);
-    CHECK_EQ(g_ui.stale, 0);                                                         /* x の取得に成功して戻った */
-    CHECK_EQ(g_ui.have, 1); CHECK_EQ(g_ui.temp_x10, 127);
+    CHECK(g_v_stale_seen);
+    CHECK_EQ(g_v.stale_all, 0);                                                      /* x の取得に成功して戻った */
+    CHECK_EQ(g_v.row[0].stale, 0); CHECK_EQ(g_v.row[1].stale, 0); CHECK_EQ(g_v.row[2].stale, 0);
+    CHECK_EQ(g_v.have_any, 1); CHECK_EQ(g_v.row[0].price_x100, 243300);
     reset_all(); C.stop_tick = 1900u;
     { static const cmdev_t c[] = { { 1800u, 'z' } }; C.cmds = c; C.n_cmds = 1u; run(); }
-    CHECK_EQ(g_ui.stale, 1); CHECK_EQ(g_ui.have, 1); CHECK_EQ(g_ui.temp_x10, 127); CHECK_EQ(g_ui.net, UI_NET_ON);
+    CHECK_EQ(g_v.stale_all, 1); CHECK_EQ(g_v.have_any, 1); CHECK_EQ(g_v.row[0].price_x100, 243300); CHECK_EQ(g_v.net, STK_NET_ON);
+    CHECK_EQ(g_v.row[0].stale, 1); CHECK_EQ(g_v.row[1].stale, 1); CHECK_EQ(g_v.row[2].stale, 1);
+    CHECK_EQ(g_v.row[0].have, 1); CHECK_EQ(g_v.row[1].have, 1); CHECK_EQ(g_v.row[2].have, 1);
 
-    TEST("P6 取得の失敗: TCP が張れない → [wx] res=fail err=1、net=err、値は残る。20 秒後にやり直し(2 回まで)、3 回目の失敗で接続からやり直す。直ったら net=on");
-    reset_all(); C.stop_tick = 8500u;
-    { static const cmdev_t c[] = { { 1800u, 'f' }, { 2000u, 'x' }, { 6200u, 'g' } }; C.cmds = c; C.n_cmds = 3u; run(); }
-    CHECK_EQ(count_prefix("[wx] res=fail src=uart err=1 http=0 ms="), 1);
-    CHECK_EQ(count_prefix("[wx] res=fail src=timer err=1 http=0 ms="), 2);          /* 20 秒後に 2 回(やり直しは timer。2000 → 4000 → 6000 tick) */
-    CHECK_EQ(count_prefix("[wifi] step=reset res=ok "), 2);                          /* 3 回目の失敗で再接続 */
-    CHECK_EQ(g_ui_net_seen[UI_NET_ERR] > 0u, 1);
-    CHECK_EQ(g_ui.have, 1); CHECK_EQ(g_ui.temp_x10, 127);                            /* 失敗でも古い値を残す */
-    CHECK_EQ(g_ui.net, UI_NET_ON);                                                   /* g の後の取得に成功 */
-    CHECK_EQ(count_prefix("[wx] res=ok src=timer "), 1);
+    TEST("P6 全部失敗(TCP が張れない): 3 銘柄とも [stk] res=fail err=1 → 20 秒後にやり直し(src=retry。2 回まで) → 周期の記録(ok=0 fail=7)→ 再接続(net=err)→ 直ったら新しい周期。値は残る");
+    reset_all(); C.stop_tick = 9000u;
+    { static const cmdev_t c[] = { { 1800u, 'f' }, { 2000u, 'x' }, { 6400u, 'g' } }; C.cmds = c; C.n_cmds = 3u; run(); }
+    CHECK_EQ(count_prefix("[stk] res=fail sym=0 src=uart err=1 http=0 ms="), 1);
+    CHECK_EQ(count_prefix("[stk] res=fail sym=1 src=uart err=1 http=0 ms="), 1);
+    CHECK_EQ(count_prefix("[stk] res=fail sym=2 src=uart err=1 http=0 ms="), 1);
+    CHECK_EQ(count_prefix("[stk] res=fail sym=0 src=retry err=1 http=0 ms="), 2);       /* 20 秒後に 2 回(2000 → 4000 → 6000 tick) */
+    CHECK_EQ(count_prefix("[stk] res=fail sym=2 src=retry err=1 http=0 ms="), 2);
+    CHECK_EQ(count_prefix("[stk] res=fail"), 9);
+    CHECK_EQ(count_prefix("[stk] cycle=2 ok=0 fail=7 ms="), 1);
+    CHECK_EQ(tx_count("AT+CWQAP\r\n"), 2);                                              /* 3 周目に失敗が残ったので再接続 */
+    CHECK_EQ(g_v_net_seen[STK_NET_ERR] > 0u, 1);
+    CHECK(g_v_partial_seen);
+    CHECK_EQ(g_v.have_any, 1); CHECK_EQ(g_v.row[0].price_x100, 243300);                 /* 失敗でも古い値を残す */
+    CHECK_EQ(g_v.net, STK_NET_ON);                                                      /* g の後の取得に成功 */
+    CHECK_EQ(g_v.partial, 0);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=0 src=timer "), 1);                         /* 再接続の後の周期(きっかけは timer) */
+    CHECK_EQ(count_prefix("[stk] cycle=3 ok=7 fail=0 ms="), 1);
     check_lines_clean();
 
-    TEST("P7 接続の失敗(join が FAIL): [wifi] result=fail stage=join、[wx] res=fail src=boot err=8、net=err。60 秒後に再接続、直れば取得して net=on");
+    TEST("P6b 1 銘柄(^N225)だけ失敗(404): 他の 2 銘柄は ok。20 秒後に失敗分だけやり直し(src=retry)・2 回。cycle ok=5 fail=2。表示値は partial=1・row1.fail=1・他は通常。net は on のまま。直れば次のやり直しで ok");
+    reset_all(); C.stop_tick = 6000u;
+    { static const cmdev_t c[] = { { 100u, 'k' } }; C.cmds = c; C.n_cmds = 1u; run(); }
+    CHECK_EQ(count_prefix("[stk] res=ok sym=0 src=boot "), 1); CHECK_EQ(count_prefix("[stk] res=ok sym=2 src=boot "), 1);
+    CHECK_EQ(count_prefix("[stk] res=fail sym=1 src=boot err=4 http=404 ms="), 1);
+    CHECK_EQ(count_prefix("[stk] res=fail sym=1 src=retry err=4 http=404 ms="), 2);   /* 失敗した銘柄だけ・2 回 */
+    CHECK_EQ(count_prefix("[stk] res=ok src=retry"), 0); CHECK_EQ(count_prefix("[stk] res=ok sym=0 src=retry"), 0); CHECK_EQ(count_prefix("[stk] res=ok sym=2 src=retry"), 0);
+    CHECK_EQ(count_prefix("[stk] cycle=1 ok=5 fail=2 ms="), 1);
+    CHECK_EQ(tx_count("AT+CWQAP\r\n"), 1);                                              /* 再接続しない */
+    CHECK_EQ(g_v.net, STK_NET_ON); CHECK_EQ(g_v_net_seen[STK_NET_ERR], 0);
+    CHECK_EQ(g_v.partial, 1); CHECK_EQ(g_v.row[1].fail, 1); CHECK_EQ(g_v.row[1].have, 0); CHECK_EQ(g_v.row[0].fail, 0); CHECK_EQ(g_v.row[2].fail, 0);
+    CHECK_EQ(g_v.row[0].have, 1); CHECK_EQ(g_v.row[2].have, 1); CHECK_EQ(g_v.have_any, 1);
+    CHECK(count_prefix("[stk] net=on busy=0 have=5 ") >= 1u);
+    check_lines_clean();
+    reset_all(); C.stop_tick = 6000u;                                                   /* 1 回目のやり直しの前に直す → やり直しで ok */
+    { static const cmdev_t c[] = { { 100u, 'k' }, { 1500u, 'h' } }; C.cmds = c; C.n_cmds = 2u; run(); }
+    CHECK_EQ(count_prefix("[stk] res=fail sym=1 src=boot err=4 http=404 ms="), 1);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=1 src=retry "), 1);
+    CHECK_EQ(count_prefix("[stk] res=fail"), 1);
+    CHECK_EQ(count_prefix("[stk] cycle=1 ok=7 fail=0 ms="), 1);
+    CHECK_EQ(g_v.partial, 0); CHECK_EQ(g_v.row[1].have, 1); CHECK_EQ(g_v.row[1].fail, 0); CHECK_EQ(g_v.row[1].price_x100, 5795384);
+
+    TEST("P7 接続の失敗(join が FAIL): [wifi] result=fail stage=join、[stk] res=fail sym=0 src=boot err=8、net=err。60 秒後に再接続、直れば 3 銘柄を取って net=on");
     reset_all(); g_join_fail = true; C.stop_tick = 9000u;
     { static const cmdev_t c[] = { { 4000u, 'g' } }; C.cmds = c; C.n_cmds = 1u; run(); }
     CHECK(count_prefix("[wifi] result=fail stage=join ") >= 1u);
-    CHECK(find_idx("[wx] res=fail src=boot err=8 http=0 ms=") >= 0);
-    CHECK(find_idx("[wx] net=err busy=0 have=0 ") >= 0);
-    CHECK_EQ(count_prefix("[wifi] step=reset res=ok "), 2);                          /* 60 秒後に再接続(2 回目は成功) */
-    CHECK(g_ui_net_seen[UI_NET_ERR] > 5000u);                                        /* 失敗から 60 秒(約 6000 tick)の間はエラー表示 */
-    CHECK_EQ(g_ui.net, UI_NET_ON); CHECK_EQ(g_ui.have, 1);
-    CHECK_EQ(count_prefix("[wx] res=ok src=boot "), 1);                              /* 再接続の後の最初の取得(取得のきっかけは起動のまま) */
+    CHECK(find_idx("[stk] res=fail sym=0 src=boot err=8 http=0 ms=") >= 0);
+    CHECK(find_idx("[stk] net=err busy=0 have=0 stale=0 clk=none upd=none\r\n") >= 0);
+    CHECK_EQ(tx_count("AT+CWQAP\r\n"), 2);                                              /* 60 秒後に再接続(2 回目は成功) */
+    CHECK(g_v_net_seen[STK_NET_ERR] > 5000u);                                           /* 失敗から 60 秒(約 6000 tick)の間はエラー表示 */
+    CHECK_EQ(g_v.net, STK_NET_ON); CHECK_EQ(g_v.have_any, 1);
+    CHECK_EQ(count_prefix("[stk] res=ok sym=0 src=boot "), 1);                          /* 再接続の後の最初の周期(きっかけは起動のまま) */
+    CHECK_EQ(count_prefix("[stk] res=ok sym=2 src=boot "), 1);
     check_lines_clean();
 
     TEST("P8 受信は 1 周回に 64 バイトまで、SCI1 の受信異常は [err] code=10 を 1 秒に 1 行");
@@ -896,7 +1026,7 @@ int main(void)
     run();
     CHECK_EQ(count_prefix("[err] code=10 detail=8\r\n"), 2);
 
-    TEST("P9 SCI1 を開けない: [err] code=9 を 1 行、OFF(ESP32 に送らない)。x は req=off");
+    TEST("P9 SCI1 を開けない: [err] code=9 を 1 行、OFF(ESP32 に送らない)。x は req=off。s は net=off と sym 3 本");
     reset_all(); C.esp = false; C.stop_tick = 800u;
     g_fs.open_ret = SCI_ERR_BAD_CHAN;
     { static const cmdev_t c[] = { { 100u, 'x' }, { 200u, 's' } }; C.cmds = c; C.n_cmds = 2u; run(); }
@@ -904,13 +1034,14 @@ int main(void)
     CHECK_EQ(count_prefix("[wifi] "), 0);
     CHECK_EQ(g_fs.send_calls, 0);
     CHECK_EQ(g_fs.recv_calls, 0);
-    CHECK_EQ(count_prefix("[wx] req=off src=uart\r\n"), 1);
-    CHECK_EQ(count_prefix("[wx] net=off busy=0 have=0 temp10=0 kind=none age=-1 clk=none date=none wd=9 sync=0\r\n"), 1);
-    CHECK_EQ(g_ui.net, UI_NET_OFF); CHECK_EQ(g_ui.clk_ext, 1); CHECK_EQ(g_ui.clock_min, 0xFFFF);
+    CHECK_EQ(count_prefix("[stk] req=off src=uart\r\n"), 1);
+    CHECK_EQ(count_prefix("[stk] net=off busy=0 have=0 stale=0 clk=none upd=none\r\n"), 1);
+    CHECK_EQ(count_prefix("[stk] sym="), 3);
+    CHECK_EQ(g_v.net, STK_NET_OFF); CHECK_EQ(g_v.clock_min, 0xFFFF); CHECK_EQ(g_v.have_any, 0);
 #endif /* !T_NOSECRET */
 
 #ifdef T_NOSECRET
-    TEST("P10 wifi_secret.h が無い: SCI1 を開かない・EN に触れない・何も送らない・何も出さない。UI は OFFLINE・未同期。x は req=off、s は net=off");
+    TEST("P10 wifi_secret.h が無い: SCI1 を開かない・EN に触れない・何も送らない。表示値は OFFLINE(net=off)・未同期。x は req=off、s は net=off と sym 3 本");
     reset_all(); C.stop_tick = 1500u;
     { static const cmdev_t c[] = { { 100u, 'x' }, { 101u, 't' }, { 200u, 's' } }; C.cmds = c; C.n_cmds = 3u; run(); }
     CHECK_EQ(g_fs.open_calls, 0);
@@ -920,14 +1051,15 @@ int main(void)
     CHECK_EQ(g_fs.send_calls, 0);
     CHECK_EQ(g_fs.recv_calls, 0);
     CHECK_EQ(count_prefix("[wifi] "), 0);
-    CHECK_EQ(count_prefix("[wx] req=off src=uart\r\n"), 1);
-    CHECK_EQ(count_prefix("[wx] req=off src=touch\r\n"), 1);
-    CHECK_EQ(count_prefix("[wx] net=off busy=0 have=0 temp10=0 kind=none age=-1 clk=none date=none wd=9 sync=0\r\n"), 1);
-    CHECK_EQ(g_nlogs, 3u);
-    CHECK_EQ(g_ui.net, UI_NET_OFF); CHECK_EQ(g_ui.busy, 0); CHECK_EQ(g_ui.have, 0); CHECK_EQ(g_ui.clk_ext, 1);
-    CHECK_EQ(g_ui.clock_min, 0xFFFF); CHECK_EQ(g_ui.month, 0); CHECK_EQ(g_ui.upd_min, 0xFFFF);
-    CHECK(!g_ui_busy_seen);
-    CHECK_EQ(g_ui_net_seen[UI_NET_OFF] > 1000u, 1);
+    CHECK_EQ(count_prefix("[stk] req=off src=uart\r\n"), 1);
+    CHECK_EQ(count_prefix("[stk] req=off src=touch\r\n"), 1);
+    CHECK_EQ(count_prefix("[stk] net=off busy=0 have=0 stale=0 clk=none upd=none\r\n"), 1);
+    CHECK_EQ(count_prefix("[stk] sym="), 3);
+    CHECK_EQ(g_nlogs, 6u);
+    CHECK_EQ(g_v.net, STK_NET_OFF); CHECK_EQ(g_v.busy, 0); CHECK_EQ(g_v.have_any, 0); CHECK_EQ(g_v.partial, 0);
+    CHECK_EQ(g_v.clock_min, 0xFFFF); CHECK_EQ(g_v.upd_min, 0xFFFF);
+    CHECK(!g_v_busy_seen);
+    CHECK_EQ(g_v_net_seen[STK_NET_OFF] > 1000u, 1);
     check_lines_clean();
 #endif
 #endif
