@@ -1,0 +1,24 @@
+# S7 最大幅: 現在値 999,999.99、騰落率 +998.90%、金額 ▲99,999.99
+# 書式: key=整数(docs/design.md §3.12)。書かれないキーは 0(clock と upd だけ 65535 = 未同期・なし)
+net=2
+busy=0
+have_any=1
+stale_all=0
+partial=0
+clock=555
+upd=552
+r0.have=1
+r0.mkt=1
+r0.price=11000
+r0.diff=9999
+r0.bp=99890
+r1.have=1
+r1.mkt=1
+r1.price=10000000
+r1.diff=1000
+r1.bp=1
+r2.have=1
+r2.mkt=2
+r2.price=99999999
+r2.diff=9999999
+r2.bp=1111

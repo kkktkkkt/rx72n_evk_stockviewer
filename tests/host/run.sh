@@ -550,5 +550,22 @@ if sel S27; then
   result S27 $rc
 fi
 
+# ---------------------------------------------------------------- S28
+if sel S28; then
+  echo "### S28 株価ビューのアセット生成(docs/design.md §3.11、H-9 の前半): gen_stock_assets.py --check(パレット 256・固定色が厳密・最大誤差 <= 3 段・グリフ・矩形の重なり・フッター幅)/ 2 回の生成で同一 / コミット済みのプレビュー PNG と一致"
+  rc=0
+  "$PY" -I "$ROOT/tools/gen_stock_assets.py" --check || rc=1
+  rm -rf "$BUILD/stock_prev"; mkdir -p "$BUILD/stock_prev"
+  "$PY" -I "$ROOT/tools/gen_stock_assets.py" --preview-dir "$BUILD/stock_prev" >/dev/null || rc=1
+  n=0
+  for f in "$BUILD"/stock_prev/*.png; do
+    b="$(basename "$f")"; n=$((n+1))
+    cmp -s "$f" "$ROOT/tools/assets/stock/preview/$b" || { echo "  NG: コミット済み tools/assets/stock/preview/$b が生成物と違う(再生成が必要)"; rc=1; }
+  done
+  echo "  比較したプレビュー PNG = $n(sheet + state_S0〜S7 + strips + header_footer + palette = 12)"
+  [ "$n" -eq 12 ] || rc=1
+  result S28 $rc
+fi
+
 echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"
 [ $FAILS -eq 0 ]
