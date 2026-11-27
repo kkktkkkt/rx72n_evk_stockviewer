@@ -1,6 +1,6 @@
 # ハードウェア・モジュール調査メモ(RX72N Envision Kit)
 
-最終更新: 2026-11-25(設計担当が §9 を追加: オンボード Wi-Fi の ESP32 と SCI1)。2026-11-21(設計担当が §8 を追加: GLCDC / CLUT8 / 2面表示。同日 §8.8 を追加: ハードウェアマニュアルで CLUT8 表示を確認し、§8.1〜§8.7 を訂正)。2026-11-19(§2,§3,§4,§7 を更新)
+最終更新: 2026-11-27(設計担当が §11 を追加: Yahoo の chart API の実測と、TLS(ESP32 の SSL)の資料。`design.md` 株価ビュー)。2026-11-25(設計担当が §9 を追加: オンボード Wi-Fi の ESP32 と SCI1)。2026-11-21(設計担当が §8 を追加: GLCDC / CLUT8 / 2面表示。同日 §8.8 を追加: ハードウェアマニュアルで CLUT8 表示を確認し、§8.1〜§8.7 を訂正)。2026-11-19(§2,§3,§4,§7 を更新)
 
 **信頼度の意味**
 
@@ -524,3 +524,24 @@ GLCDC機能の選択値(PSEL)は `0b100101`(0x25)。
 | LwIP の FIT | **不要**。TCP/IP スタックは ESP32 側。RX72N は SCI1 の AT コマンド(`CIPSTART` / `CIPSEND` / `+IPD`)だけ | ○(構造と資料から) | `design.md` §22.0 |
 
 **未確認(実機で確認する。`design.md` §22.13 の X0。専用モードで先に)**: ESP32 1.1.3.0 での `AT+CIPSTART="TCP",<ドメイン名>,80` の `CONNECT` / `OK`、`AT+CIPSEND` の `>` の形(`> ` の空白の有無)、`Recv <n> bytes` の行の有無、`+IPD` が 1 個か複数か、`CLOSED` の形、`busy` の出方、SNTP の応答、SSL(使うのは後退案のみ)。**確認方法**: 専用モード(`APP_WIFI_TEST=1`)で `d` の後に `x`。`[wifiv] key=oth` の「形」(英数字は `a` と `9`)で、想定外の行を秘密なしで知る。
+
+
+## 11. 2026-11-27 追加調査(設計担当): Yahoo の chart API の実測と ESP32 の TLS(`design.md` 株価ビュー)
+
+**出典**: (a) **PC から実測**(`curl` 8.18、OpenSSL 3.5.5 の `openssl s_client`、Python。公開 API・個人情報なし。2026-11-27 09:15〜09:30 JST。25 秒以上あけて約 30 回)、(b) Espressif「ESP32 AT Instruction Set and Examples **v1.2**」(2018.12。SparkFun のコピーを `pdftotext` で文字にし、5.2.8・5.2.9・5.2.10 と `SSL` `TLS` `SNI` `CIPSSLSIZE` `CIPRECVMODE` を検索した)、(c) GitHub の esp-at v1.1.3.0 のリリースノート、(d) 検索結果の要約(原文は未読と書いたもの)。**ESP32 実機での SSL は未試験**。信頼度の記号は冒頭と同じ。
+
+| 項目 | 値 | 信頼度 | 出典 |
+|---|---|---|---|
+| Yahoo chart API | `https://query1.finance.yahoo.com/v8/finance/chart/<sym>?range=<r>&interval=1d`(`6723.T` `%5EN225` `%5EGSPC`)。HTTP/1.0 で `content-length` あり・chunked なし。ヘッダー名は小文字。**応答の全体 1,816〜1,862 バイト(`range=1d`)、`range=2d` で最大 約 1,960**(本文 1,265〜1,394 + ヘッダー 551〜566) | ◎ | (a) |
+| **User-Agent** | **UA なしは 7 回中 6 回が `429 Too Many Requests`**(388 バイト)。UA あり(`rx72n-demo/1`)は 8 回すべて 200 | ◎ | (a) |
+| HTTP(80) | UA ありで `301 Moved Permanently`(HTTPS へ)。Stooq(`stooq.com/q/l/`)も 301 | ◎ | (a) |
+| **前日の終値の取り違え** | 09:15 JST に `range=1d` で 6723.T の `chartPreviousClose` = 2378(2 営業日前)。前日の終値は 2433(`range=5d` の日足で確認)。6 分後の再取得は 2433(正)。`range=2d` の `indicators.quote[0].close` の「最後から 2 番目」が前日の終値で、^GSPC も一致。^N225 の `range=2d` は足が 1 本 | ◎ | (a) |
+| 遅延 | 日本の銘柄・日経平均は **約 15 分遅れ**(取得 09:18:58 JST、最新の足 09:03:57 / 09:03:20) | ◎ | (a) |
+| 取引時間(`currentTradingPeriod.regular`) | 6723.T / ^N225: 00:00〜06:30 UTC(09:00〜15:30 JST。昼休みも区間の中)。^GSPC: 14:30〜21:00 UTC(冬時間) | ◎ | (a) |
+| Yahoo の TLS | TLS 1.3 / 1.2 を受け、**1.1 / 1.0 は `protocol version` アラートで拒否**。TLS 1.2 の暗号スイート: ECDHE-ECDSA / ECDHE-RSA の AES-GCM・AES-CBC-SHA256、RSA 鍵交換の AES128-GCM は受ける。**RSA 鍵交換の AES128-SHA(CBC)は拒否** | ◎ | (a) |
+| **SNI** | **SNI なし(`-noservername`)でも TLS 1.2 で成立し 200** | ◎ | (a) |
+| **証明書の連鎖が大きい** | 葉 3,325(EC)/ 3,787(RSA 4096)+ 中間 1,272 バイト。ハンドシェイクの受信 5,107〜6,055 バイト。`Certificate` は約 4.6〜5.1KB で 1 レコードに入る大きさ。ESP32 側の受信レコードの上限が 4096 以下なら失敗(1.1.3.0 の値は**資料で確認できず** △) | ◎(大きさ)/ △(上限) | (a) |
+| AT 1.x の SSL | `AT+CIPSTART="SSL","<host>",<port>`(5.2.8)あり。**「SSL は多くのメモリを使い、足りないと再起動」の注記**。設定は `AT+CIPSSLCCONF=<type>,<cert_key_ID>,<CA_ID>`(5.2.9。type 0 = 認証なし。**NVS に保存**。既定の記載なし)だけ。**`AT+CIPSSLSIZE`・SNI・TLS 版・暗号スイートの設定コマンドは資料(5,666 行)に無い**。`AT+CIPRECVMODE` も無い(受信は `+IPD` の押し込み)。`AT+CIPSEND` は最大 2048 バイト | ○ | (b) |
+| 1.1.3.0 | ESP-IDF 3.0.7 へ更新、softAP の再起動・TCP サーバー終了時の異常の修正、factory パラメータ領域。**SSL への言及なし**。SNI・CN・ALPN の設定は v2.1.0.0 の差分に現れる(要約) | ○ / △ | (c)(d) |
+| ESP32 実機の SSL | **未試験**。`design.md` §5.5 の手順で最初に確かめる | ？ | — |
+
