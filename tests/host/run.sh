@@ -166,6 +166,12 @@ if sel S7; then
   for bad in "-DAPP_STK_PREVIEW=1 -DAPP_CLK_PREVIEW=1" "-DAPP_STK_PREVIEW=1 -DAPP_CLK_PREVIEW=2" "-DAPP_CLK_PREVIEW=3" "-DAPP_CLK_PREVIEW=-1"; do
     if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c $bad -I"$APP" - >/dev/null 2>&1; then echo "  NG: $bad で #error が出ない"; rc=1; else echo "  ok ($bad は #error)"; fi
   done
+  echo " -- A + APP_NIGHT = 0 / 1(夜間のバックライト。7a。app_main.c・lcd_panel.c)"
+  check_hw "A night0" $RXDEF -DAPP_NIGHT=0 -I"$APP" $FIT_INC
+  check_hw "A night1 clkprev1" $RXDEF -DAPP_NIGHT=1 -DAPP_CLK_PREVIEW=1 -I"$APP" $FIT_INC
+  check_hw "A night1 preview1" $RXDEF -DAPP_NIGHT=1 -DAPP_STK_PREVIEW=1 -I"$APP" $FIT_INC
+  check_hw "A night1 wx0" $RXDEF -DAPP_NIGHT=1 -DAPP_WX=0 -I"$APP" $FIT_INC
+  check_hw "A night1 wifitest1" $RXDEF -DAPP_NIGHT=1 -DAPP_WIFI_TEST=1 -I"$APP" $FIT_INC
   echo " -- A + APP_PERF_BENCH=0 (計測なし)"
   check_hw "A perf0" $RXDEF -DAPP_PERF_BENCH=0 -I"$APP" $FIT_INC
   echo " -- A + -Wconversion(製品コードの警告のみ数える。情報用)"
@@ -586,8 +592,8 @@ if sel S34; then
   echo "### S34 app_main.c の結合試験(Phase 4。H-12・H-13。Phase 6b: [scr] の行・lcd_flip_pal・APP_CLK_PREVIEW = 1 / 2・時計・天気の値の注入): 偽の LCD・タッチ・CMT・ログ・wifi_at API で app_main() を 10ms ずつ走らせ、起動の行の順・面 0 を lcd_init の前に描く・stk_ui の値が ui_render で描かれ変わった時だけ入れ替わる・[ev] btn=tap src=touch|uart と wx_request(src)・s ? と n p d + - の扱い・[hb]・[scr] を、製品 / APP_WX=0 / APP_STK_PREVIEW=1 / LCD 初期化失敗 / タッチ初期化失敗 / APP_CLK_PREVIEW=1・2 / 時計・天気の値の注入 の 8 通りで確かめる"
   rc=0
   build_ui_objs || rc=1
-  A34="$APP/ui_render.c $CLKC $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/ui_preview.c $APP/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
-  for v in "prod:" "nowx:-DAPP_WX=0" "preview:-DAPP_STK_PREVIEW=1" "lcdfail:-DT_LCD_FAIL" "touchfail:-DT_TOUCH_FAIL" "clkprev1:-DAPP_CLK_PREVIEW=1" "clkprev2:-DAPP_CLK_PREVIEW=2" "clkinject:-DAPP_WX=0 -DT_CLK_INJECT"; do
+  A34="$APP/ui_render.c $CLKC $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/night_core.c $APP/ui_preview.c $APP/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
+  for v in "prod:" "nowx:-DAPP_WX=0" "preview:-DAPP_STK_PREVIEW=1" "lcdfail:-DT_LCD_FAIL" "touchfail:-DT_TOUCH_FAIL" "clkprev1:-DAPP_CLK_PREVIEW=1" "clkprev2:-DAPP_CLK_PREVIEW=2" "clkinject:-DAPP_WX=0 -DT_CLK_INJECT" "night:-DT_NIGHT" "night0:-DAPP_NIGHT=0"; do
     name="${v%%:*}"; flags="${v#*:}"
     echo "  -- $name ${flags}"
     EXTRA_CFLAGS="$flags" build_fit_test "$BUILD/test_app_main_$name" "$HERE/test_app_main.c" $A34 || rc=1
@@ -642,7 +648,7 @@ if sel S36; then
     if [ -x "$MUT2/t" ]; then "$MUT2/t" >"$MUT2/run.log" 2>&1; mut2_verdict "更新要求の最小間隔(5 秒)を外す" $?; fi
   fi
   # (3)(4) app_main: タップの src の取り違え、stk_ui の値を表示へ渡さない
-  A36="$APP/ui_render.c $CLKC $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/ui_preview.c $APP/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
+  A36="$APP/ui_render.c $CLKC $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/night_core.c $APP/ui_preview.c $APP/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
   run_main_mut() { # $1=名前 $2=sed 式
     if mut2_prep "$1" app_main.c "$2"; then
       EXTRA_CFLAGS="" build_fit_test "$MUT2/t" "$MUT2/tests/host/test_app_main.c" $A36 >"$MUT2/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT2/cc.log"; rc=1; return; }
@@ -808,7 +814,7 @@ if sel S42; then
     if [ -x "$MUT3/t" ]; then "$MUT3/t" >"$MUT3/run.log" 2>&1; mut3_verdict "ClutUpdate_NoReflect を反映つきにする" $?; fi
   fi
   # (4)(5) app_main: パレット番号の更新を外す / 画面のパレットを見ずに常に lcd_flip_pal(同じパレットでの呼び出しの違反)
-  A42="$M/ui_render.c $M/ui_clock.c $M/clk_core.c $M/ui_logic.c $M/stk_core.c $M/gfx.c $M/app_logfmt.c $M/ui_preview.c $M/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
+  A42="$M/ui_render.c $M/ui_clock.c $M/clk_core.c $M/ui_logic.c $M/stk_core.c $M/gfx.c $M/app_logfmt.c $M/night_core.c $M/ui_preview.c $M/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
   run_main_mut3() { # $1=名前 $2=ファイル $3=sed 式 $4=試験のビルドフラグ
     if mut3_prep "$1" "$2" "$3"; then
       EXTRA_CFLAGS="$4" build_fit_test "$MUT3/t" "$MUT3/tests/host/test_app_main.c" $A42 >"$MUT3/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない: $1"; head -5 "$MUT3/cc.log"; rc=1; return; }
@@ -899,6 +905,74 @@ if sel S43; then
   mut4_run "wx_parse_weather の段 3b(閉じた JSON か)を外す" wx_core.c '/^bool wx_parse_weather/,/^}/ s/if (!stk_json_complete(body, (size_t)(end - body))) {/if (0) {/' $W "$WF" wx_core.c clk_core.c stk_core.c
   mut4_run "天気の接続先を Yahoo の SSL にする(wifi_core)" wifi_core.c 's/return (c->sym == (uint8_t)WX_WEATHER) ? WX_TGT_METEO_TCP : (wx_target_t)c->target;/return (wx_target_t)c->target;/' test_wifi_core.c "-DAPP_WX=1" wifi_core.c wx_core.c clk_core.c stk_core.c
   result S43 $rc
+fi
+
+# ---------------------------------------------------------------- S44
+if sel S44; then
+  echo "### S44 夜間のバックライト(docs/design.md §14。Phase 7a): night_core の標準 C 条件(3 規格・警告ゼロ・データシンボルなし・FIT を include しない)・APP_NIGHT = 0 で中身が消える・wifi_sw.h(既定 1・0/1 以外は #error)・test_night_core(H-N1・H-N2。窓の境界・状態機械・乱数走行)を既定と窓を変えた -D の 2 通りで・変異試験 2 か所(窓の境界・起こしのタイムアウト)。app_main の結合は S34(night / night0)、lcd_bl_set は S6、[bl] は S8"
+  rc=0
+  for std in "-std=gnu99" "-std=c99 -pedantic-errors" "-std=c11"; do
+    cc_nowarn $std $WARN -I"$APP" -c "$APP/night_core.c" -o "$BUILD/night_core.o" || rc=1
+    cc_nowarn $std $WARN -DAPP_NIGHT=0 -I"$APP" -c "$APP/night_core.c" -o "$BUILD/night_core0.o" || rc=1
+  done
+  if grep -nE '#\s*include\s*[<"](platform|board_pins|r_[a-z_0-9]+_if)\.h[>"]' "$APP/night_core.c" "$APP/night_core.h"; then echo "  NG: FIT / platform.h を include している"; rc=1; fi
+  if nm "$BUILD/night_core.o" | grep -E ' [DdBbCc] ' | grep -vE ' [DdBbCc] \.'; then echo "  NG: データシンボルがある"; rc=1; else echo "  (データシンボルなし)"; fi
+  if nm "$BUILD/night_core0.o" | grep -E ' [TtDdRrBbCc] ' | grep -vE ' [TtDdRrBbCc] \.'; then echo "  NG: APP_NIGHT = 0 でシンボルが残る"; rc=1; else echo "  ok (APP_NIGHT = 0 では night_core.o が空)"; fi
+  d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_NIGHT == 1, "night default");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -I"$APP" - 2>&1)" || { echo "  NG: APP_NIGHT の既定: $d"; rc=1; }
+  if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c -DAPP_NIGHT=2 -I"$APP" - >/dev/null 2>&1; then echo "  NG: APP_NIGHT = 2 で #error が出ない"; rc=1; else echo "  ok (APP_NIGHT = 2 は #error)"; fi
+  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_night_core.c" "$APP/night_core.c" -o "$BUILD/test_night_core" || rc=1
+  [ -x "$BUILD/test_night_core" ] && { "$BUILD/test_night_core" | tail -3 | grep -E "FAIL|checks"; [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1; }
+  echo "  窓を変えた -D(昼の窓 60〜120、起こし 5 秒)でも窓の判定の試験が通る(H-N1 の「-D で窓を変えても同じ」)"
+  cc_nowarn $STD $WARN -DAPP_NIGHT_START_MIN=60u -DAPP_NIGHT_END_MIN=120u -I"$APP" -c "$APP/night_core.c" -o "$BUILD/night_core_d.o" || rc=1
+  cat > "$BUILD/night_d.c" <<'NIGHTD'
+#include <stdio.h>
+#include "night_core.h"
+int main(void)
+{
+    night_t n;
+    int bad = 0;
+    night_init(&n);
+    if (night_in_window(59u, APP_NIGHT_START_MIN, APP_NIGHT_END_MIN) || !night_in_window(60u, APP_NIGHT_START_MIN, APP_NIGHT_END_MIN) ||
+        !night_in_window(119u, APP_NIGHT_START_MIN, APP_NIGHT_END_MIN) || night_in_window(120u, APP_NIGHT_START_MIN, APP_NIGHT_END_MIN)) { bad = 1; }
+    if (!night_update(&n, 0u, 60u) || (n.mode != (uint8_t)NIGHT_OFF)) { bad = 1; }
+    (void)night_filter(&n, true, 1000u); (void)night_update(&n, 1000u, 60u);
+    if (night_update(&n, 1000u + APP_NIGHT_WAKE_MS - 1u, 60u) || !night_update(&n, 1000u + APP_NIGHT_WAKE_MS, 60u)) { bad = 1; }
+    printf("night_d: %s\n", bad ? "FAIL" : "ok");
+    return bad;
+}
+NIGHTD
+  cc_nowarn $STD $WARN -DAPP_NIGHT_START_MIN=60u -DAPP_NIGHT_END_MIN=120u -DAPP_NIGHT_WAKE_MS=5000u -I"$APP" "$BUILD/night_d.c" "$APP/night_core.c" -o "$BUILD/night_d" || rc=1
+  [ -x "$BUILD/night_d" ] && { "$BUILD/night_d" || rc=1; }
+  # ---- 変異試験(製品コードの複製に 1 か所だけ誤りを入れ、試験が失敗することを確かめる。製品のファイルは書き換えない)
+  MUT5="$BUILD/mut5"
+  mut5_run() { # $1=名前 $2=sed 式
+    rm -rf "$MUT5"; mkdir -p "$MUT5"
+    cp "$APP/night_core.c" "$APP/night_core.h" "$APP/wifi_sw.h" "$MUT5/"
+    cp "$MUT5/night_core.c" "$MUT5/orig.c"
+    sed -i "$2" "$MUT5/night_core.c"
+    if cmp -s "$MUT5/night_core.c" "$MUT5/orig.c"; then echo "  NG: 変異が当たっていない: $1"; rc=1; return; fi
+    "$CC" $STD -I"$MUT5" -I"$HERE" "$HERE/test_night_core.c" "$MUT5/night_core.c" -o "$MUT5/t" >"$MUT5/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない: $1"; head -5 "$MUT5/cc.log"; rc=1; return; }
+    if "$MUT5/t" >"$MUT5/run.log" 2>&1; then echo "  NG: 変異 [$1] を試験が検出しなかった(合格してしまった)"; rc=1; else echo "  ok: 変異 [$1] で試験が失敗した($(grep -c 'FAIL' "$MUT5/run.log") 件)"; fi
+  }
+  mut5_run "窓の終わりの境界 m < end を m <= end にする" 's/return (clock_min >= start_min) || (clock_min < end_min);/return (clock_min >= start_min) || (clock_min <= end_min);/'
+  mut5_run "窓の始まりの境界 m >= start を m > start にする" 's/return (clock_min >= start_min) || (clock_min < end_min);/return (clock_min > start_min) || (clock_min < end_min);/'
+  mut5_run "起こしのタイムアウト >= を > にする" 's/>= (uint32_t)APP_NIGHT_WAKE_MS/> (uint32_t)APP_NIGHT_WAKE_MS/'
+  mut5_run "起こしのタイムアウトを 32bit の差でなく単純な比較にする" 's/((uint32_t)(now_ms - n->t_wake) >= (uint32_t)APP_NIGHT_WAKE_MS)/(now_ms >= n->t_wake + (uint32_t)APP_NIGHT_WAKE_MS)/'
+  mut5_run "起こしたタッチを渡す(swallow を返さない)" 's/return n->swallow == 0u;/return true;/'
+  echo "  app_main の変異: 消灯中のタッチを ui_update へ渡してしまう(real = NULL を外す)と、結合試験(T_NIGHT)が失敗する"
+  MUT6="$BUILD/mut6"; rm -rf "$MUT6"; mkdir -p "$MUT6/src/app" "$MUT6/tests/host"
+  find "$APP" -maxdepth 1 \( -name '*.h' -o -name '*.c' \) ! -name wifi_secret.h -exec cp {} "$MUT6/src/app/" \;
+  cp "$HERE/test_framework.h" "$HERE/test_app_main.c" "$MUT6/tests/host/"
+  build_ui_objs || rc=1
+  cp "$MUT6/src/app/app_main.c" "$MUT6/orig.c"
+  sed -i '/!night_filter(&s_night, real->pressed, now_ms)/,/}/ s/real = NULL;/(void)0;/' "$MUT6/src/app/app_main.c"
+  if cmp -s "$MUT6/src/app/app_main.c" "$MUT6/orig.c"; then echo "  NG: 変異が当たっていない(app_main)"; rc=1
+  else
+    M6="$MUT6/src/app"
+    EXTRA_CFLAGS="-DT_NIGHT" build_fit_test "$MUT6/t" "$MUT6/tests/host/test_app_main.c" $M6/ui_render.c $M6/ui_clock.c $M6/clk_core.c $M6/ui_logic.c $M6/stk_core.c $M6/gfx.c $M6/app_logfmt.c $M6/night_core.c $M6/ui_preview.c $M6/clk_preview.c "$UIOBJ/ui_gfx_data.o" "$UIOBJ/ui_layout.o" "$UIOBJ/ui_strips.o" "$UIOBJ/clk_data.o" >"$MUT6/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT6/cc.log"; rc=1; }
+    if [ -x "$MUT6/t" ]; then if "$MUT6/t" >"$MUT6/run.log" 2>&1; then echo "  NG: 変異 [消灯中のタッチを渡す] を結合試験が検出しなかった"; rc=1; else echo "  ok: 変異 [消灯中のタッチを渡す] で結合試験が失敗した($(grep -c 'FAIL' "$MUT6/run.log") 件)"; fi; fi
+  fi
+  result S44 $rc
 fi
 
 echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS SUSPECT(不具合の可能性)=$SUSPECTS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"

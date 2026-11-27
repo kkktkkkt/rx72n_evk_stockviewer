@@ -686,3 +686,36 @@ cd D:\workspace\rx72n\rx72n_gcc
 - 最終の `HardwareDebug` は製品版(A、23:49)。
 - A の ELF・MOT・MAP には、`APP_WX` = 1 のため `wifi_secret.h` の Wi-Fi 設定が入りうる(設計 §21.5)。`jobs\artifacts\A2-product.*` も同じ。外へ出さないこと。P1 は `APP_WX` = 0 のため入らない。
 - 書込み・実機操作は未実施。ランナーは起動したまま。
+
+## 追記: 2026-11-28 04:05〜04:06 (JST) 夜間消灯(Phase 7a)と天気の取得(Phase 6c)を含む既定構成の clean ビルド(ビルド担当)
+
+前提: e2studio / e2studioc / make / rfp-cli / e2-server-gdb / rx-elf-gdb のプロセス無し。`jobs/runner.alive` 04:05:43(新しい)。`jobs/inbox` 空。`wifi_sw.h` は未変更(`APP_WX` = (1) の既定、`APP_WX_WEATHER` = (0)、`APP_NIGHT` = (1)、`APP_STK_FAULT`・`APP_STK_BADAP`・`APP_STK_PREVIEW`・`APP_CLK_PREVIEW`・`APP_WIFI_TEST` = (0))。`wifi_secret.h` は開いていない・内容を出していない。書込み・実機操作・COM・gdb・rfp-cli は**未実施**。
+
+| 時刻(JST) | コマンド(`tools/submit-job.sh`) | 結果 | 備考 |
+|---|---|---|---|
+| 04:05:49〜04:06:17 | `build '{"mode":"Headless","clean":true}' 400`(ジョブ `040549-build`、exit 0、26 秒、全体 29 秒) | **成功**(`Build Finished. 0 errors, 2 warnings`) | makefile は自動で再生成され、`night_core.c` が `src/app/subdir.mk` に取り込まれた(手動の refresh・`-import` のやり直し・生成物の削除は不要)。`night_core.c` を含む 74 ファイルを再コンパイル。ログ末尾の `Managed Build system manifest` の llvm メッセージは従来どおり(影響なし) |
+
+### 警告の内訳
+- 2 件とも既知の smc_gen(`-Wstack-usage=100` 非対応の注意): `src/smc_gen/r_bsp/mcu/all/r_bsp_common.c:105` `delay_wait`、`src/smc_gen/r_bsp/mcu/all/r_rx_intrinsic_functions.c:347` `R_BSP_ChangeToUserMode`。
+- `src/app/` の警告は **0 件**(`night_core.c`・`lcd_panel.c`・`app_main.c`・`wx_core.c` を含む。`-Wstack-usage` の警告なし)。
+
+### 成果物(`HardwareDebug\rx72n_stockview.elf` / `.mot` / `.map`。`jobs\artifacts\` へコピー)
+| 項目 | 値 | 前回の製品(A2、2026-11-27 23:49、Phase 6b) | 差 |
+|---|---|---|---|
+| `rx72n_stockview.elf` | 1,962,380 バイト | 1,932,040 | +30,340 |
+| `rx72n_stockview.mot` | 1,925,962 バイト | 1,915,442 | +10,520 |
+| `rx-elf-size` text / data / bss | **639,052 / 2,880 / 22,716** | 635,548 / 2,876 / 22,592 | text +3,504、data +4、bss +124 |
+| ROM(text + data) | 641,932 | 638,424 | +3,508 |
+
+- 保存先: `jobs\artifacts\N-product.elf`(1,962,380 バイト)、`N-product.mot`(1,925,962 バイト)、`N-product.map`(323,682 バイト)。
+- 注意: `.elf` `.mot` `.map` の中に `APP_WX` = 1 のため Wi-Fi の設定が入りうる(設計 §21.5)。`jobs\artifacts\` の外へ出さない。
+
+### シンボルの確認(`rx-elf-nm` / `rx-elf-size`。`D:\Renesas\GNURX\GCC_for_Renesas_RX 8.3.0.202411-GNURX-ELF\rx-elf\rx-elf\bin\`)
+- 夜間消灯(`night_core.c`): `_night_` で始まるシンボル **9 件**(`_night_init` `_night_update` `_night_in_window` `_night_filter` `_night_level` `_night_apply` `_night_force_next` `_night_cause_name` `_night_mode_name`)。`.map` に `LOAD ./src/app/night_core.o` を確認。
+- バックライト制御(`lcd_panel.c`): `_lcd_bl_set` **1 件**(T。`ffc09710`)。
+- 天気(Phase 6c の `wx_core.c`): `_wx_parse_weather` **1 件**。
+- `APP_WX_WEATHER` = (0) のままで、天気の結果を扱う周期には入らない(設計どおり)。
+
+### 注意
+- 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。`wifi_sw.h` は未変更。ランナーは起動したまま。
+- ELF のサイズは前回の A2 より 30 KB 大きいが、ROM 使用量は 641,932 バイト(4MB の約 15.3%)。

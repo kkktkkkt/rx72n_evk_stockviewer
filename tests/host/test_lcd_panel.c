@@ -467,11 +467,35 @@ static void test_flip_pal(void)
     CHECK(strstr(g_seq, "CC") == NULL);                             /* 成功した NoReflect が続けて 2 回になる経路は無い */
 }
 
+static void test_bl_set(void)
+{
+    TEST("H-N4 lcd_bl_set(7a): level 0 = P67 に点灯の反対を 1 回だけ書く、1〜LCD_BL_STEPS = 点灯の値を 1 回。P67 以外は書かない・向きも変えない。GLCDC は呼ばない");
+    ev_reset();
+    lcd_bl_set(0u);
+    CHECK_EQ(g_nev, 1);
+    CHECK_EQ(g_ev[0].type, EV_WRITE); CHECK_EQ(g_ev[0].a, PIN_LCD_BACKLIGHT); CHECK_EQ(g_ev[0].b, LVL_OFF_BL);
+    CHECK(LVL_OFF_BL != LCD_BL_ON_LEVEL);
+    ev_reset();
+    lcd_bl_set(1u);
+    CHECK_EQ(g_nev, 1);
+    CHECK_EQ(g_ev[0].type, EV_WRITE); CHECK_EQ(g_ev[0].a, PIN_LCD_BACKLIGHT); CHECK_EQ(g_ev[0].b, LCD_BL_ON_LEVEL);
+    ev_reset();
+    lcd_bl_set((uint8_t)LCD_BL_STEPS);
+    CHECK_EQ(g_nev, 1);
+    CHECK_EQ(g_ev[0].a, PIN_LCD_BACKLIGHT); CHECK_EQ(g_ev[0].b, LCD_BL_ON_LEVEL);
+    CHECK_EQ(LCD_BL_STEPS, 20);
+    /* lcd_init の最後の書き込み(BL 点灯)は変わらず、lcd_bl_set(20) と同じ値 */
+    ev_reset();
+    CHECK(lcd_init());
+    CHECK_EQ(g_ev[g_nev - 1u].a, PIN_LCD_BACKLIGHT); CHECK_EQ(g_ev[g_nev - 1u].b, LCD_BL_ON_LEVEL);
+}
+
 int main(void)
 {
     test_pins();
     test_init_order();
     test_init_failures();
+    test_bl_set();
     test_flip();
     test_flip_pal();
     test_cfg_vs_fit_defaults();

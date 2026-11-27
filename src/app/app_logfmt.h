@@ -37,7 +37,8 @@ typedef enum {
     APPLOG_CMD_STATE,           /* 's' */
     APPLOG_CMD_HELP,            /* '?' */
     APPLOG_CMD_DEMO,            /* 'd' 同上 */
-    APPLOG_CMD_WX               /* 'x' = 更新(製品はタップと同じ。専用モードは取得 1 回) */
+    APPLOG_CMD_WX,              /* 'x' = 更新(製品はタップと同じ。専用モードは取得 1 回) */
+    APPLOG_CMD_BL               /* 'b' = バックライトの強制の切り替え(試験用の隠しコマンド。docs/design.md §14) */
 } applog_cmd_t;
 
 /* すべての applog_fmt_*:
@@ -69,13 +70,17 @@ size_t applog_fmt_perf(char *buf, size_t size, uint32_t n, uint32_t copy_us, uin
  * pal > 8、have = 1 での kind > 7・temp が -99〜99 の外は失敗(0・buf[0] = '\0')。kind の名前は clk_core.h の clk_kind_name と同じ(app_logfmt.c は標準 C だけで自己完結させるため、ここにも持つ) */
 size_t applog_fmt_scr(char *buf, size_t size, bool to_clock, uint8_t pal, uint16_t clk_min, uint8_t kind, bool have, int8_t temp, uint32_t tick);
 
+/* "[bl] mode=<on|dim|off> cause=<boot|night|day|touch|timeout|uart|state> pct=<0..100> clk=<hhmm|none> tick=<n> + CRLF(docs/design.md §14.4)
+ * mode・cause は下の名前だけ(それ以外は失敗)。pct は mode と整合(on = 100、off = 0、dim = 1〜99。違えば失敗)。clk_min が 1440 以上は clk=none */
+size_t applog_fmt_bl(char *buf, size_t size, const char *mode, const char *cause, uint8_t pct, uint16_t clk_min, uint32_t tick);
+
 /* "[err] code=<code> detail=<detail>\r\n" */
 size_t applog_fmt_err(char *buf, size_t size, uint32_t code, uint32_t detail);
 
 /* "[help] s=state x=update ?=help\r\n"(製品の UART コマンド。docs/design.md §7.3) */
 size_t applog_fmt_help(char *buf, size_t size);
 
-/* 受信1バイト -> コマンド。'n' 'p' 's' '?' 'd' 'x' 以外(-1、範囲外を含む)は NONE */
+/* 受信1バイト -> コマンド。'n' 'p' 's' '?' 'd' 'x' 'b' 以外(-1、範囲外を含む)は NONE */
 applog_cmd_t applog_cmd_parse(int ch);
 
 /* (uint32_t)(now - last) >= period なら 1。32bit一周でも成立 */

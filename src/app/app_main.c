@@ -25,6 +25,9 @@
 #include "clk_assets.h"
 #endif
 #include "app_main.h"
+#if APP_NIGHT
+#include "night_core.h"          /* 7a: 夜間のバックライト消灯(docs/design.md §14) */
+#endif
 #if APP_WIFI_ON
 #include "wifi_at.h"
 #endif
@@ -69,6 +72,12 @@ static uint32_t       s_err_tick;
 static bool           s_err_sent;                /* (A) を一度でも出したか */
 static uint32_t       s_rxerr_tick;
 static bool           s_rxerr_sent;
+
+#if APP_NIGHT   /* ---- 7a 夜間のバックライト ---- */
+static night_t  s_night;
+static uint16_t s_night_clk = STK_NONE16;       /* [bl] の clk 用(直近の night_update に渡した時刻) */
+static bool     s_bl_ok;                        /* lcd_init が成功した(失敗のとき lcd_bl_set を呼ばない) */
+#endif
 
 static void tick_callback(void *pdata)
 {
@@ -173,6 +182,25 @@ static void log_errors(uint32_t now)
     }
 }
 
+#if APP_NIGHT
+/* 7a: [bl] を 1 行(状態 = s_night。cause を渡す)。tick は [hb] と同じ 10ms カウンタ */
+static void log_bl(uint8_t cause)
+{
+    uint8_t pct = (night_level(&s_night) == 0u) ? 0u : 100u;
+
+    emit(applog_fmt_bl(s_line, sizeof(s_line), night_mode_name(s_night.mode), night_cause_name(cause), pct, s_night_clk, g_app_dbg.tick));
+}
+
+/* 7a: mode が変わったとき: バックライトを切り替えて [bl] を出す */
+static void night_apply(void)
+{
+    if (s_bl_ok) {
+        lcd_bl_set(night_level(&s_night));
+    }
+    log_bl(s_night.cause);
+}
+#endif
+
 /* 受信コマンド(1 tick に1文字): x = 更新(タップと同じ)、s ? は応答。それ以外(n p d を含む)は無視(設計 §7.3) */
 static void uart_command(uint32_t now_ms)
 {
@@ -184,6 +212,9 @@ static void uart_command(uint32_t now_ms)
     }
     switch (applog_cmd_parse(ch)) {
     case APPLOG_CMD_WX:    ui_tap_inject(&s_ui, UI_SRC_UART); break;     /* 更新の仮想タップ。取得は UI_EV_TAP を見て tick_step が行う */
+#if APP_NIGHT
+    case APPLOG_CMD_BL:    night_force_next(&s_night); break;            /* 7a: 試験用。次の night_update(同じ tick)で mode が変われば [bl cause=uart] */
+#endif
     case APPLOG_CMD_STATE:
         log_state("st", true);
         if (g_app_dbg.found_count > 0u) {
@@ -191,6 +222,9 @@ static void uart_command(uint32_t now_ms)
         }
 #if APP_WX_PRODUCT
         wx_log_state(now_ms);
+#endif
+#if APP_NIGHT
+        log_bl((uint8_t)NIGHT_C_STATE);
 #endif
         break;
     case APPLOG_CMD_HELP:
@@ -226,6 +260,11 @@ static void tick_step(uint32_t now, uint32_t *last_hb, uint32_t *last_uf, bool t
         }
         real = &smp;
     }
+#if APP_NIGHT   /* 7a: 消灯中の最初のタッチは起こすだけ。更新要求・画面の切り替えにしない(標本なし = 状態を変えない) */
+    if ((real != NULL) && !night_filter(&s_night, real->pressed, now_ms)) {
+        real = NULL;
+    }
+#endif
 #if APP_STK_PREVIEW
     ui_set_view(&s_ui, &ui_preview_view[(now / APP_PREVIEW_TICKS) % UI_PREVIEW_N]);   /* 8 つの決まった状態を 3 秒ごとに */
 #elif APP_CLK_PREVIEW == 1
@@ -246,6 +285,14 @@ static void tick_step(uint32_t now, uint32_t *last_hb, uint32_t *last_uf, bool t
 #elif APP_WX_PRODUCT
     stk_ui(&s_view, now_ms);     /* 3 銘柄の値・市場の状態・Wi-Fi の状態・時計・更新時刻(設計 §3.9・§4.4) */
     ui_set_view(&s_ui, &s_view);
+#endif
+#if APP_NIGHT   /* 7a: 窓の判定(株価の時計 clock_min。取得のないビルドは未同期 = 消さない)。取得・描画・画面の切り替えは止めない */
+#if APP_WX_PRODUCT
+    s_night_clk = s_view.clock_min;
+#endif
+    if (night_update(&s_night, now_ms, s_night_clk)) {
+        night_apply();
+    }
 #endif
     ui_update(&s_ui, real, now_ms);
 #if (!APP_STK_PREVIEW) && (APP_CLK_PREVIEW != 1)
@@ -348,6 +395,9 @@ void app_main(void)
     if (s_draw_ok) {
         (void)lcd_underflow_poll();  /* 結果は捨てる: 表示開始時の1回は GLCDC の初回検出(実機8回で再現)。uf に数えない */
     }
+#if APP_NIGHT
+    s_bl_ok = s_draw_ok;
+#endif
     log_init("lcd", s_draw_ok);
     touch_ok = touch_init();     /* 失敗時はタッチ無効のまま(ui_update は標本なしで動かす) */
     log_init("touch", touch_ok);
@@ -370,6 +420,10 @@ void app_main(void)
 #endif
 #if APP_WX_PRODUCT
     wx_init(s_tick * NAV_SAMPLE_MS);   /* [init] ×4 と [perf] の後。3 秒後に接続を始める(wifi_secret.h が無ければ OFF) */
+#endif
+#if APP_NIGHT
+    night_init(&s_night);        /* 点灯のまま(lcd_init が点けた)。起動直後に [bl] を 1 行 */
+    log_bl((uint8_t)NIGHT_C_BOOT);
 #endif
 
     for (;;) {

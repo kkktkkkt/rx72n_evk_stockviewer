@@ -1077,3 +1077,14 @@ R-HB        : (§10.9 のまま。`scr=(\d+)` は 0 か 1)
 
 - **判定の順**: 書式(R-WXW-*・R-SCR)→ 行の中の整合(§14.3)→ 値の範囲 → 時刻の照合(UK5)→ PC との照合(UK2)→ 間隔(UK3)。
 - **秘密の確認**: 受信ログに SSID・パスワード・本文の語が**無い**こと(一致数だけ報告)。失敗時はログ全文を添える前に、秘密の文字列が含まれていないか確認する。
+
+## 15. 夜間のバックライト(rx72n_stockview `docs/design.md` §14。Phase 7a。2026-11-28 実装)での UART
+
+```
+[bl] mode=<on|dim|off> cause=<boot|night|day|touch|timeout|uart|state> pct=<0..100> clk=<hhmm|none> tick=<n>
+```
+R-BL: `\[bl\] mode=(on|dim|off) cause=(boot|night|day|touch|timeout|uart|state) pct=(\d{1,3}) clk=(\d{4}|none) tick=(\d+)`。整合: `mode=on` なら `pct=100`、`off` なら `0`(7a は `dim` を出さない)。
+- 出す時: `mode` が変わるたびに 1 行。起動直後(`[init] stage=loop` と `[perf]` の後)に `mode=on cause=boot`。`s` を受けたとき `cause=state` を 1 行。
+- 試験用コマンド `b`(`[help]` には載せない): 自動 → 消灯 → 点灯 → 自動。1 回ごとに 2 秒以上あける。
+- 消灯中の最初のタッチは `[ev] btn=tap` を出さない(起こすだけ)。UART `x` は消灯中でも効き、起こさない。
+- 出さないもの: SSID・パスワード・IP・応答の本文。

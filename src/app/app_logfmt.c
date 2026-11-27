@@ -1,5 +1,6 @@
 /* app_logfmt.c - 標準Cのみ。FITのヘッダを include しない。 */
 #include <stdio.h>
+#include <string.h>
 #include "app_logfmt.h"
 
 #define BUILD_ID_MAX  (31u)
@@ -216,6 +217,34 @@ size_t applog_fmt_scr(char *buf, size_t size, bool to_clock, uint8_t pal, uint16
     return pos;
 }
 
+size_t applog_fmt_bl(char *buf, size_t size, const char *mode, const char *cause, uint8_t pct, uint16_t clk_min, uint32_t tick)
+{
+    static const char *const modes[3]  = { "on", "dim", "off" };
+    static const char *const causes[7] = { "boot", "night", "day", "touch", "timeout", "uart", "state" };
+    unsigned i, mi = 3u, ci = 7u;
+    char clk[8];
+
+    if (!arg_ok(buf, size)) {
+        return 0u;
+    }
+    if ((mode == NULL) || (cause == NULL)) {
+        return fin(buf, size, 0);
+    }
+    for (i = 0u; i < 3u; i++) { if (strcmp(mode, modes[i]) == 0) { mi = i; } }
+    for (i = 0u; i < 7u; i++) { if (strcmp(cause, causes[i]) == 0) { ci = i; } }
+    if ((mi > 2u) || (ci > 6u) || (pct > 100u) || ((mi == 0u) && (pct != 100u)) || ((mi == 2u) && (pct != 0u)) ||
+        ((mi == 1u) && ((pct == 0u) || (pct == 100u)))) {
+        return fin(buf, size, 0);
+    }
+    if (clk_min > 1439u) {
+        strcpy(clk, "none");
+    } else {
+        (void)snprintf(clk, sizeof clk, "%02u%02u", (unsigned)(clk_min / 60u), (unsigned)(clk_min % 60u));
+    }
+    return fin(buf, size, snprintf(buf, size, "[bl] mode=%s cause=%s pct=%u clk=%s tick=%lu\r\n",
+                                   modes[mi], causes[ci], (unsigned)pct, clk, (unsigned long)tick));
+}
+
 size_t applog_fmt_err(char *buf, size_t size, uint32_t code, uint32_t detail)
 {
     if (!arg_ok(buf, size)) {
@@ -242,6 +271,7 @@ applog_cmd_t applog_cmd_parse(int ch)
     case '?': return APPLOG_CMD_HELP;
     case 'd': return APPLOG_CMD_DEMO;
     case 'x': return APPLOG_CMD_WX;
+    case 'b': return APPLOG_CMD_BL;
     default:  return APPLOG_CMD_NONE;
     }
 }

@@ -31,4 +31,8 @@ bool lcd_flip_busy(void);
 /* GR2 アンダーフローを検出していれば 1 を返して検出をクリア。無ければ 0。呼ぶのは1秒に1回程度 */
 uint32_t lcd_underflow_poll(void);
 
+/* バックライトの点灯・消灯(docs/design.md §14)。level 0 = 消灯、1〜20(LCD_BL_STEPS)= 点灯。lcd_init が成功した後に呼ぶ。GLCDC・DISP には触れない */
+#define LCD_BL_STEPS (20u)
+void lcd_bl_set(uint8_t level);
+
 #endif /* LCD_PANEL_H */

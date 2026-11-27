@@ -421,6 +421,8 @@ int main(void)
         CHECK_EQ(applog_cmd_parse('\r'), APPLOG_CMD_NONE);       /* 改行は無視 */
         CHECK_EQ(applog_cmd_parse('\n'), APPLOG_CMD_NONE);
         CHECK_EQ(applog_cmd_parse(' '), APPLOG_CMD_NONE);
+        CHECK_EQ(applog_cmd_parse('b'), APPLOG_CMD_BL);          /* バックライトの強制(試験用。docs/design.md §14) */
+        CHECK_EQ(applog_cmd_parse('B'), APPLOG_CMD_NONE);
         CHECK_EQ(applog_cmd_parse('x'), APPLOG_CMD_WX);          /* 更新ボタン h_wx の仮想タップ(UT5 では無視だった。design-uart.md §13.2) */
         CHECK_EQ(applog_cmd_parse('X'), APPLOG_CMD_NONE);
         CHECK_EQ(applog_cmd_parse(0x00), APPLOG_CMD_NONE);
@@ -430,7 +432,7 @@ int main(void)
         CHECK_EQ(applog_cmd_parse('1'), APPLOG_CMD_NONE);
         /* -300 .. 600 を総当たり */
         for (ch = -300; ch <= 600; ch++) {
-            if ((ch == 'n') || (ch == 'p') || (ch == 's') || (ch == '?') || (ch == 'd') || (ch == 'x')) { continue; }
+            if ((ch == 'n') || (ch == 'p') || (ch == 's') || (ch == '?') || (ch == 'd') || (ch == 'x') || (ch == 'b')) { continue; }
             if (applog_cmd_parse(ch) != APPLOG_CMD_NONE) { other_nonnone++; }
         }
         CHECK_EQ(other_nonnone, 0);
@@ -609,6 +611,56 @@ int main(void)
             CHECK(ok);
         }
         CHECK(strlen("[scr] to=clock pal=8 clk=2359 kind=thunder temp=-99 tick=4294967295\r\n") < 100u);   /* 最長の行は約 70 バイト */
+    }
+
+    TEST("H-N5 applog_fmt_bl(docs/design.md §14.4): 書式・全 mode x 全 cause・pct の整合・clk・最長の行・小バッファ・不正な名前");
+    {
+        static const char *const modes[3]  = { "on", "dim", "off" };
+        static const char *const causes[7] = { "boot", "night", "day", "touch", "timeout", "uart", "state" };
+        static const uint8_t pcts[3] = { 100u, 10u, 0u };
+        char b[APPLOG_LINE_MAX], want[128];
+        unsigned m, c;
+        size_t n, len, sz;
+        int ok = 1;
+
+        for (m = 0u; m < 3u; m++) {
+            for (c = 0u; c < 7u; c++) {
+                n = applog_fmt_bl(b, sizeof b, modes[m], causes[c], pcts[m], 1380u, 123u);
+                (void)snprintf(want, sizeof want, "[bl] mode=%s cause=%s pct=%u clk=2300 tick=123\r\n", modes[m], causes[c], (unsigned)pcts[m]);
+                if ((n != strlen(want)) || (strcmp(b, want) != 0) || !line_ascii_ok(b, n)) { ok = 0; }
+            }
+        }
+        CHECK(ok);
+        n = applog_fmt_bl(b, sizeof b, "off", "night", 0u, 0xFFFFu, 0u);
+        CHECK_EQ(strcmp(b, "[bl] mode=off cause=night pct=0 clk=none tick=0\r\n"), 0);
+        n = applog_fmt_bl(b, sizeof b, "on", "boot", 100u, 1440u, 0u);
+        CHECK(strstr(b, "clk=none") != NULL);
+        n = applog_fmt_bl(b, sizeof b, "on", "day", 100u, 1439u, 0xFFFFFFFFu);
+        CHECK_EQ(strcmp(b, "[bl] mode=on cause=day pct=100 clk=2359 tick=4294967295\r\n"), 0);
+        CHECK(n < 100u);                                                  /* 最長の行は約 60 バイト */
+        n = applog_fmt_bl(b, sizeof b, "on", "boot", 0u, 0u, 0u);        /* mode と pct が合わない */
+        CHECK_EQ(n, 0); CHECK_EQ(b[0], 0);
+        CHECK_EQ(applog_fmt_bl(b, sizeof b, "off", "boot", 100u, 0u, 0u), 0);
+        CHECK_EQ(applog_fmt_bl(b, sizeof b, "dim", "boot", 0u, 0u, 0u), 0);
+        CHECK_EQ(applog_fmt_bl(b, sizeof b, "dim", "boot", 100u, 0u, 0u), 0);
+        CHECK(applog_fmt_bl(b, sizeof b, "dim", "boot", 50u, 0u, 0u) > 0u);
+        CHECK_EQ(applog_fmt_bl(b, sizeof b, "on", "boot", 101u, 0u, 0u), 0);
+        CHECK_EQ(applog_fmt_bl(b, sizeof b, "bright", "boot", 100u, 0u, 0u), 0);   /* 名前は決まったものだけ */
+        CHECK_EQ(applog_fmt_bl(b, sizeof b, "on", "wifi", 100u, 0u, 0u), 0);
+        CHECK_EQ(applog_fmt_bl(b, sizeof b, NULL, "boot", 100u, 0u, 0u), 0);
+        CHECK_EQ(applog_fmt_bl(b, sizeof b, "on", NULL, 100u, 0u, 0u), 0);
+        CHECK_EQ(applog_fmt_bl(NULL, 10u, "on", "boot", 100u, 0u, 0u), 0);
+        CHECK_EQ(applog_fmt_bl(b, 0u, "on", "boot", 100u, 0u, 0u), 0);
+        len = strlen("[bl] mode=on cause=boot pct=100 clk=0000 tick=0\r\n");
+        for (sz = 1u; sz <= len + 1u; sz++) {                            /* 小バッファ: 部分行を残さない */
+            memset(b, POISON, sizeof b);
+            n = applog_fmt_bl(b, sz, "on", "boot", 100u, 0u, 0u);
+            if (sz <= len) { if ((n != 0u) || (b[0] != 0)) { ok = 0; } }
+            else           { if (n != len) { ok = 0; } }
+        }
+        CHECK(ok);
+        n = applog_fmt_help(b, sizeof b);                                /* [help] は変えない */
+        CHECK_EQ(strcmp(b, "[help] s=state x=update ?=help\r\n"), 0);
     }
 
     TEST("applog_err_changed");

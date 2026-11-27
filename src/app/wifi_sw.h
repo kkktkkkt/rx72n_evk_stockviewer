@@ -75,6 +75,15 @@
 #define APP_WIFI_AUTOSTART   (0)
 #endif
 
+/* 1 = 夜間(既定 23:00〜06:00)にバックライトを消す(docs/design.md §14。Phase 7a)。0 = 今までと同じ(night_core.c の中身も消える)。
+ * 窓・起こしの秒数は night_core.h(-DAPP_NIGHT_START_MIN= などで変えられる)。時刻が未同期(プレビュー・オフライン起動)の間は消さない */
+#ifndef APP_NIGHT
+#define APP_NIGHT            (1)
+#endif
+#if ((APP_NIGHT) != 0) && ((APP_NIGHT) != 1)
+#error "APP_NIGHT must be 0 or 1"
+#endif
+
 /* ESP32 の AT 用 UART(SCI1)のボーレート。ESP-AT の既定は 115200 */
 #ifndef WIFI_BAUD
 #define WIFI_BAUD            (115200u)

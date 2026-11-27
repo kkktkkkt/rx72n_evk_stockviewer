@@ -135,6 +135,8 @@ lcd_flip_t lcd_flip_pal(uint8_t i, const uint32_t *pal)
 }
 bool lcd_flip_busy(void) { return g_busy > 0; }
 uint32_t lcd_underflow_poll(void) { return 0u; }
+static unsigned g_n_bl; static uint8_t g_bl_lv[32];       /* lcd_bl_set の呼び出し(7a) */
+void lcd_bl_set(uint8_t level) { if (g_n_bl < sizeof g_bl_lv) { g_bl_lv[g_n_bl] = level; } g_n_bl++; }
 
 static const nav_sample_t *g_touch_script;        /* 1 tick に 1 標本。tick 番号 = 配列の添字 + g_touch_t0 */
 static unsigned g_touch_n; static uint32_t g_touch_t0;
@@ -307,7 +309,96 @@ int main(void)
     CHECK_EQ(g_n_wx_poll, g_iter - 1u);
     CHECK_EQ(count_prefix("[hb] "), 1);
     CHECK_EQ(g_drops, 0);
+    CHECK_EQ(g_n_bl, 0);                          /* 昼なので変化なし。LCD が使えない時は lcd_bl_set を呼ばない(7a) */
     TEST_REPORT("test_app_main(初期化の失敗)");
+}
+
+/* ================================================================ 7a 夜間のバックライト(製品 + 窓の注入。docs/design.md §14.8 H-N2 の結合) */
+#elif defined(T_NIGHT)
+
+static nav_sample_t g_tp[3700];
+static unsigned g_flips_100, g_flips_200, g_polls_100;
+
+static void night_tick(uint32_t t)
+{
+    if (t == 50u)   { g_stk.clock_min = 720u; }                 /* 時刻が分かった(昼) */
+    if (t == 100u)  { g_stk.clock_min = 1380u; g_flips_100 = g_flip_n; g_polls_100 = g_n_wx_poll; }   /* 23:00 = 窓に入る */
+    if (t == 200u)  { g_flips_200 = g_flip_n; }
+    if (t == 7000u) { g_stk.clock_min = 720u; }                 /* 窓が終わる */
+}
+
+int main(void)
+{
+    static const cmd_t cmds[] = { { 6800u, 'x' }, { 7100u, 'b' }, { 7200u, 'b' }, { 7300u, 'b' }, { 7400u, 's' } };
+    stk_view_t v;
+    unsigned i, nb_before;
+    int a, b2;
+
+    memset(&v, 0, sizeof v);
+    v.net = STK_NET_ON; v.have_any = 1u; v.clock_min = (uint16_t)STK_NONE16; v.upd_min = 552u;
+    v.row[0].have = 1u; v.row[0].price_x100 = 243300; v.row[0].diff_x100 = 5500; v.row[0].pct_bp = 231; v.row[0].mkt = STK_MKT_TRADING;
+    g_stk = v;
+    for (i = 0u; i < 3700u; i++) { g_tp[i].pressed = false; g_tp[i].points = 0u; g_tp[i].x = 0u; g_tp[i].y = 0u; }
+    g_tp[200].pressed = true; g_tp[200].points = 1u; g_tp[201] = g_tp[200];       /* 消灯中の押下(2 標本 + 離し)= 起こすだけ */
+    g_tp[3400] = g_tp[200]; g_tp[3401] = g_tp[200];                                /* 消灯に戻った直後の押下 = また起こすだけ */
+    g_tp[3600] = g_tp[200]; g_tp[3601] = g_tp[200];                                /* 点灯中の押下 = 普通のタップ */
+    g_touch_script = g_tp; g_touch_n = 3700u; g_touch_t0 = 0u;
+    g_cmds = cmds; g_ncmds = sizeof cmds / sizeof cmds[0];
+    g_on_tick = night_tick;
+    memset(g_fb, 0xCC, sizeof g_fb);
+
+    run(7600u);
+
+    TEST("7a 起動: [bl] mode=on cause=boot が [perf] の後に 1 行。時刻が未同期の間(tick 0〜49)と昼(50〜99)は消えない");
+    check_boot_lines();
+    CHECK_EQ(find_line("[bl] mode=on cause=boot pct=100 clk=none tick=0\r\n", 0), find_line("[perf] n=", 0) + 1);   /* [perf] の次(wx_init の偽物は行を出さない)*/
+    CHECK_EQ(find_line("[bl] ", 0), find_line("[bl] mode=on cause=boot", 0));
+    a = find_line("[bl] mode=off cause=night pct=0 clk=2300 tick=100\r\n", 0);
+    CHECK(a > 0);
+    CHECK_EQ(g_bl_lv[0], 0);                                                   /* 最初の lcd_bl_set = 消灯(level 0) */
+
+    TEST("7a 窓の始まり(tick 100): 消灯。取得(wx_poll)・描画(入れ替え)・時計は止めない");
+    CHECK_EQ(g_flips_100 >= 1u, 1);
+    CHECK(g_flip_n > g_flips_100);                                              /* 消灯後も表示は更新される(時刻の変化で描き直した) */
+    CHECK_EQ(g_n_wx_poll, g_iter - 1u);
+    CHECK(g_n_wx_poll > g_polls_100 + 1000u);
+
+    TEST("7a 起こし: 消灯中の押下(tick 200・201)は [bl] mode=on cause=touch(tick 200)。[ev] も wx_request も出ない(飲み込まれた)");
+    a = find_line("[bl] mode=on cause=touch pct=100 clk=2300 tick=200\r\n", 0);
+    CHECK(a > 0);
+    CHECK_EQ(g_bl_lv[1], LCD_BL_STEPS);
+    CHECK(find_line("[ev] ", 0) > find_line("[bl] mode=on cause=touch pct=100 clk=2300 tick=3400", 0));   /* 最初の [ev] は 3400 の起こしより後 */
+
+    TEST("7a 30 秒後(最後の押下 tick 201 + 3000 = tick 3201)に消灯 cause=timeout。3200 では点灯のまま");
+    a = find_line("[bl] mode=off cause=timeout pct=0 clk=2300 tick=3201\r\n", 0);
+    CHECK(a > 0);
+
+    TEST("7a 消灯に戻った直後の押下(tick 3400)もまた起こすだけ(飲み込む)。点灯中の押下(tick 3600)は普通のタップ = [ev] btn=tap src=touch 1 行 + wx_request 1 回");
+    CHECK(find_line("[bl] mode=on cause=touch pct=100 clk=2300 tick=3400\r\n", 0) > 0);
+    CHECK_EQ(count_prefix("[ev] btn=tap src=touch\r\n"), 1);
+    CHECK(find_line("[bl] mode=off cause=timeout pct=0 clk=2300 tick=6601\r\n", 0) > find_line("[ev] btn=tap src=touch\r\n", 0));   /* 3601 + 3000 = 6601 の 30 秒後 */
+
+    TEST("7a UART x(tick 6800)は消灯中でも普通に効く(src=uart + wx_request)。起こさない([bl] は増えない)");
+    CHECK_EQ(count_prefix("[ev] btn=tap src=uart\r\n"), 1);
+    CHECK_EQ(g_n_req, 2);
+    CHECK_EQ(g_req_src[0], WX_SRC_TOUCH);
+    CHECK_EQ(g_req_src[1], WX_SRC_UART);
+
+    TEST("7a 窓の終わり(tick 7000)で点灯 cause=day。b: 消灯(uart)→ 点灯(uart)→ 自動(昼 = 変わらず行なし)。s は cause=state");
+    CHECK(find_line("[bl] mode=on cause=day pct=100 clk=1200 tick=7000\r\n", 0) > 0);
+    CHECK(find_line("[bl] mode=off cause=uart pct=0 clk=1200 tick=7100\r\n", 0) > 0);
+    CHECK(find_line("[bl] mode=on cause=uart pct=100 clk=1200 tick=7200\r\n", 0) > 0);
+    CHECK(find_line("[bl] mode=on cause=state pct=100 clk=1200 tick=7400\r\n", 0) > 0);
+    CHECK_EQ(count_prefix("[bl] "), 10);                                        /* boot, night, touch, timeout, touch, timeout, day, uart, uart, state */
+    CHECK_EQ(g_n_bl, 8);                                                        /* [bl] のうち state・boot 以外 */
+    b2 = 0; for (i = 0u; i < g_n_bl && i < sizeof g_bl_lv; i++) { if (g_bl_lv[i] != 0u && g_bl_lv[i] != LCD_BL_STEPS) { b2 = 1; } }
+    CHECK_EQ(b2, 0);
+    CHECK_EQ(g_bl_lv[0], 0); CHECK_EQ(g_bl_lv[1], LCD_BL_STEPS); CHECK_EQ(g_bl_lv[2], 0); CHECK_EQ(g_bl_lv[3], LCD_BL_STEPS);
+    CHECK_EQ(g_bl_lv[4], 0); CHECK_EQ(g_bl_lv[5], LCD_BL_STEPS); CHECK_EQ(g_bl_lv[6], 0); CHECK_EQ(g_bl_lv[7], LCD_BL_STEPS);
+    nb_before = 0u; (void)nb_before;
+    CHECK_EQ(g_drops, 0);
+    CHECK_EQ(count_prefix("[err] "), 0);
+    TEST_REPORT("test_app_main(夜間のバックライト)");
 }
 
 /* ================================================================ 製品(APP_WX = 1) */
@@ -417,6 +508,16 @@ int main(void)
     n_ev = count_prefix("[ev] ");
     CHECK_EQ(n_ev, 2);
     CHECK_EQ(g_cmd_i, g_ncmds);                                           /* 文字は全部読まれた */
+
+    TEST("7a 夜間のバックライト: 起動直後に [bl] mode=on cause=boot を 1 行([perf]・wx_init の後)。s で cause=state。昼の間は lcd_bl_set を呼ばない。APP_NIGHT = 0 では [bl] も lcd_bl_set も無い");
+#if APP_NIGHT
+    CHECK_EQ(count_prefix("[bl] "), 2);
+    CHECK(find_line("[bl] mode=on cause=boot pct=100 clk=none tick=0\r\n", 0) > find_line("[perf] n=", 0));
+    CHECK(find_line("[bl] mode=on cause=state pct=100 clk=0915 tick=320\r\n", 0) > 0);
+#else
+    CHECK_EQ(count_prefix("[bl] "), 0);
+#endif
+    CHECK_EQ(g_n_bl, 0);
 
     TEST("[hb] は 100 tick ごと(700 tick で 7 行)、[err] なし、drop なし");
     CHECK_EQ(count_prefix("[hb] "), 7);

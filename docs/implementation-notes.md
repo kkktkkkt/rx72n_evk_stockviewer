@@ -344,3 +344,21 @@ H-6⑥(更新要求の返値)の試験の期待値は、設計どおり(取得�
 
 ### 試験(ホスト)
 S22(`test_wifi_core` の `t_wx_weather` = H-C4。専用 / 製品 / `WX_METEO_SSL = 1`)・S24・S27(天気版)・S35(`APP_STK_FAULT = 0〜4`、5 は `#error`)・S43(`test_wx_weather` = H-C2・H-C3・H-C5。変異 6 か所)。RX 用 GCC 14.2(`-Og -Wstack-usage=100`)で `wx_core.c` `wifi_core.c` `clk_core.c` を単独 `-c`: 警告なし(最大スタック `wx_fmt_wx_ok` 60)。
+
+## Phase 7a: 夜間のバックライト消灯(docs/design.md §14。2026-11-28。ホスト試験のみ。実機・ビルド未実施)
+
+| ファイル | 内容 |
+|---|---|
+| `src/app/night_core.h/.c`(新規。標準 C) | `night_in_window` / `night_init` / `night_update`(10ms ごと。mode が変わったら true)/ `night_filter`(消灯中の最初のタッチを渡さない)/ `night_force_next`(UART `b`)/ `night_level`(0 か 20)/ 名前。`APP_NIGHT = 0` で中身が消える。窓・秒数は `APP_NIGHT_START_MIN`(1380)・`APP_NIGHT_END_MIN`(360)・`APP_NIGHT_WAKE_MS`(30000) |
+| `src/app/lcd_panel.c/.h` | `lcd_bl_set(level)`(0 = P67 を消灯の値、1 以上 = 点灯の値)と `LCD_BL_STEPS`(20)。`lcd_init` の順序は変えていない |
+| `src/app/app_logfmt.c/.h` | `applog_fmt_bl`(`[bl] mode= cause= pct= clk= tick=`)と `'b'` → `APPLOG_CMD_BL` |
+| `src/app/wifi_sw.h` | `APP_NIGHT`(既定 1。0 / 1 以外は `#error`) |
+| `src/app/app_main.c`(`#if APP_NIGHT` で囲んだ 7a の追加だけ) | `tick_step`: タッチの標本を `night_filter` に通し(false なら `real = NULL`)、`night_update`(時計は製品のとき `s_view.clock_min`、それ以外は未同期)で mode が変われば `lcd_bl_set` と `[bl]`。UART `b` = `night_force_next`、`s` = `[bl] cause=state`。起動直後(`wx_init` の後)に `[bl] mode=on cause=boot`。`lcd_init` 失敗時は `lcd_bl_set` を呼ばない |
+
+設計との違い・判断:
+1. `night_init` は引数なし(設計は `night_level` を取る)。7b(暗く)用の `level`・`NIGHT_DIM` の動作は入れていない(列挙と名前だけ残した)。`night_force_next` は戻り値なし(`cause = uart` は次の `night_update` が決める)。
+2. 離した標本(`pressed = false`)は、飲み込み中でも `ui_update` へ渡す(押下が渡っていないので何も起きない)。飲み込みは最初の「離した」標本で終わる(ちらつきで 1 標本だけ離れると、次の押下が普通の押下になる可能性。`touch_decode` の判定は未確認)。
+3. `[bl]` の `pct` は 0 / 100 の 2 値(7a)。
+4. `tools/job-runner.ps1` などの `tx` の許可文字に `b` が無い(デバッグ担当の作業)。
+
+試験: S44(`test_night_core` = H-N1・H-N2、窓を変えた -D、変異 5 + app_main 1)、S34(`night` = T_NIGHT の結合、`night0` = `APP_NIGHT=0`)、S6(`test_bl_set` = H-N4)、S8(H-N5)、S7(`APP_NIGHT` 0 / 1 の構文)。

@@ -207,3 +207,9 @@ bool lcd_init(void)
     R_GPIO_PinWrite(PIN_LCD_BACKLIGHT, LCD_BL_ON_LEVEL);
     return true;
 }
+
+/* バックライトの点灯・消灯(docs/design.md §14.6。7a は GPIO のみ)。level 0 = 消灯、1 以上 = 点灯。GLCDC・DISP は止めない。lcd_init の成功後に呼ぶこと */
+void lcd_bl_set(uint8_t level)
+{
+    R_GPIO_PinWrite(PIN_LCD_BACKLIGHT, (level == 0u) ? ((LCD_BL_ON_LEVEL == GPIO_LEVEL_HIGH) ? GPIO_LEVEL_LOW : GPIO_LEVEL_HIGH) : LCD_BL_ON_LEVEL);
+}
