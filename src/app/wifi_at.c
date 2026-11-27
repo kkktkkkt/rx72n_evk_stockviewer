@@ -414,11 +414,20 @@ static void ded_state_line(uint32_t now_ms)
                   (wifi_core_state(&s_core) == WIFI_STATE_RUN) ? 1u : 0u);
 }
 
-/* ---- 受信コマンド(1 tick に1文字): d n p は実行、x は取得、s ? は応答。それ以外(+ - を含む)は無視 ---- */
+/* ---- 受信コマンド(1 tick に1文字): d n p は実行、x t y g z は取得、s ? は応答。それ以外(+ - を含む)は無視 ---- */
 static void start(wifi_range_t range, uint32_t now)
 {
     if (s_ok) {
         (void)wifi_core_start(&s_core, range, now * WIFI_TICK_MS);   /* 実行中なら何もしない(無視) */
+    }
+}
+
+/* TLS の検証(design.md §5.5.2): t = Yahoo 平文 / y = Yahoo SSL / g = Google SSL / z = Yahoo SSL(認証なしの設定つき)。x は最後に選んだ対象でもう一度 */
+static void start_target(wx_target_t t, uint32_t now)
+{
+    if (s_ok) {
+        wifi_core_set_target(&s_core, t);    /* 実行中なら無視(下の start も無視される) */
+        start(WIFI_RANGE_WX, now);
     }
 }
 
@@ -428,6 +437,13 @@ static void uart_command(uint32_t now)
 
     if (ch < 0) {
         return;
+    }
+    switch (ch) {
+    case 't': start_target(WX_TGT_YAHOO_TCP, now);        return;
+    case 'y': start_target(WX_TGT_YAHOO_SSL, now);        return;
+    case 'g': start_target(WX_TGT_GOOGLE_SSL, now);       return;
+    case 'z': start_target(WX_TGT_YAHOO_SSL_NOAUTH, now); return;
+    default:  break;
     }
     switch (applog_cmd_parse(ch)) {
     case APPLOG_CMD_DEMO:  start(WIFI_RANGE_ALL, now);  break;     /* d */

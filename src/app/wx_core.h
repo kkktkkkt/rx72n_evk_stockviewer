@@ -8,8 +8,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define WX_BUF_SIZE      (1536u)     /* 応答バッファ。実測 629 バイトの約 2.4 倍 */
-#define WX_REQ_LEN       (190u)      /* 要求の長さ(固定。実測と同じ) */
+#define WX_BUF_SIZE      (3072u)     /* 応答バッファ。Yahoo の応答 最大 約 1,960 バイトの 1.57 倍(design.md §5.8)。天気は 629 バイト */
+#define WX_REQ_LEN       (190u)      /* 天気(WX_TGT_METEO)の要求の長さ(固定。実測と同じ) */
+#define WX_RANGE_STR     "2d"        /* Yahoo の chart API の range(design.md §5.3) */
+#define WX_UA            "rx72n-stockview/1"
 #define WX_SYNC_BIAS_MS  (700u)      /* 最初のデータを受けた ms から引いて Date: の秒の頭とする。実機で PC と比べて調整する 1 定数 */
 #define WX_INTERVAL_MS   (600000u)   /* 定期取得(前回の取得開始から) */
 #define WX_MIN_GAP_MS    (5000u)     /* 更新要求を受け付ける最小の間隔(取得開始から) */
@@ -22,7 +24,7 @@
 typedef enum { WX_KIND_SUN = 0, WX_KIND_PARTLY, WX_KIND_CLOUD, WX_KIND_FOG, WX_KIND_RAIN, WX_KIND_SNOW, WX_KIND_THUNDER, WX_KIND_UNKNOWN, WX_KIND_END } wx_kind_t;
 typedef enum { WX_SRC_BOOT = 0, WX_SRC_TIMER, WX_SRC_TOUCH, WX_SRC_UART, WX_SRC_END } wx_src_t;
 
-/* 取得の結果。err: 0 = なし、1 TCP 接続 / 2 送信 / 3 応答なし・途切れ / 4 HTTP の状態が 200 でない / 5 キー・値が無い・読めない / 6 範囲外 / 7 バッファ超過 / 8 join 失敗 */
+/* 取得の結果。err: 0 = なし、1 TCP/SSL 接続 / 2 送信 / 3 応答なし・途切れ / 4 HTTP の状態が 200 でない / 5 キー・値が無い・読めない / 6 範囲外 / 7 バッファ超過 / 8 join 失敗 / 9 ESP32 が再起動(取得中に ready) */
 typedef struct {
     uint8_t  ok;             /* 1 = 気温・天気が取れた(err = 0) */
     uint8_t  err;
@@ -32,6 +34,7 @@ typedef struct {
     uint8_t  kind;           /* wx_kind_t */
     int16_t  temp_x10;       /* 0.1℃。-600〜600 */
     uint16_t http;           /* 状態行の数字。読めなければ 0 */
+    uint16_t len;            /* バッファに溜めた応答のバイト数(wifi_core が入れる。WX_BUF_SIZE で頭打ち。本文は持たない) */
     uint16_t obs;            /* current.time の HHMM(JST。照合用)。無ければ 0 */
     uint32_t jst_s;          /* Date: + 9 時間。1970-01-01 00:00:00 からの通算秒(JST の壁時計) */
     uint32_t ms;             /* 取得の開始から結果まで(wifi_core が入れる) */
@@ -40,9 +43,18 @@ typedef struct {
 
 typedef struct { uint16_t year; uint8_t month, day, wday, hour, min, sec; } wx_date_t;   /* wday: 0 = 日曜 */
 
+/* ---- 接続先(Phase 0 の TLS 検証。design.md §5.5.2。専用モード APP_WIFI_TEST の t y g z x が選ぶ。Phase 3 で Yahoo の SSL だけにする)----
+ * METEO = 天気(今までどおり。既定)/ YAHOO_TCP = t(平文 80)/ YAHOO_SSL = y / GOOGLE_SSL = g / YAHOO_SSL_NOAUTH = z(y の前に AT+CIPSSLCCONF=0,0,0) */
+typedef enum { WX_TGT_METEO = 0, WX_TGT_YAHOO_TCP, WX_TGT_YAHOO_SSL, WX_TGT_GOOGLE_SSL, WX_TGT_YAHOO_SSL_NOAUTH, WX_TGT_END } wx_target_t;
+
 /* ---- 要求 ---- */
-/* 固定の要求(HTTP/1.0)を buf へ(NUL 終端)。戻り値 = 長さ(WX_REQ_LEN)。size < WX_REQ_LEN + 1 なら 0 で buf[0] = '\0' */
-size_t wx_build_request(char *buf, size_t size);
+/* AT+CIPSTART="<TCP|SSL>","<host>",<port>\r\n を buf へ(NUL 終端)。戻り値 = 長さ。範囲外の t・size 不足は 0 で buf[0] = '\0' */
+size_t wx_build_cipstart(char *buf, size_t size, wx_target_t t);
+bool   wx_target_ssl(wx_target_t t);              /* SSL の接続先か(範囲外は false) */
+
+/* 固定の要求(HTTP/1.0)を buf へ(NUL 終端)。戻り値 = 長さ。size 不足・t が範囲外・(Yahoo で)sym が 0〜2 以外は 0 で buf[0] = '\0'。
+ * METEO は天気の固定の要求(WX_REQ_LEN。sym は無視)。YAHOO_* は design.md §5.1(sym = 0: 6723.T / 1: ^N225 / 2: ^GSPC)。GOOGLE_SSL は GET / */
+size_t wx_build_request(char *buf, size_t size, wx_target_t t, uint8_t sym);
 
 /* ---- 応答の解析 ----
  * buf は NUL 終端でなくてよい(len で止まる)。成功 = 状態 200 かつ気温と天気コードが範囲内で読めた。

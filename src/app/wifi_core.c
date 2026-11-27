@@ -22,6 +22,8 @@ enum { RECV_CLOSED = 0, RECV_TIMEOUT, RECV_ERROR };    /* wx_recv の終わり�
 enum { F_OK = 0x01, F_CONN = 0x02, F_PROMPT = 0x04, F_REQ = 0x08, F_SENT = 0x10, F_CLOSED = 0x20, F_OVER = 0x40, F_FIRST = 0x80 };
 #define F_STEP_KEEP   ((uint8_t)(F_CLOSED | F_OVER | F_FIRST))
 #define IPD_MAX       (2048u)
+#define SSL_TCP_TIMEOUT_MS (20000u)                                    /* wx_tcp の SSL の時(ハンドシェイク。design.md §5.5.2 の 0-1)。TCP は k_def のまま */
+#define WX_SYM_PHASE0 (1u)                                             /* Phase 0 の Yahoo の要求は ^N225 に固定(Phase 3 で wifi_core_set_symbol に置き換える) */
 
 #define M(s)          (1u << (unsigned)(s))
 #define MASK_ALL      (0x7FFEu)                                         /* reset 〜 ping_dns(bit 1〜14) */
@@ -29,6 +31,7 @@ enum { F_OK = 0x01, F_CONN = 0x02, F_PROMPT = 0x04, F_REQ = 0x08, F_SENT = 0x10,
 #define MASK_AT       (M(WIFI_STEP_AT))
 #define MASK_CONNECT  (MASK_BOOT | M(WIFI_STEP_ECHO) | M(WIFI_STEP_MODE) | M(WIFI_STEP_QAP) | M(WIFI_STEP_JOIN) | M(WIFI_STEP_IP))
 #define MASK_WX       (M(WIFI_STEP_WX_MUX) | M(WIFI_STEP_WX_CLOSE) | M(WIFI_STEP_WX_TCP) | M(WIFI_STEP_WX_SEND) | M(WIFI_STEP_WX_RECV))
+#define MASK_WX_SSLCONF (MASK_WX | M(WIFI_STEP_WX_SSLCONF))            /* z(WX_TGT_YAHOO_SSL_NOAUTH) */
 
 /* step の表(AT 1.1.3.0 と 2.x で書式が同じコマンドだけ。版では切り替えない)。コマンドを変える時はここだけ直す。cmd = NULL の step は個別に処理する */
 typedef struct {
@@ -56,14 +59,15 @@ static const step_def_t k_def[WIFI_STEP_END] = {
     /* ping_dns */ { "AT+PING=\"www.google.com\"\r\n",        15000u, 1u, 0u },
     /* wx_mux   */ { "AT+CIPMUX=0\r\n",                         1000u,  1u, 1u },
     /* wx_close */ { "AT+CIPCLOSE\r\n",                         2000u,  1u, 1u },
-    /* wx_tcp   */ { "AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n", 10000u, 1u, 0u },
+    /* wx_sslconf */ { "AT+CIPSSLCCONF=0,0,0\r\n",              2000u,  1u, 1u },
+    /* wx_tcp   */ { NULL,                                    10000u, 1u, 0u },        /* AT+CIPSTART は wx_build_cipstart(接続先) */
     /* wx_send  */ { NULL,                                    5000u,  1u, 0u },
-    /* wx_recv  */ { NULL,                                    10000u, 1u, 0u }
+    /* wx_recv  */ { NULL,                                    15000u, 1u, 0u }
 };
 
 static const char *const k_step_name[WIFI_STEP_END] = {
     "none", "reset", "boot", "at", "echo", "gmr", "mode", "qap", "lapopt", "scan", "join", "ip", "dns", "ping_ip", "ping_dns",
-    "wx_mux", "wx_close", "wx_tcp", "wx_send", "wx_recv"
+    "wx_mux", "wx_close", "wx_sslconf", "wx_tcp", "wx_send", "wx_recv"
 };
 static const char *const k_res_name[WIFI_RES_END]     = { "start", "ok", "fail", "timeout", "skip" };
 static const char *const k_key_name[WIFI_KEY_END]     = { "ver", "sdk", "ip", "gw", "mask", "dns", "ping", "scan", "ap", "oth" };
@@ -760,6 +764,20 @@ static void wx_fail(wifi_core_t *c, uint32_t now, uint8_t err)
     wx_publish(c, now);
 }
 
+/* 取得中に ready を受けた = ESP32 が再起動した(SSL のメモリ不足の疑い)。err=9 で打ち切る(design.md §5.5.2 の 0-4) */
+static void wx_reboot(wifi_core_t *c, uint32_t now)
+{
+    const wifi_step_t st = (wifi_step_t)c->step;
+
+    emit_step(c, WIFI_RES_FAIL, now - c->t0, 9u);
+    memset(&c->wx, 0, sizeof c->wx);
+    c->wx.kind = (uint8_t)WX_KIND_UNKNOWN;
+    c->wx.err  = 9u;
+    c->wx.len  = c->wx_len;
+    wx_publish(c, now);
+    finish(c, false, st);
+}
+
 static void begin_try(wifi_core_t *c, uint32_t now);
 static void recv_done(wifi_core_t *c, uint32_t now, int how);
 
@@ -795,6 +813,14 @@ static void end_ok(wifi_core_t *c, uint32_t now, uint32_t code)
         /* 他の step は値なし */
     }
     next_step(c, now);
+}
+
+static uint32_t step_timeout(const wifi_core_t *c)
+{
+    if ((c->step == (uint8_t)WIFI_STEP_WX_TCP) && wx_target_ssl((wx_target_t)c->target)) {
+        return SSL_TCP_TIMEOUT_MS;
+    }
+    return (uint32_t)k_def[c->step].timeout_ms;
 }
 
 static bool can_retry(const wifi_core_t *c)
@@ -881,12 +907,22 @@ static void begin_try(wifi_core_t *c, uint32_t now)
         return;
     }
     if (c->step == (uint8_t)WIFI_STEP_WX_SEND) {                /* AT+CIPSEND=<要求の長さ> */
-        n = wx_build_request(c->cmd, sizeof c->cmd);
+        n = wx_build_request(c->cmd, sizeof c->cmd, (wx_target_t)c->target, WX_SYM_PHASE0);
         if (n == 0u) {
             end_fail(c, now, WIFI_RES_FAIL, 100u);
             return;
         }
         n = (size_t)snprintf(c->cmd, sizeof c->cmd, "AT+CIPSEND=%lu\r\n", (unsigned long)n);
+        c->cmdlen = (uint16_t)n;
+        c->phase  = PH_SEND;
+        return;
+    }
+    if (c->step == (uint8_t)WIFI_STEP_WX_TCP) {                 /* AT+CIPSTART="TCP"|"SSL",<host>,<port> */
+        n = wx_build_cipstart(c->cmd, sizeof c->cmd, (wx_target_t)c->target);
+        if (n == 0u) {
+            end_fail(c, now, WIFI_RES_FAIL, 100u);
+            return;
+        }
         c->cmdlen = (uint16_t)n;
         c->phase  = PH_SEND;
         return;
@@ -921,6 +957,13 @@ void wifi_core_set_quiet(wifi_core_t *c, bool quiet)
     c->quiet = quiet ? 1u : 0u;
 }
 
+void wifi_core_set_target(wifi_core_t *c, wx_target_t t)
+{
+    if ((c->phase == PH_IDLE) && ((unsigned)t < (unsigned)WX_TGT_END)) {
+        c->target = (uint8_t)t;
+    }
+}
+
 bool wifi_core_start(wifi_core_t *c, wifi_range_t range, uint32_t now_ms)
 {
     if (c->phase != PH_IDLE) {
@@ -931,7 +974,8 @@ bool wifi_core_start(wifi_core_t *c, wifi_range_t range, uint32_t now_ms)
     case WIFI_RANGE_BOOT:    c->mask = MASK_BOOT;    c->step = (uint8_t)WIFI_STEP_RESET;  break;
     case WIFI_RANGE_AT:      c->mask = MASK_AT;      c->step = (uint8_t)WIFI_STEP_AT;     break;
     case WIFI_RANGE_CONNECT: c->mask = MASK_CONNECT; c->step = (uint8_t)WIFI_STEP_RESET;  break;
-    case WIFI_RANGE_WX:      c->mask = MASK_WX;      c->step = (uint8_t)WIFI_STEP_WX_MUX; break;
+    case WIFI_RANGE_WX:      c->mask = (c->target == (uint8_t)WX_TGT_YAHOO_SSL_NOAUTH) ? MASK_WX_SSLCONF : MASK_WX;
+                             c->step = (uint8_t)WIFI_STEP_WX_MUX; break;
     default:                 return false;
     }
     c->ping_ip  = 0u;
@@ -951,9 +995,9 @@ static void recv_done(wifi_core_t *c, uint32_t now, int how)
     bool         ok = false;
 
     if ((c->wx_flags & F_OVER) != 0u) {
-        memset(r, 0, sizeof *r);
-        r->kind = (uint8_t)WX_KIND_UNKNOWN;
-        r->err  = 7u;
+        (void)wx_parse_http(c->wx_buf, c->wx_len, r);        /* http と Date: だけ拾う(Phase 0 の g。応答が途切れているので、成功にはしない) */
+        r->ok  = 0u;
+        r->err = 7u;
     } else if (c->wx_len == 0u) {
         memset(r, 0, sizeof *r);
         r->kind = (uint8_t)WX_KIND_UNKNOWN;
@@ -962,6 +1006,7 @@ static void recv_done(wifi_core_t *c, uint32_t now, int how)
         ok = wx_parse_http(c->wx_buf, c->wx_len, r);
     }
     r->closed = (how == RECV_CLOSED) ? 1u : 0u;
+    r->len    = c->wx_len;
     wx_publish(c, now);
     if (ok) {
         emit_step(c, WIFI_RES_OK, now - c->t0, 0u);
@@ -975,7 +1020,7 @@ static void recv_done(wifi_core_t *c, uint32_t now, int how)
 /* wx_send の > を受けた後の要求本体を送る準備(c->cmd に要求を入れて PH_SEND_DATA へ) */
 static void start_request(wifi_core_t *c, uint32_t now)
 {
-    size_t n = wx_build_request(c->cmd, sizeof c->cmd);
+    size_t n = wx_build_request(c->cmd, sizeof c->cmd, (wx_target_t)c->target, WX_SYM_PHASE0);
 
     c->wx_flags |= F_REQ;
     if (n == 0u) {
@@ -1005,6 +1050,7 @@ static void wx_line(wifi_core_t *c, uint32_t now)
         }
         break;
     case WIFI_STEP_WX_CLOSE:                       /* 前回の接続が無ければ ERROR。どちらでも成功 */
+    case WIFI_STEP_WX_SSLCONF:                     /* 認証なしの設定(z)。OK でも ERROR でも先へ */
         if ((k == WIFI_L_OK) || bad) {
             end_ok(c, now, 0u);
         } else if (k == WIFI_L_OTHER) {
@@ -1020,6 +1066,9 @@ static void wx_line(wifi_core_t *c, uint32_t now)
             c->wx_flags |= F_OK;
         } else if (bad || (k == WIFI_L_CLOSED) || (k == WIFI_L_DNS_FAIL)) {
             end_fail(c, now, WIFI_RES_FAIL, c->fail_code);
+            return;
+        } else if (k == WIFI_L_READY) {
+            wx_reboot(c, now);
             return;
         } else if (k == WIFI_L_OTHER) {
             emit_oth(c);
@@ -1037,6 +1086,9 @@ static void wx_line(wifi_core_t *c, uint32_t now)
             c->wx_flags |= F_PROMPT;
         } else if (bad || (k == WIFI_L_SEND_FAIL)) {
             end_fail(c, now, WIFI_RES_FAIL, c->fail_code);
+            return;
+        } else if (k == WIFI_L_READY) {
+            wx_reboot(c, now);
             return;
         } else if (k == WIFI_L_CLOSED) {
             if ((c->wx_flags & F_SENT) == 0u) {    /* 要求を送る前に閉じられた = 失敗。送った後なら、フラグだけ(wx_recv が終わりにする) */
@@ -1061,6 +1113,8 @@ static void wx_line(wifi_core_t *c, uint32_t now)
             recv_done(c, now, RECV_CLOSED);
         } else if (bad) {
             recv_done(c, now, RECV_ERROR);
+        } else if (k == WIFI_L_READY) {
+            wx_reboot(c, now);
         } else if (k == WIFI_L_OTHER) {
             emit_oth(c);
         } else {
@@ -1307,7 +1361,7 @@ void wifi_core_poll(wifi_core_t *c, uint32_t now_ms)
         }
         break;
     case PH_WAIT:
-        if ((uint32_t)(now_ms - c->t0) >= (uint32_t)k_def[c->step].timeout_ms) {
+        if ((uint32_t)(now_ms - c->t0) >= step_timeout(c)) {
             if (c->step == (uint8_t)WIFI_STEP_WX_RECV) {
                 recv_done(c, now_ms, RECV_TIMEOUT);       /* CLOSED が来なくても、解析できていれば成功 */
             } else {

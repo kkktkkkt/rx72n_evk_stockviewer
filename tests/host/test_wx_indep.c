@@ -457,7 +457,7 @@ static void t_core_fuzz(void)
     unsigned k;
 
     TEST("E1 wifi_core WX step の乱数 3000 回(各 40 秒): バッファ・データモードの範囲、固まらない、送信は既知のコマンドと 190 バイトの要求だけ、ログに SECRETBODY・Date:・current が出ない、終了後に本文バッファが 0");
-    (void)wx_build_request(g_req_expect, sizeof g_req_expect);
+    (void)wx_build_request(g_req_expect, sizeof g_req_expect, WX_TGT_METEO, 0);
     for (it = 0u; it < 3000u; it++) {
         uint32_t seq0;
         wifi_core_init(&g_c, &k_ops, "SSID_X", "PASS_X");

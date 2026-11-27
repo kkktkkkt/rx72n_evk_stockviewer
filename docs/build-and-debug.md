@@ -391,3 +391,45 @@ cd D:\workspace\rx72n\rx72n_gcc
 - 製品版(`APP_WX` = 1): `D:\workspace\rx72n\rx72n_gcc\jobs\wxbuild\prod_wx\`(`rx72n_gcc.elf` 2,492,756 バイト、`rx72n_gcc.mot` 3,601,006 バイト、`rx72n_gcc.map`、`build.log`(要約版))
 - 従来版(`APP_WX` = 0): `D:\workspace\rx72n\rx72n_gcc\jobs\wxbuild\prod_base\`(`rx72n_gcc.elf` 2,356,604 バイト、`rx72n_gcc.mot` 3,556,630 バイト、`rx72n_gcc.map`、`build.log`(要約版))
 - `HardwareDebug\` の中身は従来版(`APP_WX` = 0)。書込み・実機操作・COM・gdb・rfp-cli は**未実施**。
+
+## 追記: 2026-11-27 09:58〜10:01 (JST) 新プロジェクト rx72n_stockview の初ビルド(ビルド担当)
+
+### 前提と取り込み(新プロジェクト特有の手順)
+| 時刻(JST) | 操作 | 結果 | 備考 |
+|---|---|---|---|
+| 09:58 | 前提確認(e2studio / e2studioc / make / rfp-cli / e2-server-gdb / rx-elf-gdb のプロセス無し) | OK | `jobs\` は無かった |
+| 09:58 | `tools\start-runner.cmd` を最小化で起動(`cmd /c`) | 成功 | `jobs\runner.alive` 更新を確認。ランナーは起動したまま |
+| 09:58〜09:59(時刻未記録) | 取り込み: `e2studioc.exe -nosplash -application org.eclipse.cdt.managedbuilder.core.headlessbuild -data D:\workspace\rx72n -import D:\workspace\rx72n\rx72n_stockview`(ログ = `rx72n_stockview\jobs\import-headless.log`) | 成功 | ログに「'rx72n_stockview' をオープンしています」。ビルドは走らず、150秒以内にプロセスは終了した(終了コードは PowerShell 側で取れず空。登録フォルダの作成で成功を確認) |
+
+- **取り込みが必要だった理由**: `D:\workspace\rx72n\.metadata\.plugins\org.eclipse.core.resources\.projects\` に登録されていたのは `rx72n_gcc` だけだった。未登録のプロジェクトは `-build` が通らない。取り込みは追加のみで、`rx72n_gcc` の登録は残っている(取り込み後も `.projects\rx72n_gcc` が存在することを確認)。
+- 取り込み後、`.projects\rx72n_stockview` が作られた。
+- **名前**: `tools/build.ps1`(`$Project` 既定値 `rx72n_stockview`)、`tools/job-runner.ps1`(`$Project` 既定値 `D:\workspace\rx72n\rx72n_stockview`)、`tools/submit-job.sh` はいずれも新プロジェクト名で動く。`rx72n_gcc` を指す箇所はスクリプトに無い(`.cproject` の `src/rx72n_gcc.o` はソースファイル名で、仕様どおり)。
+- **取り込み直後の初回ビルドの注意**: 取り込み直後のヘッドレスは先に「クリーンのみのビルド」を走らせ、`make -r clean` が `No rule to make target 'clean'` で失敗して `1 errors` を出す。その後の `all` ビルドは成功し、最終の結果は `0 errors`。2回目以降は出ない(ただし、ここで出た 1 errors は最終結果ではない)。
+
+### ビルド(ジョブランナー経由、`tools/submit-job.sh build '{"mode":"Headless"}' 400`)
+| 時刻(JST) | 構成 | 結果 | 備考 |
+|---|---|---|---|
+| 09:59:39〜10:00:14 | 既定(`APP_WIFI_TEST` = 0、`APP_WIFI_AUTOSTART` = 0、`APP_WX` = 0) | **成功**(exit 0、34秒) | `Build Finished. 0 errors, 2 warnings`。警告は既知の smc_gen の stack usage 非対応2件(`r_bsp_common.c:105` `delay_wait`、`r_rx_intrinsic_functions.c:347` `R_BSP_ChangeToUserMode`)。clean 相当の全再コンパイル(新規の取り込み) |
+| 10:00:24〜10:00:48 | 試験(`APP_WIFI_TEST` = 1、`APP_WIFI_AUTOSTART` = 1) | **成功**(exit 0、22秒) | `Build Finished. 0 errors, 0 warnings`。再コンパイルは7ファイル(`clut8_test.c` `lcd_panel.c` `touch_ft5x.c` `app_main.c` `wifi_at.c` `wx_core.c` `wifi_core.c`)。smc_gen は増分で再コンパイルなし |
+| 10:00:48 | `src\app\wifi_sw.h` の 2 値を (0) に戻す | 確認済み | `git diff -- src/app/wifi_sw.h` が 0 行(コミットされる値は 0)。`APP_WX` は 0 のまま |
+
+### 成果物
+| 項目 | 既定(10:00:11) | 試験(10:00:45、現在の `HardwareDebug` の中身) |
+|---|---|---|
+| `rx72n_stockview.elf` | 2,357,128 バイト | 2,496,516 バイト |
+| `rx72n_stockview.mot` | 3,556,642 バイト | 3,603,354 バイト |
+| `rx-elf-size` text / data / bss | 1,182,612 / 2,876 / 18,368 | 1,198,184 / 2,876 / 22,592 |
+| ROM(text + data) | 1,185,488 | 1,201,060 |
+| 構成の証拠 | `_wifi_test_main` 0 件 | `_wifi_test_main` 1 件(`ffc0b518 T`) |
+
+- 既定の `text / data / bss` は、2026-11-25 の `APP_WX` = 0 の製品版の記録(1,182,612 / 2,876 / 18,368)と一致。
+- 証拠の確認は `rx-elf-nm.exe`(`D:\Renesas\GNURX\GCC_for_Renesas_RX 8.3.0.202411-GNURX-ELF\rx-elf\rx-elf\bin\` にあるもの。プロジェクトのツールチェーン 14.2 は `jobs/tools.json` に未登録。シンボルを読むだけのため使用)。既定の ELF のコピーは確認後に削除した。
+- RAM2(`0x00800000` 台)の出力セクションは未確認(この手順では `objdump` を実行していない)。
+
+### 秘密情報
+- 試験の ELF・MOT には `wifi_secret.h` の SSID・パスワードが平文で入っている想定(設計 §21.5)。値の確認はしていない(`wifi_secret.h` は開いていない)。ビルドログ本文に SSID・パスワードらしい値は見えなかった(目視のみ。grep は未実施)。
+- `HardwareDebug\` の中身は試験版(`APP_WIFI_TEST` = 1)のまま。外へ渡さないこと。
+
+### 注意
+- ヘッドレスビルドが `.settings/com.renesas.smc.generationsetting.properties`、`.settings/com.renesas.smc.tools.swcomponent.fit.properties` のタイムスタンプ行を書き換えた(内容の変化なし)。`.settings/language.settings.xml` も `git status` で M になった(ビルドが書いたもの。内容の確認は未実施)。
+- 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。

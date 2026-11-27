@@ -148,6 +148,7 @@ static bool     g_join_fail;       /* AT+CWJAP に FAIL を返す */
 static unsigned g_http_min = 24u, g_http_sec = 13u;   /* 応答の Date: の UTC の分・秒(04:mm:ss) */
 static uint32_t g_cipstart_tick[16];
 static unsigned g_n_cipstart;
+static unsigned g_req_len = 190u;  /* 直近の AT+CIPSEND=<n> の n。190 以外(Phase 0 の Yahoo・Google)なら天気のキーが無い応答を返す */
 
 /* 要求本体を受け終わった: SEND OK、+IPD(HTTP 応答。分割)、CLOSED を返す。応答は設計 §22.1 の実測と同じ形(本文の目印 BODY_SENTINEL を足してある) */
 static void esp_http(void)
@@ -157,6 +158,9 @@ static void esp_http(void)
     unsigned    d = C.resp_delay_iters + (10u * g_ipt);
     size_t      n, k, m;
 
+    if (g_req_len != 190u) {                            /* Phase 0(TLS の検証): 天気のキーが無い 200 */
+        n = (size_t)snprintf(http, sizeof(http), "HTTP/1.0 200 OK\r\ndate: Wed, 25 Nov 2026 04:24:13 GMT\r\nConnection: close\r\n\r\n{\"chart\":\"BODY_SENTINEL\"}");
+    } else
     n = (size_t)snprintf(http, sizeof(http),
         "HTTP/1.0 200 OK\r\nDate: Wed, 25 Nov 2026 04:%02u:%02u GMT\r\nContent-Type: application/json; charset=utf-8\r\nX-Body: BODY_SENTINEL\r\nConnection: close\r\n\r\n"
         "{\"latitude\":35.7,\"longitude\":139.75,\"generationtime_ms\":0.04,\"utc_offset_seconds\":32400,\"timezone\":\"Asia/Tokyo\","
@@ -194,7 +198,8 @@ static void esp_cmd(const char *cmd)
     else if (strcmp(cmd, "AT+CIPMUX=0") == 0) { resp = "OK"; }
     else if (strcmp(cmd, "AT+CIPCLOSE") == 0) { resp = "ERROR"; }                                         /* つながっていない */
     else if (strncmp(cmd, "AT+CIPSTART=", 12) == 0) { if (g_n_cipstart < 16u) { g_cipstart_tick[g_n_cipstart] = g_hook_tick; } g_n_cipstart++; resp = g_tcp_fail ? "DNS Fail\r\n\r\nERROR" : "CONNECT\r\n\r\nOK"; d += 20u * g_ipt; }
-    else if (strcmp(cmd, "AT+CIPSEND=190") == 0) { resp = "\r\nOK\r\n> "; g_data_left = 190u; }
+    else if (strncmp(cmd, "AT+CIPSEND=", 11) == 0) { resp = "\r\nOK\r\n> "; g_req_len = (unsigned)strtoul(cmd + 11, NULL, 10); g_data_left = g_req_len; }
+    else if (strcmp(cmd, "AT+CIPSSLCCONF=0,0,0") == 0) { resp = "OK"; }
     snprintf(buf, sizeof(buf), "%s%s%s%s", g_echo_on ? cmd : "", g_echo_on ? "\r\r\n" : "", resp, (g_data_left > 0u) ? "" : "\r\n");   /* > の後は改行なし */
     if (strcmp(cmd, "ATE0") == 0) { g_echo_on = false; }
     esp_say(d, buf);
@@ -308,7 +313,7 @@ static void reset_all(void)
     g_en_low_iter = 0u; g_en_high_iter = 0u; g_en_edges = 0u; g_dir_out_calls = 0u;
     g_iter = 0u; g_ipt = 3u; g_timer_on = false; g_cmt_ok = true;
     g_busy_iters = 0u; g_scan = 0u; g_echo_on = true; g_npend = 0u;
-    g_data_left = 0u; g_tcp_fail = false; g_tcp_nodata = false;
+    g_data_left = 0u; g_tcp_fail = false; g_tcp_nodata = false; g_req_len = 190u;
     s_clk.synced = 0u; s_wx_seen = 0u; s_wx_ok_ms = 0u; s_wx_temp = 0; s_wx_kind = 0u; s_wx_have = 0u;
 #if APP_WIFI_TEST
     s_wx_last_ok = 0u;
@@ -625,6 +630,43 @@ int main(void)
     CHECK(find_idx("[wx] res=fail src=uart err=3 http=0 ms=") >= 0);
     CHECK_EQ(count_prefix("[wx] net=err busy=0 have=0 temp10=0 kind=none age=-1 clk=none date=none wd=9 sync=0\r\n"), 1);
     check_lines_clean();
+
+    TEST("F6 TLS の検証(design.md §5.5.2): t y g z は取得の接続先を選ぶ。y = SSL 443・CIPSEND=145・^N225 の chart。応答は http=200 err=5 len=<n>、本文は出ない。x は最後の対象でもう一度");
+    reset_all(); C.stop_tick = 700u;
+    { static const cmdev_t c[] = { { 20u, 'y' }, { 400u, 'x' } }; C.cmds = c; C.n_cmds = 2u; run(); }
+    CHECK(tx_has("AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") && tx_has("AT+CIPSEND=145\r\n"));
+    CHECK(tx_has("GET /v8/finance/chart/%5EN225?range=2d&interval=1d HTTP/1.0\r\nHost: query1.finance.yahoo.com\r\nUser-Agent: rx72n-stockview/1\r\nConnection: close\r\n\r\n"));
+    CHECK(!tx_has("api.open-meteo.com") && !tx_has("CIPSSLCCONF") && !tx_has("\"TCP\""));
+    CHECK_EQ(count_prefix("[wx] res=fail src=uart err=5 http=200 ms="), 2);                        /* y と、x(最後に選んだ対象でもう一度) */
+    k = find_idx("[wx] res=fail src=uart err=5 http=200 ms=");
+    CHECK(k >= 0);
+    if (k >= 0) { CHECK_EQ(field(g_logs[k], " len="), 100u); }                                       /* 偽の応答の長さ(ヘッダー + 本文) */
+    CHECK_EQ(count_prefix("[wx] res=ok"), 0);
+    check_lines_clean();
+    CHECK_EQ(g_log_drops, 0);
+
+    reset_all(); C.stop_tick = 500u;
+    { static const cmdev_t c[] = { { 20u, 't' } }; C.cmds = c; C.n_cmds = 1u; run(); }
+    CHECK(tx_has("AT+CIPSTART=\"TCP\",\"query1.finance.yahoo.com\",80\r\n") && tx_has("AT+CIPSEND=145\r\n") && !tx_has("\"SSL\""));
+    CHECK_EQ(count_prefix("[wx] res=fail src=uart err=5 http=200 ms="), 1);
+
+    reset_all(); C.stop_tick = 500u;
+    { static const cmdev_t c[] = { { 20u, 'g' } }; C.cmds = c; C.n_cmds = 1u; run(); }
+    CHECK(tx_has("AT+CIPSTART=\"SSL\",\"www.google.com\",443\r\n") && tx_has("GET / HTTP/1.0\r\nHost: www.google.com\r\nUser-Agent: rx72n-stockview/1\r\nConnection: close\r\n\r\n"));
+    CHECK_EQ(count_prefix("[wx] res=fail src=uart err=5 http=200 ms="), 1);
+    check_lines_clean();
+
+    reset_all(); C.stop_tick = 500u;
+    { static const cmdev_t c[] = { { 20u, 'z' } }; C.cmds = c; C.n_cmds = 1u; run(); }
+    CHECK(tx_has("AT+CIPCLOSE\r\nAT+CIPSSLCCONF=0,0,0\r\nAT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n"));
+    CHECK_EQ(count_prefix("[wifi] step=wx_sslconf res=ok "), 1);
+    CHECK_EQ(count_prefix("[wx] res=fail src=uart err=5 http=200 ms="), 1);
+    CHECK_EQ(g_app_dbg.scr, 0);
+
+    reset_all(); C.stop_tick = 300u;                                   /* 実行中(d の最中)の t y g z は無視。何も送らない */
+    { static const cmdev_t c[] = { { 20u, 'd' }, { 30u, 't' }, { 31u, 'y' }, { 32u, 'g' }, { 33u, 'z' } }; C.cmds = c; C.n_cmds = 5u; run(); }
+    CHECK(!tx_has("CIPSTART") && !tx_has("CIPSSLCCONF"));
+    CHECK_EQ(count_prefix("[wx] "), 0);
 
     TEST("C1 受信は 1 周回に 64 バイトまで(200 バイトは 64 / 128 / 192 / 200)");
     reset_all(); C.esp = false;

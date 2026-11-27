@@ -50,7 +50,7 @@ static void t_request(void)
 
     TEST("H-X0 wx_build_request(190 バイト・固定)");
     memset(b, 'Q', sizeof b);
-    n = wx_build_request(b, sizeof b);
+    n = wx_build_request(b, sizeof b, WX_TGT_METEO, 0);
     CHECK_EQ(n, 190u);
     CHECK_EQ(n, WX_REQ_LEN);
     CHECK_EQ(strlen(b), 190u);
@@ -61,13 +61,76 @@ static void t_request(void)
     CHECK(strstr(b, "HTTP/1.0") != NULL);
     CHECK(strstr(b, "Connection: close\r\n") != NULL);
     memset(b, 'Q', sizeof b);
-    CHECK_EQ(wx_build_request(b, 190u), 0u);                    /* NUL の分が足りない */
+    CHECK_EQ(wx_build_request(b, 190u, WX_TGT_METEO, 0), 0u);                    /* NUL の分が足りない */
     CHECK_EQ(b[0], 0);
     memset(b, 'Q', sizeof b);
-    CHECK_EQ(wx_build_request(b, 191u), 190u);
+    CHECK_EQ(wx_build_request(b, 191u, WX_TGT_METEO, 0), 190u);
     CHECK_EQ(b[191], 'Q');                                      /* 越えて書かない */
-    CHECK_EQ(wx_build_request(NULL, 191u), 0u);
-    CHECK_EQ(wx_build_request(b, 0u), 0u);
+    CHECK_EQ(wx_build_request(NULL, 191u, WX_TGT_METEO, 0), 0u);
+    CHECK_EQ(wx_build_request(b, 0u, WX_TGT_METEO, 0), 0u);
+}
+
+/* ---------------------------------------------------------------- Phase 0: 接続先 */
+
+static void t_target(void)
+{
+    char   b[300];
+    size_t n;
+    unsigned sym;
+    static const size_t LEN[3] = { 144u, 145u, 145u };            /* design.md §5.1(○ 計算)を、ここで実測 */
+
+    TEST("P0-A wx_build_cipstart(5 つの接続先・範囲外・小さな buf)と wx_target_ssl");
+    n = wx_build_cipstart(b, sizeof b, WX_TGT_METEO);
+    CHECK(strcmp(b, "AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") == 0); CHECK_EQ(n, strlen(b));
+    n = wx_build_cipstart(b, sizeof b, WX_TGT_YAHOO_TCP);
+    CHECK(strcmp(b, "AT+CIPSTART=\"TCP\",\"query1.finance.yahoo.com\",80\r\n") == 0); CHECK_EQ(n, strlen(b));
+    n = wx_build_cipstart(b, sizeof b, WX_TGT_YAHOO_SSL);
+    CHECK(strcmp(b, "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") == 0); CHECK_EQ(n, strlen(b));
+    n = wx_build_cipstart(b, sizeof b, WX_TGT_GOOGLE_SSL);
+    CHECK(strcmp(b, "AT+CIPSTART=\"SSL\",\"www.google.com\",443\r\n") == 0); CHECK_EQ(n, strlen(b));
+    n = wx_build_cipstart(b, sizeof b, WX_TGT_YAHOO_SSL_NOAUTH);
+    CHECK(strcmp(b, "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") == 0);
+    memset(b, 'Q', sizeof b);
+    CHECK_EQ(wx_build_cipstart(b, sizeof b, WX_TGT_END), 0u); CHECK_EQ(b[0], 0);
+    CHECK_EQ(wx_build_cipstart(NULL, 10u, WX_TGT_YAHOO_SSL), 0u);
+    CHECK_EQ(wx_build_cipstart(b, 0u, WX_TGT_YAHOO_SSL), 0u);
+    n = strlen("AT+CIPSTART=\"SSL\",\"www.google.com\",443\r\n");
+    memset(b, 'Q', sizeof b);
+    CHECK_EQ(wx_build_cipstart(b, n, WX_TGT_GOOGLE_SSL), 0u); CHECK_EQ(b[0], 0);         /* NUL の分が足りない */
+    CHECK_EQ(wx_build_cipstart(b, n + 1u, WX_TGT_GOOGLE_SSL), n); CHECK_EQ(b[n + 1u], 'Q');
+    CHECK(!wx_target_ssl(WX_TGT_METEO)); CHECK(!wx_target_ssl(WX_TGT_YAHOO_TCP));
+    CHECK(wx_target_ssl(WX_TGT_YAHOO_SSL)); CHECK(wx_target_ssl(WX_TGT_GOOGLE_SSL)); CHECK(wx_target_ssl(WX_TGT_YAHOO_SSL_NOAUTH));
+    CHECK(!wx_target_ssl(WX_TGT_END)); CHECK(!wx_target_ssl((wx_target_t)255));
+
+    TEST("P0-B wx_build_request(Yahoo: 3 銘柄の長さ 144 / 145 / 145・UA・range=2d・HTTP/1.0・改行)");
+    for (sym = 0u; sym < 3u; sym++) {
+        static const char *const ENC[3] = { "6723.T", "%5EN225", "%5EGSPC" };
+        char want[200];
+
+        memset(b, 'Q', sizeof b);
+        n = wx_build_request(b, sizeof b, WX_TGT_YAHOO_SSL, (uint8_t)sym);
+        (void)snprintf(want, sizeof want, "GET /v8/finance/chart/%s?range=2d&interval=1d HTTP/1.0\r\nHost: query1.finance.yahoo.com\r\n"
+                       "User-Agent: rx72n-stockview/1\r\nConnection: close\r\n\r\n", ENC[sym]);
+        CHECK(strcmp(b, want) == 0); CHECK_EQ(n, strlen(want)); CHECK_EQ(n, LEN[sym]);
+        CHECK_EQ(wx_build_request(b, sizeof b, WX_TGT_YAHOO_TCP, (uint8_t)sym), n);          /* 平文も同じ要求 */
+        CHECK_EQ(wx_build_request(b, sizeof b, WX_TGT_YAHOO_SSL_NOAUTH, (uint8_t)sym), n);
+        memset(b, 'Q', sizeof b);
+        CHECK_EQ(wx_build_request(b, n, WX_TGT_YAHOO_SSL, (uint8_t)sym), 0u); CHECK_EQ(b[0], 0);   /* NUL の分が足りない */
+        CHECK_EQ(wx_build_request(b, n + 1u, WX_TGT_YAHOO_SSL, (uint8_t)sym), n); CHECK_EQ(b[n + 1u], 'Q');
+    }
+    memset(b, 'Q', sizeof b);
+    CHECK_EQ(wx_build_request(b, sizeof b, WX_TGT_YAHOO_SSL, 3u), 0u); CHECK_EQ(b[0], 0);    /* 銘柄の範囲外 */
+    CHECK_EQ(wx_build_request(b, sizeof b, WX_TGT_YAHOO_SSL, 255u), 0u);
+    CHECK_EQ(wx_build_request(b, sizeof b, WX_TGT_END, 1u), 0u); CHECK_EQ(b[0], 0);
+    CHECK_EQ(wx_build_request(NULL, 300u, WX_TGT_YAHOO_SSL, 1u), 0u);
+    CHECK_EQ(wx_build_request(b, 0u, WX_TGT_YAHOO_SSL, 1u), 0u);
+    CHECK_EQ(wx_build_request(b, sizeof b, WX_TGT_METEO, 200u), WX_REQ_LEN);               /* 天気は sym を見ない */
+
+    TEST("P0-C wx_build_request(Google: GET / ・Host・UA・Connection: close・改行で終わる)");
+    n = wx_build_request(b, sizeof b, WX_TGT_GOOGLE_SSL, 0u);
+    CHECK(strcmp(b, "GET / HTTP/1.0\r\nHost: www.google.com\r\nUser-Agent: rx72n-stockview/1\r\nConnection: close\r\n\r\n") == 0);
+    CHECK_EQ(n, strlen(b));
+    CHECK_EQ(wx_build_request(b, 10u, WX_TGT_GOOGLE_SSL, 0u), 0u); CHECK_EQ(b[0], 0);
 }
 
 /* ---------------------------------------------------------------- H-X1 解析 */
@@ -490,9 +553,10 @@ static int fm_fail(const char *l)
 
     if ((strncmp(l, "[wx] res=fail src=", 18u) != 0) || (n < 2u) || (strcmp(l + n - 2u, "\r\n") != 0)) { return 0; }
     if (!tok(l, "src", v, sizeof v) || !in_set(v, SRC4, 4u)) { return 0; }
-    if (!tok(l, "err", v, sizeof v) || !is_num(v, 1, 0) || (v[0] < '1') || (v[0] > '8')) { return 0; }
+    if (!tok(l, "err", v, sizeof v) || !is_num(v, 1, 0) || (v[0] < '1') || (v[0] > '9')) { return 0; }
     if (!tok(l, "http", v, sizeof v) || !is_num(v, 3, 0)) { return 0; }
     if (!tok(l, "ms", v, sizeof v) || !is_num(v, 10, 0)) { return 0; }
+    if (!tok(l, "len", v, sizeof v) || !is_num(v, 5, 0)) { return 0; }
     return 1;
 }
 
@@ -574,16 +638,23 @@ static void t_fmt(void)
     memset(&r, 0, sizeof r);
     r.err = 4; r.http = 429; r.ms = 5000u;
     n = wx_fmt_fail(b, sizeof b, WX_SRC_TIMER, &r);
-    CHECK(strcmp(b, "[wx] res=fail src=timer err=4 http=429 ms=5000\r\n") == 0);
+    CHECK(strcmp(b, "[wx] res=fail src=timer err=4 http=429 ms=5000 len=0\r\n") == 0);
+    r.err = 9; r.http = 0; r.ms = 12345u; r.len = 65535u;                /* err=9(ESP32 の再起動)と len(Phase 0。design.md §5.5.2 の 0-5) */
+    n = wx_fmt_fail(b, sizeof b, WX_SRC_UART, &r);
+    CHECK(strcmp(b, "[wx] res=fail src=uart err=9 http=0 ms=12345 len=65535\r\n") == 0);
+    r.err = 5; r.http = 200; r.ms = 4000u; r.len = 1840u;
+    n = wx_fmt_fail(b, sizeof b, WX_SRC_UART, &r);
+    CHECK(strcmp(b, "[wx] res=fail src=uart err=5 http=200 ms=4000 len=1840\r\n") == 0);
+    r.len = 0u;
     for (s = 0; s < (int)WX_SRC_END; s++) {
-        for (k = 1u; k <= 8u; k++) {
+        for (k = 1u; k <= 9u; k++) {
             r.err = (uint8_t)k; r.http = (uint16_t)(k * 100u); r.ms = MS[k % 3u];
             n = wx_fmt_fail(b, sizeof b, (wx_src_t)s, &r);
             CHECK(n > 0u); CHECK(fm_fail(b)); CHECK_EQ(strlen(b), n);
         }
     }
     r.err = 0; memset(b, 'Q', sizeof b); CHECK_EQ(wx_fmt_fail(b, sizeof b, WX_SRC_UART, &r), 0u); CHECK_EQ(b[0], 0);
-    r.err = 9; CHECK_EQ(wx_fmt_fail(b, sizeof b, WX_SRC_UART, &r), 0u);
+    r.err = 10; CHECK_EQ(wx_fmt_fail(b, sizeof b, WX_SRC_UART, &r), 0u);
     r.err = 3; r.http = 1000; CHECK_EQ(wx_fmt_fail(b, sizeof b, WX_SRC_UART, &r), 0u);
 
     /* 要求の無視 */
@@ -761,6 +832,7 @@ static void t_sched(void)
 int main(void)
 {
     t_request();
+    t_target();
     t_parse_real();
     t_parse_values();
     t_parse_units();

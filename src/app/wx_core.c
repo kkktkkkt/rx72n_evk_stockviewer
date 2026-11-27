@@ -17,22 +17,74 @@ static const char *const k_net_name[4]            = { "off", "conn", "on", "err"
 static const char *const k_req_name[4]            = { "ok", "ignored", "busy", "off" };
 static const char *const k_month[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
-/* 要求は固定文字列。外部の入力を含めない(190 バイト) */
+/* snprintf の結果を「入りきった長さ」に正規化。失敗・切り詰めは buf を空にして 0 */
+static size_t fin(char *buf, size_t size, int n)
+{
+    if ((n <= 0) || ((size_t)n >= size)) {
+        buf[0] = '\0';
+        return 0u;
+    }
+    return (size_t)n;
+}
+
+static bool arg_ok(char *buf, size_t size)
+{
+    if ((buf == NULL) || (size == 0u)) {
+        return false;
+    }
+    buf[0] = '\0';
+    return true;
+}
+
+/* 接続先の表(wx_target_t の並び)。要求の Host も同じ host を使う */
+typedef struct { const char *type; const char *host; uint16_t port; } tgt_t;
+static const tgt_t k_tgt[WX_TGT_END] = {
+    { "TCP", "api.open-meteo.com",         80u  },
+    { "TCP", "query1.finance.yahoo.com",   80u  },
+    { "SSL", "query1.finance.yahoo.com",   443u },
+    { "SSL", "www.google.com",             443u },
+    { "SSL", "query1.finance.yahoo.com",   443u }
+};
+static const char *const k_sym_enc[3] = { "6723.T", "%5EN225", "%5EGSPC" };   /* ^ は %5E */
+
+size_t wx_build_cipstart(char *buf, size_t size, wx_target_t t)
+{
+    if (!arg_ok(buf, size) || ((unsigned)t >= (unsigned)WX_TGT_END)) {
+        return 0u;
+    }
+    return fin(buf, size, snprintf(buf, size, "AT+CIPSTART=\"%s\",\"%s\",%u\r\n", k_tgt[t].type, k_tgt[t].host, (unsigned)k_tgt[t].port));
+}
+
+bool wx_target_ssl(wx_target_t t)
+{
+    return ((unsigned)t < (unsigned)WX_TGT_END) && (k_tgt[t].type[0] == 'S');
+}
+
+/* 天気の要求は固定文字列。外部の入力を含めない(190 バイト) */
 #define WX_REQUEST \
     "GET /v1/forecast?latitude=35.68&longitude=139.76&current=temperature_2m,weather_code&timezone=Asia%2FTokyo HTTP/1.0\r\n" \
     "Host: api.open-meteo.com\r\nUser-Agent: rx72n-demo/1\r\nConnection: close\r\n\r\n"
 
-size_t wx_build_request(char *buf, size_t size)
+size_t wx_build_request(char *buf, size_t size, wx_target_t t, uint8_t sym)
 {
-    if ((buf == NULL) || (size == 0u)) {
+    if (!arg_ok(buf, size) || ((unsigned)t >= (unsigned)WX_TGT_END)) {
         return 0u;
     }
-    buf[0] = '\0';
-    if (size < (sizeof(WX_REQUEST))) {            /* sizeof = 長さ + NUL */
+    if (t == WX_TGT_METEO) {
+        if (size < (sizeof(WX_REQUEST))) {        /* sizeof = 長さ + NUL */
+            return 0u;
+        }
+        memcpy(buf, WX_REQUEST, sizeof(WX_REQUEST));
+        return sizeof(WX_REQUEST) - 1u;
+    }
+    if (t == WX_TGT_GOOGLE_SSL) {                 /* TLS が通るかだけを見る対照(design.md §5.5.2 の g) */
+        return fin(buf, size, snprintf(buf, size, "GET / HTTP/1.0\r\nHost: %s\r\nUser-Agent: " WX_UA "\r\nConnection: close\r\n\r\n", k_tgt[t].host));
+    }
+    if (sym >= 3u) {
         return 0u;
     }
-    memcpy(buf, WX_REQUEST, sizeof(WX_REQUEST));
-    return sizeof(WX_REQUEST) - 1u;
+    return fin(buf, size, snprintf(buf, size, "GET /v8/finance/chart/%s?range=" WX_RANGE_STR "&interval=1d HTTP/1.0\r\nHost: %s\r\n"
+                                   "User-Agent: " WX_UA "\r\nConnection: close\r\n\r\n", k_sym_enc[sym], k_tgt[t].host));
 }
 
 const char *wx_kind_name(uint8_t kind)
@@ -470,24 +522,6 @@ uint16_t wx_clock_min(const wx_clock_t *k, uint32_t now_ms)
 
 /* ================================================================ ログ行 */
 
-static size_t fin(char *buf, size_t size, int n)
-{
-    if ((n <= 0) || ((size_t)n >= size)) {
-        buf[0] = '\0';
-        return 0u;
-    }
-    return (size_t)n;
-}
-
-static bool arg_ok(char *buf, size_t size)
-{
-    if ((buf == NULL) || (size == 0u)) {
-        return false;
-    }
-    buf[0] = '\0';
-    return true;
-}
-
 size_t wx_fmt_ok(char *buf, size_t size, wx_src_t src, const wx_result_t *r)
 {
     wx_date_t d;
@@ -511,11 +545,11 @@ size_t wx_fmt_ok(char *buf, size_t size, wx_src_t src, const wx_result_t *r)
 
 size_t wx_fmt_fail(char *buf, size_t size, wx_src_t src, const wx_result_t *r)
 {
-    if (!arg_ok(buf, size) || ((unsigned)src >= (unsigned)WX_SRC_END) || (r == NULL) || (r->err < 1u) || (r->err > 8u) || (r->http > 999u)) {
+    if (!arg_ok(buf, size) || ((unsigned)src >= (unsigned)WX_SRC_END) || (r == NULL) || (r->err < 1u) || (r->err > 9u) || (r->http > 999u)) {
         return 0u;
     }
-    return fin(buf, size, snprintf(buf, size, "[wx] res=fail src=%s err=%u http=%u ms=%lu\r\n",
-                                   k_src_name[src], (unsigned)r->err, (unsigned)r->http, (unsigned long)r->ms));
+    return fin(buf, size, snprintf(buf, size, "[wx] res=fail src=%s err=%u http=%u ms=%lu len=%u\r\n",
+                                   k_src_name[src], (unsigned)r->err, (unsigned)r->http, (unsigned long)r->ms, (unsigned)r->len));
 }
 
 size_t wx_fmt_req(char *buf, size_t size, wx_req_t req, wx_src_t src)

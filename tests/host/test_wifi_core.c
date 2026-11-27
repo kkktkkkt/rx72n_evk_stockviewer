@@ -722,10 +722,13 @@ static void t_fmt(void)
     CHECK(strcmp(wifi_step_name(WIFI_STEP_SCAN), "scan") == 0);
     CHECK(strcmp(wifi_step_name(WIFI_STEP_QAP), "qap") == 0);
     CHECK(strcmp(wifi_step_name(WIFI_STEP_LAPOPT), "lapopt") == 0);
-    CHECK_EQ(WIFI_STEP_END, 20);                                   /* [hb] の scr は 0〜19(取得の 5 step を追加) */
+    CHECK_EQ(WIFI_STEP_END, 21);                                   /* [hb] の scr は 0〜20(取得の 5 step + wx_sslconf) */
     CHECK_EQ(WIFI_STEP_PING_DNS, 14);
     CHECK_EQ(WIFI_STEP_WX_MUX, 15);
-    CHECK_EQ(WIFI_STEP_WX_RECV, 19);
+    CHECK_EQ(WIFI_STEP_WX_SSLCONF, 17);
+    CHECK_EQ(WIFI_STEP_WX_TCP, 18);
+    CHECK_EQ(WIFI_STEP_WX_RECV, 20);
+    CHECK(strcmp(wifi_step_name(WIFI_STEP_WX_SSLCONF), "wx_sslconf") == 0);
     CHECK_EQ(WIFI_STEP_SCAN, 9);
     CHECK(wifi_step_name(WIFI_STEP_END) == NULL);
 }
@@ -1730,7 +1733,7 @@ static void t_secret(void)
 #define BODY_MARK "BODY_SENTINEL"
 #define DEGC "\xC2\xB0" "C"
 
-static char   g_http[3000];              /* 偽サーバーの応答(ヘッダー + 本文) */
+static char   g_http[4000];              /* 偽サーバーの応答(ヘッダー + 本文) */
 static size_t g_http_n;
 static char   g_reply[7000];             /* AT+CIPSEND の後に ESP が返す全部(Recv … SEND OK + +IPD + CLOSED) */
 static size_t g_reply_n;
@@ -1843,7 +1846,7 @@ static void t_wx_normal(void)
     CHECK(strcmp(g_sent[1], "AT+CIPCLOSE\r\n") == 0);
     CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") == 0);
     CHECK(strcmp(g_sent[3], "AT+CIPSEND=190\r\n") == 0);
-    CHECK_EQ(wx_build_request(req, sizeof req), 190u);
+    CHECK_EQ(wx_build_request(req, sizeof req, WX_TGT_METEO, 0), 190u);
     CHECK(strcmp(g_sent[4], req) == 0);                              /* 要求本体そのまま(\r\n を足さない。末尾は \r\n\r\n) */
     CHECK_EQ(strlen(g_sent[4]), 190u);
     CHECK_EQ(count_with("step=reset"), 0); CHECK_EQ(count_with("step=join"), 0);       /* 範囲外の step は動かない */
@@ -2071,7 +2074,7 @@ static void t_wx_recv(void)
     mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0"); mk_reply(0u, NULL, 0);
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(0u);
-    CHECK(wifi_core_wx(&g_c)->ms >= 10000u);                         /* wx_recv のタイムアウト 10 秒を待った */
+    CHECK(wifi_core_wx(&g_c)->ms >= 15000u);                         /* wx_recv のタイムアウト 15 秒を待った(design.md §5.5.2 の 0-4) */
     CHECK_EQ(count_with("step=wx_recv res=ok"), 1);
 
     TEST("H-X5-9 HTTP の状態が 429 / 500 / 301(err=4。http と Date: は残る)");
@@ -2129,31 +2132,35 @@ static void t_wx_recv(void)
 
 static void t_wx_overflow(void)
 {
-    char   pad[1700];
-    char   extra[1800];
+    static char pad[WX_BUF_SIZE + 100u];
+    static char extra[WX_BUF_SIZE + 200u];
     size_t need;
 
-    TEST("H-X5-11 バッファ(1536 バイト)ちょうどは成功、1 バイト超えたら err=7(キーが先頭にあっても失敗)・巨大な +IPD");
-    memset(pad, 'a', sizeof pad);
+    CHECK_EQ(WX_BUF_SIZE, 3072u);
+    TEST("H-X5-11 バッファ(3072 バイト)ちょうどは成功、1 バイト超えたら err=7(キーが先頭にあっても失敗。http は残る)・巨大な +IPD");
+    memset(pad, 'a', sizeof pad - 1u);
     mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
-    CHECK(g_http_n < 1536u);
-    need = 1536u - g_http_n;                                           /* ヘッダーの X-Pad(7 + N + 2 バイト)で 1536 にする */
+    CHECK(g_http_n < WX_BUF_SIZE);
+    need = WX_BUF_SIZE - g_http_n;                                     /* ヘッダーの X-Pad(7 + N + 2 バイト)で 3072 にする */
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
     (void)snprintf(extra, sizeof extra, "X-Pad: %.*s\r\n", (int)(need - 9u), pad);
     mk_http("HTTP/1.0 200 OK", extra, "12.7", "0");
-    CHECK_EQ(g_http_n, 1536u);
-    mk_reply(700u, NULL, 1);
+    CHECK_EQ(g_http_n, WX_BUF_SIZE);
+    mk_reply(1500u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
     expect_ok(1u);
+    CHECK_EQ(wifi_core_wx(&g_c)->len, WX_BUF_SIZE);
 
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);
     (void)snprintf(extra, sizeof extra, "X-Pad: %.*s\r\n", (int)(need - 8u), pad);
     mk_http("HTTP/1.0 200 OK", extra, "12.7", "0");
-    CHECK_EQ(g_http_n, 1537u);
-    mk_reply(700u, NULL, 1);
+    CHECK_EQ(g_http_n, WX_BUF_SIZE + 1u);
+    mk_reply(1500u, NULL, 1);
     run(WIFI_RANGE_WX, 30000u);
     CHECK(last_is("[wifi] result=fail stage=wx_recv ping_ip=0 ping_dns=0\r\n"));
     CHECK_EQ(wifi_core_wx(&g_c)->err, 7); CHECK_EQ(wifi_core_wx(&g_c)->ok, 0);
+    CHECK_EQ(wifi_core_wx(&g_c)->http, 200u); CHECK_EQ(wifi_core_wx(&g_c)->have_date, 1u);    /* 途切れても状態行と Date: は拾う(g の判定用) */
+    CHECK_EQ(wifi_core_wx(&g_c)->len, WX_BUF_SIZE);
     CHECK(!core_has(BODY_MARK));
 
     begin(SSID_MARK, PASS_MARK); wx_rules(100u);                        /* 2048 バイトの +IPD を 2 回(合計 4096 バイト) */
@@ -2168,6 +2175,189 @@ static void t_wx_overflow(void)
     run(WIFI_RANGE_WX, 30000u);
     CHECK_EQ(wifi_core_wx(&g_c)->err, 7);
     CHECK_EQ(wifi_core_wx(&g_c)->closed, 1);                            /* 超過のデータを捨てても、その後の CLOSED は読める */
+}
+
+/* ---- Phase 0: TLS の検証(design.md §5.5.2): 接続先の選択・SSL のタイムアウト・z の sslconf・ready = err 9・len ---- */
+
+/* Yahoo / Google ふうの応答(天気のキーが無い)。total バイトになるまで本文を埋める。本文の目印は BODY_MARK(消えているかの検査用) */
+static void mk_http_plain(const char *status, size_t total)
+{
+    size_t n = (size_t)snprintf(g_http, sizeof g_http, "%s\r\ndate: Wed, 25 Nov 2026 04:24:13 GMT\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"chart\":\"" BODY_MARK, status);
+
+    CHECK(n + 3u <= total);
+    memset(g_http + n, 'a', total - n - 2u);
+    g_http[total - 2u] = '"';
+    g_http[total - 1u] = '}';
+    g_http[total]      = '\0';
+    g_http_n = total;
+}
+
+/* 取得の台本(接続先 t)。cipstart = AT+CIPSTART の全文(\r\n なし)、conn_delay = CONNECT までの ms。CIPSEND の長さは wx_build_request から作る。
+ * g_rules の順: 0 MUX、1 CLOSE、2 SSLCCONF、3 CIPSTART、4 CIPSEND、5 GET */
+static void tgt_rules(wx_target_t t, const char *cipstart, uint32_t conn_delay, uint32_t get_delay)
+{
+    static char snd[40];
+    char        req[300];
+
+    CHECK(wx_build_request(req, sizeof req, t, 1u) > 0u);
+    (void)snprintf(snd, sizeof snd, "AT+CIPSEND=%u", (unsigned)strlen(req));
+    rule("AT+CIPMUX=0",   0, 20, "OK\r\n");
+    rule("AT+CIPCLOSE",   0, 20, "ERROR\r\n");
+    rule("AT+CIPSSLCCONF=0,0,0", 0, 20, "ERROR\r\n");          /* AT 1.1.3.0 が受け付けるか未確認。ERROR でも先へ進むこと */
+    rule(cipstart,        0, conn_delay, "CONNECT\r\n\r\nOK\r\n");
+    rule(snd,             0, 20, "\r\nOK\r\n> ");
+    rule("GET *",         0, get_delay, g_reply);
+}
+
+#define CIPSTART_YSSL "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443"
+#define CIPSTART_YTCP "AT+CIPSTART=\"TCP\",\"query1.finance.yahoo.com\",80"
+#define CIPSTART_GSSL "AT+CIPSTART=\"SSL\",\"www.google.com\",443"
+
+static void t_wx_target(void)
+{
+    TEST("P0-1 y(Yahoo SSL): CIPSTART=SSL 443・CIPSEND=145・要求は ^N225 の chart・http=200 err=5(天気のキーが無い)・len = 受信バイト数・本文は消える");
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
+    tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 3000u, 300u);
+    mk_http_plain("HTTP/1.0 200 OK", 1840u);
+    mk_reply(1000u, NULL, 1);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(g_nsend, 5);
+    CHECK(strcmp(g_sent[2], CIPSTART_YSSL "\r\n") == 0);
+    CHECK(strcmp(g_sent[3], "AT+CIPSEND=145\r\n") == 0);
+    CHECK(strcmp(g_sent[4], "GET /v8/finance/chart/%5EN225?range=2d&interval=1d HTTP/1.0\r\nHost: query1.finance.yahoo.com\r\n"
+                            "User-Agent: rx72n-stockview/1\r\nConnection: close\r\n\r\n") == 0);
+    CHECK_EQ(count_with("step=wx_sslconf"), 0);
+    CHECK(first_with("step=wx_tcp res=ok try=1 ms=3") >= 0);        /* SSL の接続は 3 秒かかってもよい(20 秒まで) */
+    CHECK(last_is("[wifi] result=fail stage=wx_recv ping_ip=0 ping_dns=0\r\n"));
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 5); CHECK_EQ(wifi_core_wx(&g_c)->http, 200u);
+    CHECK_EQ(wifi_core_wx(&g_c)->len, 1840u); CHECK_EQ(wifi_core_wx(&g_c)->have_date, 1u); CHECK_EQ(wifi_core_wx(&g_c)->closed, 1u);
+    CHECK(!core_has(BODY_MARK));
+    CHECK(!core_has_secret());
+    CHECK_EQ(log_has_secret(), 0);
+
+    TEST("P0-2 t(Yahoo 平文): CIPSTART=TCP 80・301 → err=4 http=301・TCP の接続は 10 秒で時間切れ");
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_TCP);
+    tgt_rules(WX_TGT_YAHOO_TCP, CIPSTART_YTCP, 300u, 300u);
+    mk_http_plain("HTTP/1.1 301 Moved Permanently", 400u);
+    mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(strcmp(g_sent[2], CIPSTART_YTCP "\r\n") == 0);
+    CHECK(strncmp(g_sent[4], "GET /v8/finance/chart/%5EN225?range=2d&interval=1d HTTP/1.0\r\n", 61u) == 0);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 4); CHECK_EQ(wifi_core_wx(&g_c)->http, 301u); CHECK_EQ(wifi_core_wx(&g_c)->len, 400u);
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_TCP);
+    tgt_rules(WX_TGT_YAHOO_TCP, CIPSTART_YTCP, 12000u, 300u);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(first_with("step=wx_tcp res=timeout try=1 ms=10000 code=1") >= 0);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 1); CHECK_EQ(wifi_core_wx(&g_c)->len, 0u);
+
+    TEST("P0-3 SSL の接続は 20 秒まで待つ(19 秒で CONNECT は成功、25 秒は時間切れ err=1)");
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
+    tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 19000u, 300u);
+    mk_http_plain("HTTP/1.0 200 OK", 1800u);
+    mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(wx_step_ok("wx_tcp"), 1); CHECK_EQ(wifi_core_wx(&g_c)->http, 200u);
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
+    tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 25000u, 300u);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(first_with("step=wx_tcp res=timeout try=1 ms=20000 code=1") >= 0);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 1);
+    CHECK(last_is("[wifi] result=fail stage=wx_tcp ping_ip=0 ping_dns=0\r\n"));
+
+    TEST("P0-4 z: wx_close の後に AT+CIPSSLCCONF=0,0,0(ERROR でも先へ)→ y と同じ。時間切れでも先へ。y に戻すと走らない");
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL_NOAUTH);
+    tgt_rules(WX_TGT_YAHOO_SSL_NOAUTH, CIPSTART_YSSL, 2000u, 300u);
+    mk_http_plain("HTTP/1.0 200 OK", 1850u);
+    mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(g_nsend, 6);
+    CHECK(strcmp(g_sent[0], "AT+CIPMUX=0\r\n") == 0); CHECK(strcmp(g_sent[1], "AT+CIPCLOSE\r\n") == 0);
+    CHECK(strcmp(g_sent[2], "AT+CIPSSLCCONF=0,0,0\r\n") == 0);
+    CHECK(strcmp(g_sent[3], CIPSTART_YSSL "\r\n") == 0);
+    CHECK_EQ(count_with("step=wx_sslconf res=ok"), 1); CHECK_EQ(count_with("step=wx_sslconf res=start"), 1);
+    CHECK_EQ(wifi_core_wx(&g_c)->http, 200u); CHECK_EQ(wifi_core_wx(&g_c)->len, 1850u);
+    begin(SSID_MARK, PASS_MARK);                                       /* ESP32 が無応答でも先へ(cont) */
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL_NOAUTH);
+    tgt_rules(WX_TGT_YAHOO_SSL_NOAUTH, CIPSTART_YSSL, 2000u, 300u);
+    g_rules[2].reply = NULL;
+    mk_http_plain("HTTP/1.0 200 OK", 1850u);
+    mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(first_with("step=wx_sslconf res=timeout") >= 0);
+    CHECK_EQ(wx_step_ok("wx_tcp"), 1); CHECK_EQ(wifi_core_wx(&g_c)->http, 200u);
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL_NOAUTH);
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
+    tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 2000u, 300u);
+    mk_http_plain("HTTP/1.0 200 OK", 1850u);
+    mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(g_nsend, 5); CHECK_EQ(count_with("step=wx_sslconf"), 0);
+
+    TEST("P0-5 g(Google SSL): GET / の要求。応答がバッファを超えても http=301 と len=3072(err=7)が残る");
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_target(&g_c, WX_TGT_GOOGLE_SSL);
+    tgt_rules(WX_TGT_GOOGLE_SSL, CIPSTART_GSSL, 2000u, 300u);
+    mk_http_plain("HTTP/1.0 301 Moved Permanently", 3500u);
+    mk_reply(1500u, NULL, 1);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(strcmp(g_sent[2], CIPSTART_GSSL "\r\n") == 0);
+    CHECK(strncmp(g_sent[4], "GET / HTTP/1.0\r\nHost: www.google.com\r\n", 38u) == 0);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 7); CHECK_EQ(wifi_core_wx(&g_c)->http, 301u); CHECK_EQ(wifi_core_wx(&g_c)->len, WX_BUF_SIZE);
+    CHECK_EQ(wifi_core_wx(&g_c)->closed, 1u);
+
+    TEST("P0-6 取得中に ready = ESP32 の再起動 → err=9(wx_recv・wx_tcp・wx_send)。len はそこまでに溜めた分。以後は無視");
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
+    tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 2000u, 300u);
+    mk_http_plain("HTTP/1.0 200 OK", 1000u);
+    rp_start();
+    rp_ipd(g_http, 600u, NULL);
+    RP_LIT("\r\nready\r\n");
+    rp_ipd(g_http + 600, 400u, NULL);                                  /* 再起動の後に届くものは数えない */
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 9); CHECK_EQ(wifi_core_wx(&g_c)->len, 600u); CHECK_EQ(wifi_core_wx(&g_c)->ok, 0);
+    CHECK(first_with("step=wx_recv res=fail try=1") >= 0); CHECK(first_with("code=9") >= 0);
+    CHECK(last_is("[wifi] result=fail stage=wx_recv ping_ip=0 ping_dns=0\r\n"));
+    CHECK_EQ(wifi_core_wx_seq(&g_c), 1u);
+    CHECK(!core_has(BODY_MARK));
+    begin(SSID_MARK, PASS_MARK);                                       /* wx_tcp(ハンドシェイク中の再起動) */
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
+    tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 2000u, 300u);
+    g_rules[3].reply = "ready\r\n";
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 9); CHECK_EQ(wifi_core_wx(&g_c)->len, 0u);
+    CHECK(last_is("[wifi] result=fail stage=wx_tcp ping_ip=0 ping_dns=0\r\n"));
+    begin(SSID_MARK, PASS_MARK);                                       /* wx_send(> を待っている間) */
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);
+    tgt_rules(WX_TGT_YAHOO_SSL, CIPSTART_YSSL, 2000u, 300u);
+    g_rules[4].reply = "ready\r\n";
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 9);
+    CHECK(last_is("[wifi] result=fail stage=wx_send ping_ip=0 ping_dns=0\r\n"));
+
+    TEST("P0-7 wifi_core_set_target: 実行中・範囲外は無視。既定は METEO(CIPSTART は天気の TCP 80・要求は 190 バイト)");
+    begin(SSID_MARK, PASS_MARK);
+    wx_rules(100u);
+    mk_http("HTTP/1.0 200 OK", NULL, "12.7", "0");
+    mk_reply(0u, NULL, 1);
+    CHECK(wifi_core_start(&g_c, WIFI_RANGE_WX, g_now));
+    wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL);                      /* 実行中: 無視 */
+    run_until_done(30000u);
+    expect_ok(1u);
+    CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") == 0);
+    wifi_core_set_target(&g_c, WX_TGT_END);                            /* 範囲外: 無視 */
+    wifi_core_set_target(&g_c, (wx_target_t)200);
+    g_nsend = 0; g_npend = 0; g_nlog = 0; memset(g_used, 0, sizeof g_used);
+    mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") == 0);
 }
 
 static void t_wx_ranges(void)
@@ -2313,6 +2503,7 @@ int main(void)
     t_wx_send_fail();
     t_wx_recv();
     t_wx_overflow();
+    t_wx_target();
     t_wx_ranges();
     t_wx_quiet();
     t_secret();                          /* 最後: g_all(全ログ)を調べる */
