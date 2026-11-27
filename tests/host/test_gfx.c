@@ -427,5 +427,71 @@ int main(void)
         CHECK(guard8_ok());
     }
 
+    TEST("H-C(§13.4) gfx_blit8_key: key の画素は fb を変えず、key 以外が書かれる。src_stride != w、(sx,sy) の部分コピー、key = 0 / 255");
+    {
+        static uint8_t src[100 * 60];
+        unsigned r, c;
+        int ok = 1;
+        unsigned nkey = 0u;
+        for (r = 0u; r < 60u; r++) { for (c = 0u; c < 100u; c++) { src[r * 100u + c] = (uint8_t)(((r + c) % 5u == 0u) ? 1u : (r * 3u + c) % 200u + 10u); } }
+        for (r = 0u; r < 60u; r++) { for (c = 0u; c < 100u; c++) { if (src[r * 100u + c] == 1u) { nkey++; } } }
+        surf8_fill(5u);                                        /* 下地 5(src の値は 1 か 10 以上)。key = 1 の画素は 5 のまま */
+        gfx_blit8_key(g_s8.px, src, 100, 0, 0, 100, 60, 200, 100, 1u);
+        for (r = 0u; r < 60u; r++) {
+            for (c = 0u; c < 100u; c++) {
+                uint8_t want = (src[r * 100u + c] == 1u) ? 5u : src[r * 100u + c];
+                if (g_s8.px[(100u + r) * GFX_STRIDE + 200u + c] != want) { ok = 0; }
+            }
+        }
+        CHECK(ok);
+        CHECK_EQ(count_not8(5u), 6000 - (int)nkey);             /* 書かれたのは key 以外の画素だけ */
+        CHECK(nkey > 1000u);
+        CHECK(guard8_ok());
+        CHECK(margin8_ok(5u));
+        surf8_fill(5u);                                        /* src_stride(100)≠ w(20)・(sx,sy) = (10,5) */
+        gfx_blit8_key(g_s8.px, src, 100, 10, 5, 20, 10, 3, 4, 1u);
+        ok = 1;
+        for (r = 0u; r < 10u; r++) {
+            for (c = 0u; c < 20u; c++) {
+                uint8_t s = src[(5u + r) * 100u + 10u + c];
+                if (g_s8.px[(4u + r) * GFX_STRIDE + 3u + c] != ((s == 1u) ? 5u : s)) { ok = 0; }
+            }
+        }
+        CHECK(ok);
+        surf8_fill(0u);                                         /* key = 0: 0 の画素は書かれない。key = 255 */
+        { static uint8_t k0[8] = { 0, 5, 0, 6, 255, 7, 0, 8 };
+          gfx_blit8_key(g_s8.px, k0, 8, 0, 0, 8, 1, 10, 10, 0u);
+          CHECK_EQ(g_s8.px[10u * GFX_STRIDE + 10u], 0); CHECK_EQ(g_s8.px[10u * GFX_STRIDE + 11u], 5); CHECK_EQ(g_s8.px[10u * GFX_STRIDE + 14u], 255);
+          CHECK_EQ(count_not8(0u), 5);
+          surf8_fill(9u);
+          gfx_blit8_key(g_s8.px, k0, 8, 0, 0, 8, 1, 10, 10, 255u);
+          CHECK_EQ(g_s8.px[10u * GFX_STRIDE + 10u], 0); CHECK_EQ(g_s8.px[10u * GFX_STRIDE + 14u], 9); CHECK_EQ(g_s8.px[10u * GFX_STRIDE + 15u], 7);
+          CHECK_EQ(count_not8(9u), 7); }
+        surf8_fill(0u);                                         /* 左上にはみ出し: ソースの (30,20) から。key の画素は書かれない */
+        gfx_blit8_key(g_s8.px, src, 100, 0, 0, 100, 60, -30, -20, 1u);
+        ok = 1;
+        for (r = 0u; r < 40u; r++) { for (c = 0u; c < 70u; c++) { uint8_t s = src[(20u + r) * 100u + 30u + c]; if (g_s8.px[r * GFX_STRIDE + c] != ((s == 1u) ? 0u : s)) { ok = 0; } } }
+        CHECK(ok);
+        surf8_fill(0u);                                         /* 右下にはみ出し(480..511 と面の下へは書かない) */
+        gfx_blit8_key(g_s8.px, src, 100, 0, 0, 100, 60, 440, 250, 1u);
+        ok = 1;
+        for (r = 0u; r < 22u; r++) { for (c = 0u; c < 40u; c++) { uint8_t s = src[r * 100u + c]; if (g_s8.px[(250u + r) * GFX_STRIDE + 440u + c] != ((s == 1u) ? 0u : s)) { ok = 0; } } }
+        CHECK(ok);
+        CHECK(margin8_ok(0u));
+        CHECK(guard8_ok());
+        surf8_fill(0u);                                         /* 幅 0・負・完全に外・NULL(何もしない)。加算あふれを起こしうる値 */
+        gfx_blit8_key(g_s8.px, src, 100, 0, 0, 0, 10, 0, 0, 1u);
+        gfx_blit8_key(g_s8.px, src, 100, 0, 0, 10, -1, 0, 0, 1u);
+        gfx_blit8_key(g_s8.px, src, 100, 0, 0, 10, 10, 480, 0, 1u);
+        gfx_blit8_key(g_s8.px, src, 100, 0, 0, 10, 10, -10, 0, 1u);
+        gfx_blit8_key(g_s8.px, src, 100, 0, 0, 10, 10, 0, 272, 1u);
+        gfx_blit8_key(g_s8.px, NULL, 100, 0, 0, 10, 10, 0, 0, 1u);
+        gfx_blit8_key(NULL, src, 100, 0, 0, 10, 10, 0, 0, 1u);
+        gfx_blit8_key(g_s8.px, src, 100, 0, 0, 2147483000, 10, 2147483000, 0, 1u);
+        CHECK_EQ(count_not8(0u), 0);
+        CHECK(guard8_ok());
+        CHECK(margin8_ok(0u));
+    }
+
     TEST_REPORT("test_gfx");
 }

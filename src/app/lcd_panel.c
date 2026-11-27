@@ -128,6 +128,32 @@ lcd_flip_t lcd_flip(uint8_t i)
     return LCD_FLIP_FAIL;
 }
 
+/* パレット + 面を同時に入れ替える(§13.2 の 4a)。NoReflect は 1 回だけ。BufferChange の BUSY は再試行させない(NoReflect が 2 回になり、表示中のパレットが壊れる) */
+lcd_flip_t lcd_flip_pal(uint8_t i, const uint32_t *pal)
+{
+    glcdc_clut_cfg_t clut;
+    glcdc_err_t err;
+
+    clut.enable = true;
+    clut.p_base = (uint32_t *)(uintptr_t)pal;
+    clut.start  = 0u;
+    clut.size   = 256u;
+    err = R_GLCDC_ClutUpdate_NoReflect(GLCDC_FRAME_LAYER_2, &clut);
+    if (err == GLCDC_ERR_INVALID_UPDATE_TIMING) {
+        return LCD_FLIP_BUSY;                    /* 何も書いていない */
+    }
+    if (err != GLCDC_SUCCESS) {
+        app_debug_set_err(APP_ERR_LCD_CLUT, (uint32_t)err);
+        return LCD_FLIP_FAIL;
+    }
+    err = R_GLCDC_BufferChange(GLCDC_FRAME_LAYER_2, (uint32_t const *)lcd_fb(i));
+    if (err == GLCDC_SUCCESS) {
+        return LCD_FLIP_OK;
+    }
+    app_debug_set_err(APP_ERR_LCD_FLIP, (uint32_t)err);
+    return LCD_FLIP_FAIL;
+}
+
 /* 反映待ちの間 VEN = 1(R_GLCDC_BufferChange が INVALID_UPDATE_TIMING を返す条件と同じレジスタ) */
 bool lcd_flip_busy(void)
 {

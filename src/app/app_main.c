@@ -1,7 +1,9 @@
-/* app_main.c - 株価ビュー(docs/design.md §7.2)。取得の結果(stk_ui)を表示(ui_set_view -> ui_render)へつなぐ
+/* app_main.c - 株価ビュー(docs/design.md §7.2・§13)。取得の結果(stk_ui)を表示(ui_set_view -> ui_render)へつなぐ。時計・天気画面との切り替えは ui_screen_step
  * 起動: app_log_init -> [boot] -> ui_init + 面0に描画 -> lcd_init -> touch_init -> 10msタイマ -> [perf] -> wx_init -> ループ
  * ループ: app_log_poll -> 反映待ちの完了確認 -> (10msごと)[hb]/[err]/UART1文字/touch/stk_ui -> ui_set_view/ui_update/[ev]+更新要求 -> wx_poll(APP_WX_PRODUCT) -> 描画(裏面 -> 入れ替え)
- * 表示の入力: APP_STK_PREVIEW = 1 は決まった 8 状態、APP_WX_PRODUCT = 1 は取得の結果(stk_ui)、どちらも 0 は「起動中・オフライン」のまま。
+ * 表示の入力: APP_STK_PREVIEW = 1 は決まった 8 状態、APP_CLK_PREVIEW = 1 / 2 は決まった株価 + 時計・天気(§13.2)、APP_WX_PRODUCT = 1 は取得の結果(stk_ui)、どれも 0 は「起動中・オフライン」のまま。
+ * 時計・天気画面の値(ui_set_clk)は、6d(天気の取得との結合)までプレビューだけが渡す。渡さない間は時刻未同期 = 株価画面のまま切り替わらない。
+ * 描画: 画面のパレットが今表示中のものと違うときは、lcd_flip_pal(NoReflect 1 回 + BufferChange)で面とパレットを同じ垂直同期で入れ替える。
  * UART出力の仕様: docs/design-uart.md §10・docs/design.md §7.5。ログ用の大きいバッファは static(メインループ専用。割り込みから使わない)。 */
 #include <stdint.h>
 #include <stdbool.h>
@@ -19,6 +21,9 @@
 #include "ui_logic.h"
 #include "ui_render.h"
 #include "ui_assets.h"
+#if APP_CLK_PREVIEW
+#include "clk_assets.h"
+#endif
 #include "app_main.h"
 #if APP_WIFI_ON
 #include "wifi_at.h"
@@ -28,7 +33,7 @@
 #define APP_HB_TICKS       (APP_TICK_HZ)              /* [hb] 周期 = 1秒(100tick) */
 #define APP_ERR_A_TICKS    (10u)                      /* [err] (A) は100msに1行まで */
 #define APP_ERR_B_TICKS    (APP_TICK_HZ)              /* [err] (B) は1秒に1行まで */
-#define APP_PREVIEW_TICKS  (300u)                     /* APP_STK_PREVIEW: 8 状態を 3 秒ごとに切り替える */
+#define APP_PREVIEW_TICKS  (300u)                     /* APP_STK_PREVIEW: 8 状態を 3 秒ごとに切り替える。APP_CLK_PREVIEW = 1: 株価 ↔ 時計・天気を 3 秒ごと */
 
 static volatile uint32_t s_tick;                 /* 10ms ごとに +1(CMT割り込み) */
 
@@ -39,6 +44,20 @@ static stk_view_t s_view;                        /* 取得の結果から作っ�
 static uint8_t s_back;                           /* 次に描く面(表示中でない方)。表示中 = s_back ^ 1 */
 static bool    s_flip_pending;                   /* lcd_flip を受け付けた。表示面が変わるまで裏面に書かない */
 static bool    s_draw_ok;                        /* LCD が使える(lcd_init 成功、flip の致命エラーなし) */
+static uint8_t s_pal_shown;                      /* 今表示しているパレット番号(0 = 株価。R_GLCDC_Open が ui_pal を書いた) */
+static uint8_t s_pal_next;                       /* 受け付けた入れ替えのパレット番号(完了で s_pal_shown になる) */
+
+#if APP_CLK_PREVIEW
+/* 株価画面の固定の表示値(状態 S1 と同じ。ui_preview_view は APP_STK_PREVIEW = 1 のときだけ作られるため、ここに持つ) */
+static const stk_view_t s_clk_stock = {
+    .net = (uint8_t)STK_NET_ON, .have_any = 1u, .clock_min = 555u, .upd_min = 552u,
+    .row = {
+        { .have = 1u, .mkt = (uint8_t)STK_MKT_TRADING, .price_x100 = 243300,  .diff_x100 = 5500,   .pct_bp = 231 },
+        { .have = 1u, .mkt = (uint8_t)STK_MKT_TRADING, .price_x100 = 5754123, .diff_x100 = -13313, .pct_bp = -23 },
+        { .have = 1u, .mkt = (uint8_t)STK_MKT_CLOSED,  .price_x100 = 718278,  .diff_x100 = 0,      .pct_bp = 0 },
+    },
+};
+#endif
 
 /* ログ用(メインループ専用) */
 static char           s_line[APPLOG_LINE_MAX];
@@ -118,6 +137,15 @@ static void log_event(const ui_ev_t *e)
     if (e->type == (uint8_t)UI_EV_TAP) {
         emit(applog_fmt_ev_tap(s_line, sizeof(s_line), (e->src == (uint8_t)UI_SRC_TOUCH) ? "touch" : "uart"));
     }
+}
+
+/* 入れ替えを受け付けた画面を `[scr] ...` にする(設計 §13.9。受け付けるたびに 1 行)。tick は [hb] と同じ 10ms カウンタ */
+static void log_scr(uint8_t pal)
+{
+    const clk_view_t *c = &s_ui.cview;
+
+    emit(applog_fmt_scr(s_line, sizeof(s_line), s_ui.screen == (uint8_t)UI_SCR_CLOCK, pal, c->clock_min,
+                        clk_view_kind(c), c->have != 0u, c->temp, g_app_dbg.tick));
 }
 
 /* [err] (A) g_app_dbg の (err_code, err_detail) の変化 / (B) UART受信異常 */
@@ -200,11 +228,30 @@ static void tick_step(uint32_t now, uint32_t *last_hb, uint32_t *last_uf, bool t
     }
 #if APP_STK_PREVIEW
     ui_set_view(&s_ui, &ui_preview_view[(now / APP_PREVIEW_TICKS) % UI_PREVIEW_N]);   /* 8 つの決まった状態を 3 秒ごとに */
+#elif APP_CLK_PREVIEW == 1
+    {   /* 株価(S1)↔ 時計・天気(C0〜C11 を順に)を 3 秒ごとに。偶数番 = 株価、奇数番 = 時計・天気 C((番 - 1) / 2 mod 12)。画面は tick で決める */
+        static uint32_t n_last;
+        uint32_t n = now / APP_PREVIEW_TICKS;
+
+        ui_set_view(&s_ui, &s_clk_stock);
+        ui_set_clk(&s_ui, &clk_preview_view[(n / 2u) % CLK_PREVIEW_N]);
+        if (n != n_last) {
+            n_last = n;
+            ui_set_screen(&s_ui, (uint8_t)(n & 1u), now_ms);
+        }
+    }
+#elif APP_CLK_PREVIEW == 2
+    ui_set_view(&s_ui, &s_clk_stock);                     /* 固定の値(C0 = 09:41 晴れ 18°)を、本物の切り替え(ui_screen_step)で */
+    ui_set_clk(&s_ui, &clk_preview_view[0]);
 #elif APP_WX_PRODUCT
     stk_ui(&s_view, now_ms);     /* 3 銘柄の値・市場の状態・Wi-Fi の状態・時計・更新時刻(設計 §3.9・§4.4) */
     ui_set_view(&s_ui, &s_view);
 #endif
     ui_update(&s_ui, real, now_ms);
+#if (!APP_STK_PREVIEW) && (APP_CLK_PREVIEW != 1)
+    ui_screen_step(&s_ui, now_ms);   /* 株価 10 秒 ↔ 時計・天気 5 秒。時刻が分かるまで(cview が未同期の間)は株価のまま */
+#endif
+    g_app_dbg.scr = s_ui.screen;     /* [hb] の scr(製品では 0 = 株価、1 = 時計・天気) */
     while (ui_event_pop(&s_ui, &ev)) {
         log_event(&ev);
 #if APP_WX_PRODUCT
@@ -220,14 +267,20 @@ static void tick_step(uint32_t now, uint32_t *last_hb, uint32_t *last_uf, bool t
 /* 描画: 表示キーが変わり、前回の入れ替えが済んでいれば、裏面に全画面を描いて入れ替えを依頼する */
 static void draw_step(void)
 {
+    uint8_t pal;
+
     if (!s_draw_ok || s_flip_pending || !ui_view_changed(&s_ui)) {
         return;
     }
+    pal = ui_pal_id(&s_ui);
     ui_render(&s_ui, lcd_fb(s_back));
-    switch (lcd_flip(s_back)) {
+    /* パレットが変わるときだけ lcd_flip_pal(NoReflect は 1 回)。同じなら今までどおり(§13.2 の 4) */
+    switch ((pal != s_pal_shown) ? lcd_flip_pal(s_back, ui_pal_ptr(pal)) : lcd_flip(s_back)) {
     case LCD_FLIP_OK:
         s_flip_pending = true;
+        s_pal_next = pal;
         ui_view_mark(&s_ui);
+        log_scr(pal);
         break;
     case LCD_FLIP_FAIL:
         s_draw_ok = false;       /* 致命: 描画を止める(表示は直前の絵のまま)。APP_ERR_LCD_FLIP は lcd_flip が記録 */
@@ -284,6 +337,8 @@ void app_main(void)
     ui_init(&s_ui, 0u);
 #if APP_STK_PREVIEW
     ui_set_view(&s_ui, &ui_preview_view[0]);
+#elif APP_CLK_PREVIEW
+    ui_set_view(&s_ui, &s_clk_stock);
 #endif
     ui_render(&s_ui, lcd_fb(0u));
     ui_view_mark(&s_ui);
@@ -323,6 +378,7 @@ void app_main(void)
         if (s_flip_pending && !lcd_flip_busy()) {   /* 入れ替わった: 前面 = 今まで裏面だった方 */
             s_flip_pending = false;
             s_back ^= 1u;
+            s_pal_shown = s_pal_next;
             g_app_dbg.frames++;
         }
         now = s_tick;

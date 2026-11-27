@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <setjmp.h>
 #include "test_framework.h"
@@ -82,10 +83,21 @@ static unsigned g_n_lcd_init, g_n_touch_init, g_n_touch_read;
 static int      g_busy;                           /* 入れ替えの反映待ち(周回数) */
 static uint8_t  g_pending, g_front;               /* 受け付けた面 / 今の表示面 */
 static unsigned g_flip_n; static uint8_t g_flip_log[64];
+static const uint32_t *g_flip_pal_log[512];       /* 受け付けた入れ替えのパレット(lcd_flip = NULL、lcd_flip_pal = 渡された配列) */
+static const uint32_t *g_pending_pal, *g_front_pal;   /* 受け付けたパレット(NULL = 変えない)/ 今表示しているパレット */
+static unsigned g_n_flip_pal, g_n_pal_same;       /* lcd_flip_pal の回数 / 今表示中と同じパレットでの lcd_flip_pal(§13.2 の 4 の違反) */
+#if APP_CLK_PREVIEW
+#define SNAP_N (32u)
+static uint8_t g_snap[SNAP_N][FB_BYTES];          /* 入れ替えを受け付けた時の面の中身(i 番目の入れ替え = g_snap[i]) */
+#define SNAP(i, n) do { if ((n) < SNAP_N) { memcpy(g_snap[(n)], g_fb[(i) & 1u], FB_BYTES); } } while (0)
+#else
+#define SNAP(i, n) ((void)0)
+#endif
 
 bool lcd_init(void)
 {
     g_n_lcd_init++;
+    g_front_pal = ui_pal;                             /* R_GLCDC_Open が ui_pal を書く(起動時の表示) */
     memcpy(g_fb0_at_init, g_fb[0], FB_BYTES);
 #ifdef T_LCD_FAIL
     app_debug_set_err(APP_ERR_LCD_OPEN, 3u);
@@ -100,7 +112,24 @@ lcd_flip_t lcd_flip(uint8_t i)
     if (g_busy > 0) { return LCD_FLIP_BUSY; }
     g_busy = 2;
     g_pending = i;
+    g_pending_pal = NULL;
+    SNAP(i, g_flip_n);
     if (g_flip_n < sizeof g_flip_log) { g_flip_log[g_flip_n] = i; }
+    if (g_flip_n < sizeof g_flip_pal_log / sizeof g_flip_pal_log[0]) { g_flip_pal_log[g_flip_n] = NULL; }
+    g_flip_n++;
+    return LCD_FLIP_OK;
+}
+lcd_flip_t lcd_flip_pal(uint8_t i, const uint32_t *pal)
+{
+    if (g_busy > 0) { return LCD_FLIP_BUSY; }
+    g_n_flip_pal++;
+    if (pal == g_front_pal) { g_n_pal_same++; }
+    g_busy = 2;
+    g_pending = i;
+    g_pending_pal = pal;
+    SNAP(i, g_flip_n);
+    if (g_flip_n < sizeof g_flip_log) { g_flip_log[g_flip_n] = i; }
+    if (g_flip_n < sizeof g_flip_pal_log / sizeof g_flip_pal_log[0]) { g_flip_pal_log[g_flip_n] = pal; }
     g_flip_n++;
     return LCD_FLIP_OK;
 }
@@ -155,7 +184,7 @@ static void loop_hook(void)
     g_iter++;
     if (g_busy > 0) {
         g_busy--;
-        if (g_busy == 0) { g_front = g_pending; }
+        if (g_busy == 0) { g_front = g_pending; if (g_pending_pal != NULL) { g_front_pal = g_pending_pal; } }
     }
     if (g_iter > g_max_iter) { longjmp(g_jb, 1); }
     if (g_cb != NULL) {                           /* 1 周回 = 10ms */
@@ -196,6 +225,21 @@ static bool same_left480(const uint8_t *a, const uint8_t *b)
     return true;
 }
 static bool front_is(const stk_view_t *v) { render_ref(v); return same_left480(g_fb[g_front], g_ref); }
+
+/* i 番目の [scr] 行(0 起点)を探して、期待の前半と tick を調べる。tick は want_tick */
+static bool scr_line_is(unsigned idx, bool to_clock, const clk_view_t *c, uint32_t want_tick)
+{
+    char want[160];
+    int at = -1;
+    unsigned i, seen = 0u;
+    size_t n;
+    const char *tk;
+
+    for (i = 0u; i < g_nlines; i++) { if (strncmp(g_lines[i], "[scr] ", 6) == 0) { if (seen == idx) { at = (int)i; break; } seen++; } }
+    if (at < 0) { return false; }
+    n = applog_fmt_scr(want, sizeof want, to_clock, (uint8_t)(to_clock ? (1u + clk_view_kind(c)) : 0u), c->clock_min, clk_view_kind(c), c->have != 0u, c->temp, want_tick);
+    return (n != 0u) && (strcmp(g_lines[at], want) == 0) && ((tk = strstr(g_lines[at], "tick=")) != NULL) && ((uint32_t)strtoul(tk + 5, NULL, 10) == want_tick);
+}
 
 static void run(unsigned max_iter)
 {
@@ -357,6 +401,14 @@ int main(void)
     CHECK_EQ(count_prefix("[ev] scr="), 0);
     CHECK_EQ(g_app_dbg.raw_points, 0);                                    /* 離した後は 0 */
 
+    TEST("[scr](§13.9): 入れ替えを受け付けるたびに 1 行。既定の製品(時計・天気の値を渡さない 6b)は株価画面のまま = to=stock pal=0 clk=none。lcd_flip_pal は呼ばない");
+    CHECK_EQ(count_prefix("[scr] "), g_flip_n);
+    CHECK_EQ(count_prefix("[scr] to=stock pal=0 clk=none kind=none temp=none tick="), g_flip_n);
+    CHECK_EQ(g_n_flip_pal, 0);
+    CHECK_EQ(g_app_dbg.scr, 0);
+    CHECK_EQ(s_ui.screen, UI_SCR_STOCK);
+    CHECK_EQ(s_pal_shown, 0);
+
     TEST("UART: s = [st] + wx_log_state 1 回、? = 新しい [help]、n p d + - X は無視(行も更新要求も出ない)");
     CHECK_EQ(count_prefix("[st] "), 1);
     CHECK_EQ(g_n_wx_state, 1);
@@ -372,6 +424,145 @@ int main(void)
     CHECK_EQ(g_drops, 0);
 
     TEST_REPORT("test_app_main(製品)");
+}
+
+/* ================================================================ 時計・天気のプレビュー(APP_CLK_PREVIEW = 1: 3 秒ごと / 2: 本物の切り替え) */
+#elif APP_CLK_PREVIEW
+
+static bool snap_is_stock(unsigned n) { render_ref(&s_clk_stock); return same_left480(g_snap[n], g_ref); }
+static bool snap_is_clock(unsigned n, const clk_view_t *c)
+{
+    static ui_t r;
+    ui_init(&r, 0u);
+    ui_set_clk(&r, c);
+    ui_set_screen(&r, UI_SCR_CLOCK, 0u);
+    memset(g_ref, 0xA5, sizeof g_ref);
+    ui_render(&r, g_ref);
+    return same_left480(g_snap[n], g_ref);
+}
+
+#if APP_CLK_PREVIEW == 1
+int main(void)
+{
+    unsigned n, bad_snap = 0u, bad_pal = 0u, bad_scr = 0u;
+    const unsigned flips = 2u * CLK_PREVIEW_N;                             /* 24。偶数番 = 株価、奇数番 = 時計・天気 C((番 - 1) / 2) */
+    const unsigned ticks = flips * APP_PREVIEW_TICKS + 50u;
+
+    memset(g_fb, 0xCC, sizeof g_fb);
+    run(ticks);
+
+    TEST("APP_CLK_PREVIEW = 1: 面 0 は株価(S1)。300 tick ごとに 株価 ↔ 時計・天気(C0〜C11 を順に)。毎回パレットが入れ替わる(lcd_flip_pal)");
+    check_boot_lines();
+    render_ref(&s_clk_stock);
+    CHECK(same_left480(g_fb0_at_init, g_ref));
+    CHECK_EQ(g_flip_n, flips);
+    CHECK_EQ(g_n_flip_pal, flips);                                          /* どの入れ替えもパレットが変わる(間に株価か時計・天気が入る) */
+    CHECK_EQ(g_n_pal_same, 0);                                              /* 表示中と同じパレットで lcd_flip_pal を呼ばない */
+    for (n = 1u; n <= flips; n++) {
+        bool clock = ((n & 1u) != 0u);
+        const clk_view_t *c = &clk_preview_view[(n / 2u) % CLK_PREVIEW_N];
+        if (g_flip_log[n - 1u] != (n & 1u)) { bad_snap++; }                 /* 面は 1,0,1,… */
+        if (g_flip_pal_log[n - 1u] != ui_pal_ptr((uint8_t)(clock ? (1u + clk_view_kind(c)) : 0u))) { bad_pal++; }
+        if (clock ? !snap_is_clock(n - 1u, c) : !snap_is_stock(n - 1u)) { bad_snap++; }
+        if (!scr_line_is(n - 1u, clock, c, n * APP_PREVIEW_TICKS)) { bad_scr++; }
+    }
+    CHECK_EQ(bad_snap, 0);
+    CHECK_EQ(bad_pal, 0);
+    CHECK_EQ(bad_scr, 0);
+    CHECK_EQ(count_prefix("[scr] "), flips);
+    CHECK_EQ(g_front_pal, ui_pal);                                          /* 最後(24 番 = 偶数)は株価 */
+    CHECK_EQ(s_pal_shown, 0);
+    CHECK_EQ(g_app_dbg.scr, 0);
+    CHECK(front_is(&s_clk_stock));
+    CHECK_EQ(g_n_wx_init + g_n_wx_poll + g_n_req, 0);
+    CHECK_EQ(g_drops, 0);
+    CHECK_EQ(count_prefix("[err] "), 0);
+    TEST_REPORT("test_app_main(時計・天気のプレビュー 1)");
+}
+#else
+int main(void)
+{
+    static const cmd_t cmds[] = { { 1100u, 'x' } };                         /* 時計・天気画面(tick 1000〜1500)の途中でタップ */
+    unsigned bad_snap = 0u, bad_scr = 0u, i;
+    static const struct { uint32_t tick; bool clock; } want[] = {
+        { 1000u, true }, { 1100u, false }, { 2099u, true }, { 2599u, false }, { 3599u, true }, { 4099u, false }   /* x の t_scr は直前の ui_update の時刻(10ms 前)= 設計 §13.3。tap から 999 tick 後 */
+    };
+    const unsigned nflip = sizeof want / sizeof want[0];
+
+    g_cmds = cmds; g_ncmds = 1u;
+    memset(g_fb, 0xCC, sizeof g_fb);
+    run(4200u);
+
+    TEST("APP_CLK_PREVIEW = 2: 固定の値(C0)を本物の切り替えで。株価 10 秒 → 時計・天気 5 秒 → …。時計・天気でのタップ(x)は株価へ戻し、次の時計・天気までが 10 秒");
+    check_boot_lines();
+    CHECK_EQ(g_flip_n, nflip);
+    CHECK_EQ(g_n_flip_pal, nflip);
+    CHECK_EQ(g_n_pal_same, 0);
+    for (i = 0u; i < nflip; i++) {
+        if (g_flip_log[i] != ((i + 1u) & 1u)) { bad_snap++; }
+        if (want[i].clock ? !snap_is_clock(i, &clk_preview_view[0]) : !snap_is_stock(i)) { bad_snap++; }
+        if (g_flip_pal_log[i] != ui_pal_ptr(want[i].clock ? (uint8_t)(1u + CLK_SUN) : 0u)) { bad_snap++; }
+        if (!scr_line_is(i, want[i].clock, &clk_preview_view[0], want[i].tick)) { bad_scr++; }
+    }
+    CHECK_EQ(bad_snap, 0);
+    CHECK_EQ(bad_scr, 0);
+    if (bad_scr != 0u) { for (i = 0u; i < g_nlines; i++) { if (strncmp(g_lines[i], "[scr] ", 6) == 0) { printf("  %s", g_lines[i]); } } }
+    CHECK_EQ(count_prefix("[scr] "), nflip);
+    CHECK_EQ(count_prefix("[ev] btn=tap src=uart\r\n"), 1);
+    CHECK_EQ(g_app_dbg.scr, 0);
+    CHECK_EQ(g_drops, 0);
+    TEST_REPORT("test_app_main(時計・天気のプレビュー 2)");
+}
+#endif
+
+/* ================================================================ 時計・天気の値を注入(既定の製品に近い。取得なし + 本物の ui_screen_step)。同じパレットの再描画は lcd_flip */
+#elif defined(T_CLK_INJECT)
+
+static clk_view_t g_inj(uint16_t m, uint8_t kind)
+{
+    clk_view_t c;
+    memset(&c, 0, sizeof c);
+    c.clock_min = m; c.kind = kind; c.have = 1u; c.temp = 18; c.mon = 11u; c.day = 27u; c.wday = 5u;
+    return c;
+}
+
+static void inject_tick(uint32_t t)
+{
+    clk_view_t c = g_inj(581u, CLK_SUN);
+
+    if (t == 100u)  { ui_set_clk(&s_ui, &c); }                         /* 時刻が分かった(株価画面にいる間は見えない) */
+    if (t == 1200u) { c = g_inj(582u, CLK_SUN);  ui_set_clk(&s_ui, &c); }    /* 分が変わった(時計・天気画面。同じパレット) */
+    if (t == 1300u) { c = g_inj(582u, CLK_RAIN); ui_set_clk(&s_ui, &c); }    /* 天気が変わった(別のパレット) */
+    if (t == 1600u) { c = g_inj(583u, CLK_RAIN); ui_set_clk(&s_ui, &c); }    /* 株価画面にいる間の変化(再描画しない) */
+}
+
+int main(void)
+{
+    const clk_view_t c0 = g_inj(581u, CLK_SUN), c1 = g_inj(582u, CLK_SUN), c2 = g_inj(582u, CLK_RAIN);
+
+    g_on_tick = inject_tick;
+    memset(g_fb, 0xCC, sizeof g_fb);
+    run(2000u);
+
+    TEST("時計・天気の値を渡すと(6d の結合の前段): 時刻が分かるまで切り替わらず、10 秒後に時計・天気へ(lcd_flip_pal)、同じパレットの再描画は lcd_flip、天気が変わればパレット入れ替え、5 秒後に株価へ");
+    check_boot_lines();
+    CHECK_EQ(g_flip_n, 4);
+    CHECK_EQ(g_n_flip_pal, 3);                                              /* 1000(株価 → 時計・天気)、1300(天気が変わる)、1500(→ 株価) */
+    CHECK_EQ(g_n_pal_same, 0);
+    CHECK(g_flip_pal_log[0] == ui_pal_ptr(1u + CLK_SUN));
+    CHECK(g_flip_pal_log[1] == NULL);                                       /* 1200: 分だけ変わった = 同じパレット = lcd_flip */
+    CHECK(g_flip_pal_log[2] == ui_pal_ptr(1u + CLK_RAIN));
+    CHECK(g_flip_pal_log[3] == ui_pal_ptr(0u));
+    CHECK(scr_line_is(0u, true, &c0, 1000u));
+    CHECK(scr_line_is(1u, true, &c1, 1200u));
+    CHECK(scr_line_is(2u, true, &c2, 1300u));
+    CHECK(scr_line_is(3u, false, &c2, 1500u));                              /* 株価画面でも clk / kind / temp が付く(その時の時計・天気の値) */
+    CHECK_EQ(count_prefix("[scr] "), 4);
+    CHECK_EQ(g_front_pal, ui_pal);
+    CHECK_EQ(s_pal_shown, 0);
+    CHECK_EQ(g_app_dbg.scr, 0);
+    CHECK_EQ(g_drops, 0);
+    TEST_REPORT("test_app_main(時計・天気の値を注入)");
 }
 
 /* ================================================================ 取得なし(APP_WX = 0。プレビューでもない) */
@@ -420,6 +611,8 @@ int main(void)
     for (i = 0u; i < g_flip_n; i++) { CHECK_EQ(g_flip_log[i], (i + 1u) & 1u); }
     CHECK(front_is(&ui_preview_view[0]));
     CHECK(!front_is(&ui_preview_view[1]));
+    CHECK_EQ(count_prefix("[scr] to=stock pal=0 clk=none kind=none temp=none tick="), g_flip_n);   /* 株価だけ(時計・天気へは切り替わらない) */
+    CHECK_EQ(g_n_flip_pal, 0);
     CHECK_EQ(g_n_wx_init + g_n_wx_poll + g_n_req, 0);
     CHECK_EQ(g_drops, 0);
     TEST_REPORT("test_app_main(プレビュー)");

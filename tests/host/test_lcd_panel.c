@@ -172,10 +172,31 @@ static void test_init_failures(void)
 #define PB(x) ((uint32_t)(uintptr_t)(x))
 
 /* ---- 2面と入れ替え(v2): R_GLCDC_BufferChange / GetStatus / Control の偽物 ---- */
+static char g_seq[64];                 /* GLCDC の書き込み系 API の呼び出し順: C = ClutUpdate_NoReflect(成功)、c = 同(失敗・反映待ち)、B = BufferChange、U = ClutUpdate(反映つき。呼んではいけない) */
+static unsigned g_seq_n;
+static void seq_add(char c) { if (g_seq_n < sizeof(g_seq) - 1u) { g_seq[g_seq_n++] = c; g_seq[g_seq_n] = '\0'; } }
+static glcdc_err_t g_clut_ret = GLCDC_SUCCESS;
+static unsigned g_clut_calls;
+static glcdc_frame_layer_t g_clut_frame;
+static glcdc_clut_cfg_t g_clut_cfg;
+
 glcdc_err_t R_GLCDC_BufferChange(glcdc_frame_layer_t frame, uint32_t const * const p_base)
 {
     g_bc_calls++; g_bc_frame = frame; g_bc_base = p_base;
+    seq_add('B');
     return g_bc_ret;
+}
+glcdc_err_t R_GLCDC_ClutUpdate_NoReflect(glcdc_frame_layer_t frame, glcdc_clut_cfg_t const * const p_clut_cfg)
+{
+    g_clut_calls++; g_clut_frame = frame; g_clut_cfg = *p_clut_cfg;
+    seq_add((g_clut_ret == GLCDC_SUCCESS) ? 'C' : 'c');
+    return g_clut_ret;
+}
+glcdc_err_t R_GLCDC_ClutUpdate(glcdc_frame_layer_t frame, glcdc_clut_cfg_t const * const p_clut_cfg)
+{
+    (void)frame; (void)p_clut_cfg;
+    seq_add('U');
+    return GLCDC_SUCCESS;
 }
 glcdc_err_t R_GLCDC_GetStatus(glcdc_status_t * const p_status)
 {
@@ -370,12 +391,89 @@ static void test_fit_param_check(void)
     CHECK_EQ(param_check(&c), GLCDC_ERR_INVALID_ARG);
 }
 
+static void seq_reset(void) { g_seq_n = 0u; g_seq[0] = '\0'; g_bc_calls = 0u; g_clut_calls = 0u; g_err_code = 0u; g_err_detail = 0u; }
+
+static void test_flip_pal(void)
+{
+    static uint32_t pal[256];
+    lcd_flip_t r;
+
+    TEST("H-C9 lcd_flip_pal (i): パレットが変わる入れ替えで ClutUpdate_NoReflect がちょうど 1 回、その直後に BufferChange(GR2・面のアドレス)。ClutUpdate(反映つき)は呼ばない");
+    seq_reset(); g_clut_ret = GLCDC_SUCCESS; g_bc_ret = GLCDC_SUCCESS;
+    r = lcd_flip_pal(1u, pal);
+    CHECK_EQ(r, LCD_FLIP_OK);
+    CHECK(strcmp(g_seq, "CB") == 0);
+    CHECK_EQ(g_clut_calls, 1);
+    CHECK_EQ(g_bc_calls, 1);
+    CHECK_EQ(g_clut_frame, GLCDC_FRAME_LAYER_2);
+    CHECK_EQ(g_clut_cfg.enable, 1);
+    CHECK(g_clut_cfg.p_base == pal);
+    CHECK_EQ(g_clut_cfg.start, 0);
+    CHECK_EQ(g_clut_cfg.size, 256);
+    CHECK_EQ(g_bc_frame, GLCDC_FRAME_LAYER_2);
+    CHECK_EQ(PB(g_bc_base), 0x00822000u);
+    CHECK_EQ(g_err_code, 0);
+    seq_reset();
+    CHECK_EQ(lcd_flip_pal(0u, pal), LCD_FLIP_OK);
+    CHECK(strcmp(g_seq, "CB") == 0);
+    CHECK_EQ(PB(g_bc_base), 0x00800000u);
+
+    TEST("H-C9 (ii) 同じパレットなら lcd_flip だけ(BufferChange だけで NoReflect を呼ばない)");
+    seq_reset();
+    CHECK_EQ(lcd_flip(1u), LCD_FLIP_OK);
+    CHECK(strcmp(g_seq, "B") == 0);
+
+    TEST("H-C9 (iii) NoReflect が反映待ち(INVALID_UPDATE_TIMING)なら BufferChange を呼ばず BUSY(何も記録しない)。やり直しても NoReflect は成功まで 1 回ずつ");
+    seq_reset(); g_clut_ret = GLCDC_ERR_INVALID_UPDATE_TIMING;
+    CHECK_EQ(lcd_flip_pal(1u, pal), LCD_FLIP_BUSY);
+    CHECK(strcmp(g_seq, "c") == 0);
+    CHECK_EQ(g_err_code, 0);
+    CHECK_EQ(lcd_flip_pal(1u, pal), LCD_FLIP_BUSY);                 /* 再試行(NoReflect は成功していないので、2 回目ではない) */
+    CHECK(strcmp(g_seq, "cc") == 0);
+    g_clut_ret = GLCDC_SUCCESS;
+    CHECK_EQ(lcd_flip_pal(1u, pal), LCD_FLIP_OK);
+    CHECK(strcmp(g_seq, "ccCB") == 0);                              /* 成功した 1 回の後に BufferChange が 1 回 */
+
+    TEST("H-C9 (iv) NoReflect の失敗(反映待ち以外)= APP_ERR_LCD_CLUT を記録して FAIL。BufferChange は呼ばない");
+    seq_reset(); g_clut_ret = GLCDC_ERR_INVALID_CLUT_ACCESS;
+    CHECK_EQ(lcd_flip_pal(1u, pal), LCD_FLIP_FAIL);
+    CHECK(strcmp(g_seq, "c") == 0);
+    CHECK_EQ(g_err_code, APP_ERR_LCD_CLUT);
+    CHECK_EQ(g_err_detail, GLCDC_ERR_INVALID_CLUT_ACCESS);
+    CHECK_EQ(APP_ERR_LCD_CLUT, 11);
+    seq_reset(); g_clut_ret = GLCDC_ERR_NOT_OPEN;
+    CHECK_EQ(lcd_flip_pal(1u, pal), LCD_FLIP_FAIL);
+    CHECK_EQ(g_err_code, APP_ERR_LCD_CLUT);
+
+    TEST("H-C9 (v) NoReflect 成功のあと BufferChange が失敗(反映待ちを含む)= APP_ERR_LCD_FLIP を記録して FAIL(BUSY にしない。再試行すると NoReflect が 2 回になる)");
+    seq_reset(); g_clut_ret = GLCDC_SUCCESS; g_bc_ret = GLCDC_ERR_INVALID_UPDATE_TIMING;
+    CHECK_EQ(lcd_flip_pal(1u, pal), LCD_FLIP_FAIL);
+    CHECK(strcmp(g_seq, "CB") == 0);
+    CHECK_EQ(g_err_code, APP_ERR_LCD_FLIP);
+    CHECK_EQ(g_err_detail, GLCDC_ERR_INVALID_UPDATE_TIMING);
+    seq_reset(); g_bc_ret = GLCDC_ERR_NOT_OPEN;
+    CHECK_EQ(lcd_flip_pal(1u, pal), LCD_FLIP_FAIL);
+    CHECK_EQ(g_err_code, APP_ERR_LCD_FLIP);
+    CHECK_EQ(g_err_detail, GLCDC_ERR_NOT_OPEN);
+    g_bc_ret = GLCDC_SUCCESS;
+
+    TEST("H-C9 (vi) ClutUpdate(反映つき。VEN が立って続く BufferChange が BUSY になる)を、どの経路でも一度も呼ばない");
+    CHECK(strchr(g_seq, 'U') == NULL);
+    seq_reset();
+    (void)lcd_flip_pal(1u, pal); (void)lcd_flip(0u); g_clut_ret = GLCDC_ERR_INVALID_UPDATE_TIMING; (void)lcd_flip_pal(1u, pal);
+    g_clut_ret = GLCDC_ERR_INVALID_CLUT_ACCESS; (void)lcd_flip_pal(1u, pal); g_clut_ret = GLCDC_SUCCESS;
+    CHECK(strchr(g_seq, 'U') == NULL);
+    CHECK(strcmp(g_seq, "CBBcc") == 0);                             /* 成功した NoReflect(C)は必ず直後に BufferChange(B)。失敗・BUSY(c)の後には B が続かない */
+    CHECK(strstr(g_seq, "CC") == NULL);                             /* 成功した NoReflect が続けて 2 回になる経路は無い */
+}
+
 int main(void)
 {
     test_pins();
     test_init_order();
     test_init_failures();
     test_flip();
+    test_flip_pal();
     test_cfg_vs_fit_defaults();
     test_cfg_vs_design();
     test_fit_param_check();

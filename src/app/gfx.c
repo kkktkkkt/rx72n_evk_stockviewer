@@ -106,6 +106,29 @@ void gfx_blit8(uint8_t *fb, const uint8_t *src, int32_t src_stride,
     }
 }
 
+void gfx_blit8_key(uint8_t *fb, const uint8_t *src, int32_t src_stride,
+                   int32_t sx, int32_t sy, int32_t w, int32_t h, int32_t dx, int32_t dy, uint8_t key)
+{
+    int32_t skx, sky, r, c;
+    const uint8_t *s;
+    uint8_t *p;
+
+    if ((fb == NULL) || (src == NULL) || !clip(&dx, &dy, &w, &h, &skx, &sky)) {
+        return;
+    }
+    sx += skx;
+    sy += sky;
+    for (r = 0; r < h; r++) {
+        s = &src[(sy + r) * src_stride + sx];
+        p = &fb[(dy + r) * GFX_STRIDE + dx];
+        for (c = 0; c < w; c++) {
+            if (s[c] != key) {
+                p[c] = s[c];
+            }
+        }
+    }
+}
+
 void gfx_fill8(uint8_t *fb, int32_t x, int32_t y, int32_t w, int32_t h, uint8_t idx)
 {
     int32_t skx, sky, r;

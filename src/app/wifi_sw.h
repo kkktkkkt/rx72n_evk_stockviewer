@@ -1,5 +1,5 @@
 ﻿/* wifi_sw.h - ビルドスイッチ(docs/design.md §7.4)。標準Cのみ(FIT を include しない)。
- * 切り替えは、下の既定値を書き換えるか -D<名前>=<値>。コミットする値は下の既定のまま(APP_WIFI_TEST・APP_STK_PREVIEW・APP_STK_FAULT = 0)。
+ * 切り替えは、下の既定値を書き換えるか -D<名前>=<値>。コミットする値は下の既定のまま(APP_WIFI_TEST・APP_STK_PREVIEW・APP_CLK_PREVIEW・APP_STK_FAULT = 0)。
  * wifi_core.c / wx_core.c / wifi_at.c は APP_WIFI_ON(= APP_WIFI_TEST か APP_WX)が 0 の時は中身が消える(リンクに --gc-sections が無いため、消さないと ROM に残る)。 */
 #ifndef WIFI_SW_H
 #define WIFI_SW_H
@@ -10,6 +10,19 @@
 #define APP_STK_PREVIEW      (0)
 #endif
 
+/* 1 = ネットワークなしで、株価画面と時計・天気画面を 3 秒ごとに交互に出す(時計・天気は 12 状態 C0〜C11 を順に。毎回パレットが入れ替わる。実機の色化け・ちらつきの目視用 = V-C1・G-C)。
+ * 2 = ネットワークなしで、固定の時刻・天気・気温を、本物の切り替え(株価 10 秒 / 時計・天気 5 秒。ui_screen_step)で出す。
+ * clk_assets.h(生成物)がこのヘッダーを include するので、必ず clk_assets.h より先に定義される。APP_STK_PREVIEW とは同時に 1 以上にできない。 */
+#ifndef APP_CLK_PREVIEW
+#define APP_CLK_PREVIEW      (0)
+#endif
+#if ((APP_CLK_PREVIEW) < 0) || ((APP_CLK_PREVIEW) > 2)
+#error "APP_CLK_PREVIEW must be 0..2"
+#endif
+#if (APP_STK_PREVIEW) && (APP_CLK_PREVIEW)
+#error "APP_STK_PREVIEW and APP_CLK_PREVIEW are exclusive"
+#endif
+
 /* 1 = Wi-Fi / TLS の検証専用モード(LCD・タッチは動かさない。Phase 0 で使った) */
 #ifndef APP_WIFI_TEST
 #define APP_WIFI_TEST        (0)
@@ -18,7 +31,7 @@
 /* 1 = 製品に株価の取得を組み込む(既定)。0 = ESP32 に触れず、オフライン表示のまま。
  * wifi_secret.h が無い・SCI1 を開けない時は、1 でも OFF(wifi_at.c)。プレビュー(ネットワークなし)の既定は 0 */
 #ifndef APP_WX
-#if APP_STK_PREVIEW
+#if (APP_STK_PREVIEW) || (APP_CLK_PREVIEW)
 #define APP_WX               (0)
 #else
 #define APP_WX               (1)

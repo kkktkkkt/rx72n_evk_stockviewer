@@ -33,6 +33,7 @@
 #define APP_ERR_LCD_FLIP     (8u)   /* R_GLCDC_BufferChange 失敗(反映待ち以外)。err_detail = glcdc_err_t */
 #define APP_ERR_WIFI_OPEN    (9u)   /* Wi-Fi 試作(wifi_at.c): SCI1 を開けない。err_detail = sci_err_t。[err] 行にだけ出す */
 #define APP_ERR_WIFI_RX      (10u)  /* Wi-Fi 試作: SCI1 の受信異常。err_detail = sci_cb_evt_t。[err] 行にだけ出す */
+#define APP_ERR_LCD_CLUT     (11u)  /* R_GLCDC_ClutUpdate_NoReflect 失敗(反映待ち以外)。err_detail = glcdc_err_t(lcd_flip_pal)。[err] 行にも出る */
 
 typedef struct {
     uint32_t tick;              /* 10ms ごとに増える */

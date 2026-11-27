@@ -18,6 +18,13 @@ uint8_t *lcd_fb(uint8_t i);
 /* 面 i を次の垂直同期で表示面にする。OK = 受け付けた / BUSY = 前の反映待ち(あとで再試行)/ FAIL = 異常(APP_ERR_LCD_FLIP を記録) */
 lcd_flip_t lcd_flip(uint8_t i);
 
+/* パレット pal(256 エントリー、0xFFRRGGBB)と面 i を、同じ垂直同期で入れ替える(docs/design.md §13.2)。
+ * R_GLCDC_ClutUpdate_NoReflect を 1 回呼び、成功したら続けて R_GLCDC_BufferChange(1 つの関数に閉じる)。
+ * OK = 受け付けた(完了は lcd_flip_busy で見る)/ BUSY = NoReflect が反映待ちで断られた(何も変えていない。あとで再試行してよい)/
+ * FAIL = NoReflect の失敗(APP_ERR_LCD_CLUT)、または NoReflect 成功後の BufferChange の失敗(APP_ERR_LCD_FLIP。BUSY もここ。再試行すると NoReflect が 2 回になるため致命)。
+ * 表示中のパレットと同じときは呼ばず lcd_flip を使うこと。 */
+lcd_flip_t lcd_flip_pal(uint8_t i, const uint32_t *pal);
+
 /* 反映待ち(lcd_flip が受け付けてから、まだ表示面が変わっていない)なら true */
 bool lcd_flip_busy(void);
 

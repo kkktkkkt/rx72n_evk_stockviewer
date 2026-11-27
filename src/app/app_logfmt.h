@@ -64,6 +64,11 @@ size_t applog_fmt_ev_tap(char *buf, size_t size, const char *src);
 /* "[perf] n=<n> copy_us=<..> home_us=<..> slide_us=<..>\r\n" */
 size_t applog_fmt_perf(char *buf, size_t size, uint32_t n, uint32_t copy_us, uint32_t home_us, uint32_t slide_us);
 
+/* "[scr] to=<stock|clock> pal=<0..8> clk=<hhmm|none> kind=<名前|none> temp=<-99..99|none> tick=<n>\r\n"(docs/design-uart.md §14.1。入れ替えを受け付けるたびに 1 行)
+ * to_clock = 0 なら pal を 0 にそろえる(株価)。clk_min が 1440 以上は clk=none。have = 0 は kind=none temp=none。
+ * pal > 8、have = 1 での kind > 7・temp が -99〜99 の外は失敗(0・buf[0] = '\0')。kind の名前は clk_core.h の clk_kind_name と同じ(app_logfmt.c は標準 C だけで自己完結させるため、ここにも持つ) */
+size_t applog_fmt_scr(char *buf, size_t size, bool to_clock, uint8_t pal, uint16_t clk_min, uint8_t kind, bool have, int8_t temp, uint32_t tick);
+
 /* "[err] code=<code> detail=<detail>\r\n" */
 size_t applog_fmt_err(char *buf, size_t size, uint32_t code, uint32_t detail);
 

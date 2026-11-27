@@ -43,21 +43,22 @@ cc_nowarn() {
   return $rc
 }
 
-# 生成データ(ui_strips.c, ui_gfx_data.c, ui_layout.c)を1回だけコンパイルしておく($BUILD/ui/*.o)
+# 生成データ(ui_strips.c, ui_gfx_data.c, ui_layout.c, clk_data.c)を1回だけコンパイルしておく($BUILD/ui/*.o)
 UIOBJ="$BUILD/ui"
-UIDATA="ui_gfx_data ui_layout ui_strips"
+UIDATA="ui_gfx_data ui_layout ui_strips clk_data"
+CLKC="$APP/ui_clock.c $APP/clk_core.c"          # ui_render.c が呼ぶ時計・天気画面の描画(clk_data.c は UIDATA)
 build_ui_objs() {
   mkdir -p "$UIOBJ"
   local f
   for f in $UIDATA; do
-    if [ ! -f "$UIOBJ/$f.o" ] || [ "$APP/$f.c" -nt "$UIOBJ/$f.o" ] || [ "$APP/ui_assets.h" -nt "$UIOBJ/$f.o" ]; then
+    if [ ! -f "$UIOBJ/$f.o" ] || [ "$APP/$f.c" -nt "$UIOBJ/$f.o" ] || [ "$APP/ui_assets.h" -nt "$UIOBJ/$f.o" ] || [ "$APP/clk_assets.h" -nt "$UIOBJ/$f.o" ]; then
       cc_nowarn $STD $WARN -fno-pic -I"$APP" -c "$APP/$f.c" -o "$UIOBJ/$f.o" || return 1
     fi
   done
   return 0
 }
 
-STDC_FILES="touch_decode app_logfmt app_logq gfx ui_logic ui_render stk_core"
+STDC_FILES="touch_decode app_logfmt app_logq gfx ui_logic ui_render stk_core ui_clock clk_core"
 
 # ---------------------------------------------------------------- S1
 if sel S1; then
@@ -157,6 +158,14 @@ if sel S7; then
   check_hw "A wifitest1" $RXDEF -DAPP_WIFI_TEST=1 -I"$APP" $FIT_INC
   check_hw "A fault2" $RXDEF -DAPP_STK_FAULT=2 -I"$APP" $FIT_INC
   check_hw "A preview0 wx0" $RXDEF -DAPP_STK_PREVIEW=0 -DAPP_WX=0 -I"$APP" $FIT_INC
+  echo " -- A + APP_CLK_PREVIEW = 1 / 2(時計・天気のプレビュー。H-C6 ⑧。app_main.c・lcd_panel.c・touch_ft5x.c・app_debug.c)"
+  check_hw "A clkprev1" $RXDEF -DAPP_CLK_PREVIEW=1 -I"$APP" $FIT_INC
+  check_hw "A clkprev2" $RXDEF -DAPP_CLK_PREVIEW=2 -I"$APP" $FIT_INC
+  check_hw "A clkprev1 wx1" $RXDEF -DAPP_CLK_PREVIEW=1 -DAPP_WX=1 -I"$APP" $FIT_INC
+  echo " -- APP_STK_PREVIEW と APP_CLK_PREVIEW を同時に 1 以上にする、APP_CLK_PREVIEW = 3 / -1 は #error になること"
+  for bad in "-DAPP_STK_PREVIEW=1 -DAPP_CLK_PREVIEW=1" "-DAPP_STK_PREVIEW=1 -DAPP_CLK_PREVIEW=2" "-DAPP_CLK_PREVIEW=3" "-DAPP_CLK_PREVIEW=-1"; do
+    if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c $bad -I"$APP" - >/dev/null 2>&1; then echo "  NG: $bad で #error が出ない"; rc=1; else echo "  ok ($bad は #error)"; fi
+  done
   echo " -- A + APP_PERF_BENCH=0 (計測なし)"
   check_hw "A perf0" $RXDEF -DAPP_PERF_BENCH=0 -I"$APP" $FIT_INC
   echo " -- A + -Wconversion(製品コードの警告のみ数える。情報用)"
@@ -236,7 +245,7 @@ if sel S12; then
     [ -x "$BUILD/san_touch" ] && run_san touch_decode "$BUILD/san_touch"
     cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_gfx.c" "$APP/gfx.c" -o "$BUILD/san_gfx" || rc=1
     [ -x "$BUILD/san_gfx" ] && run_san gfx "$BUILD/san_gfx"
-    cc_nowarn $STD $WARN $SAN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/san_ui_stock" || rc=1
+    cc_nowarn $STD $WARN $SAN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" $CLKC "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/san_ui_stock" || rc=1
     [ -x "$BUILD/san_ui_stock" ] && { echo "  [san] ui_stock"; timeout 300 "$BUILD/san_ui_stock" "$HERE/data/states" > "$BUILD/ui_stock.san.log" 2>&1 || { head -30 "$BUILD/ui_stock.san.log"; rc=1; }; tail -1 "$BUILD/ui_stock.san.log"; }
     cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_stk_core.c" "$APP/stk_core.c" -o "$BUILD/san_stk_core" || rc=1
     [ -x "$BUILD/san_stk_core" ] && run_san stk_core "$BUILD/san_stk_core"
@@ -262,10 +271,10 @@ if sel S14; then
   echo "### S14 株価ビューの描画と ui_logic(docs/design.md H-8、H-12 の一部): test_ui_stock(全画素を書く・面の外に書かない・最悪の幅・24 状態の CRC・現在値の x・表示の決定・色・タップ検出)と、ホストの C 描画(fb_hostrender)と Python のプレビュー(--emit-c8)が x < 480 で 0 バイト差(H-8 ⑥)"
   rc=0
   build_ui_objs || rc=1
-  cc_nowarn $STD $WARN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_stock" || rc=1
+  cc_nowarn $STD $WARN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" $CLKC "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_stock" || rc=1
   [ -x "$BUILD/test_ui_stock" ] && { "$BUILD/test_ui_stock" "$HERE/data/states" || rc=1; }
   cc_nowarn $STD $WARN -I"$APP" -c "$ROOT/tools/fb_hostrender.c" -o "$BUILD/fb_hostrender.o" || rc=1
-  cc_nowarn $STD -O1 -I"$APP" "$ROOT/tools/fb_hostrender.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/fb_hostrender" || rc=1
+  cc_nowarn $STD -O1 -I"$APP" "$ROOT/tools/fb_hostrender.c" "$APP/ui_render.c" $CLKC "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/fb_hostrender" || rc=1
   rm -rf "$BUILD/h8"; mkdir -p "$BUILD/h8/c" "$BUILD/h8/py"
   "$PY" -I "$ROOT/tools/gen_stock_assets.py" --emit-c8 "$BUILD/h8/py" --preview-dir "$BUILD/h8/prev" >/dev/null || rc=1
   if [ -x "$BUILD/fb_hostrender" ]; then
@@ -316,6 +325,11 @@ if sel S22; then
   d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_WX == 0 && APP_WX_PRODUCT == 0 && APP_WIFI_ON == 0, "preview");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -DAPP_STK_PREVIEW=1 -I"$APP" - 2>&1)" || { echo "  NG: プレビューの既定: $d"; rc=1; }
   d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_WX == 1 && APP_WX_PRODUCT == 0 && APP_WIFI_ON == 1, "wifitest");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -DAPP_WIFI_TEST=1 -I"$APP" - 2>&1)" || { echo "  NG: 専用モード: $d"; rc=1; }
   if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c -DAPP_STK_FAULT=4 -I"$APP" - >/dev/null 2>&1; then echo "  NG: APP_STK_FAULT = 4 で #error が出ない"; rc=1; else echo "  ok (APP_STK_FAULT = 4 は #error)"; fi
+  echo "  wifi_sw.h: APP_CLK_PREVIEW の既定は 0。1 / 2 の既定は APP_WX = 0(ネットワークなし)"
+  d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_CLK_PREVIEW == 0, "clk default");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -I"$APP" - 2>&1)" || { echo "  NG: APP_CLK_PREVIEW の既定: $d"; rc=1; }
+  for cp in 1 2; do
+    d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_WX == 0 && APP_WX_PRODUCT == 0 && APP_WIFI_ON == 0 && APP_CLK_PREVIEW == %s, "clk preview");\n' "$cp" | "$CC" -fsyntax-only -x c -std=gnu11 -DAPP_CLK_PREVIEW=$cp -I"$APP" - 2>&1)" || { echo "  NG: APP_CLK_PREVIEW = $cp の既定: $d"; rc=1; }
+  done
   cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core" || rc=1
   [ -x "$BUILD/test_wifi_core" ] && { timeout 300 "$BUILD/test_wifi_core" || rc=1; }
   cc_nowarn $STD $WARN -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core_wx" || rc=1     # 製品(接続先は Yahoo の SSL だけ。z の step は範囲に入らない)
@@ -518,7 +532,7 @@ if sel S31; then
   echo "### S31 株価ビュー Phase 1・2 のテスト担当による独立試験(test_stk_indep): ±0.005% ちょうどの丸め・別の割り算との乱数比較・符号 + − ▲ ▼ の連結・状態ファイルの数値・市場の状態(別モデル・東京の 1 日・週末・NY)・描画の領域(箱の外に描かない・区切り線と左バーとフッターが無傷・箱が重ならない)・不正な表示キーの描画・色(RGB565 の厳密一致・コントラスト)・解析の差分ファズ"
   rc=0
   build_ui_objs || rc=1
-  cc_nowarn $STD -Wall -Wextra -Wconversion -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_stk_indep.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/wx_core.c" "$UIOBJ/ui_gfx_data.o" "$UIOBJ/ui_layout.o" "$UIOBJ/ui_strips.o" -lm -o "$BUILD/test_stk_indep" || rc=1
+  cc_nowarn $STD -Wall -Wextra -Wconversion -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_stk_indep.c" "$APP/ui_render.c" $CLKC "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/wx_core.c" "$UIOBJ/ui_gfx_data.o" "$UIOBJ/ui_layout.o" "$UIOBJ/ui_strips.o" "$UIOBJ/clk_data.o" -lm -o "$BUILD/test_stk_indep" || rc=1
   [ -x "$BUILD/test_stk_indep" ] && { timeout 300 "$BUILD/test_stk_indep" "$HERE/data" || rc=1; }
   result S31 $rc
 fi
@@ -566,11 +580,11 @@ fi
 
 # ---------------------------------------------------------------- S34
 if sel S34; then
-  echo "### S34 app_main.c の結合試験(Phase 4。H-12・H-13): 偽の LCD・タッチ・CMT・ログ・wifi_at API で app_main() を 10ms ずつ走らせ、起動の行の順・面 0 を lcd_init の前に描く・stk_ui の値が ui_render で描かれ変わった時だけ入れ替わる・[ev] btn=tap src=touch|uart と wx_request(src)・s ? と n p d + - の扱い・[hb] を、製品 / APP_WX=0 / APP_STK_PREVIEW=1 / LCD 初期化失敗 / タッチ初期化失敗 の 5 通りで確かめる"
+  echo "### S34 app_main.c の結合試験(Phase 4。H-12・H-13。Phase 6b: [scr] の行・lcd_flip_pal・APP_CLK_PREVIEW = 1 / 2・時計・天気の値の注入): 偽の LCD・タッチ・CMT・ログ・wifi_at API で app_main() を 10ms ずつ走らせ、起動の行の順・面 0 を lcd_init の前に描く・stk_ui の値が ui_render で描かれ変わった時だけ入れ替わる・[ev] btn=tap src=touch|uart と wx_request(src)・s ? と n p d + - の扱い・[hb]・[scr] を、製品 / APP_WX=0 / APP_STK_PREVIEW=1 / LCD 初期化失敗 / タッチ初期化失敗 / APP_CLK_PREVIEW=1・2 / 時計・天気の値の注入 の 8 通りで確かめる"
   rc=0
   build_ui_objs || rc=1
-  A34="$APP/ui_render.c $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/ui_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o"
-  for v in "prod:" "nowx:-DAPP_WX=0" "preview:-DAPP_STK_PREVIEW=1" "lcdfail:-DT_LCD_FAIL" "touchfail:-DT_TOUCH_FAIL"; do
+  A34="$APP/ui_render.c $CLKC $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/ui_preview.c $APP/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
+  for v in "prod:" "nowx:-DAPP_WX=0" "preview:-DAPP_STK_PREVIEW=1" "lcdfail:-DT_LCD_FAIL" "touchfail:-DT_TOUCH_FAIL" "clkprev1:-DAPP_CLK_PREVIEW=1" "clkprev2:-DAPP_CLK_PREVIEW=2" "clkinject:-DAPP_WX=0 -DT_CLK_INJECT"; do
     name="${v%%:*}"; flags="${v#*:}"
     echo "  -- $name ${flags}"
     EXTRA_CFLAGS="$flags" build_fit_test "$BUILD/test_app_main_$name" "$HERE/test_app_main.c" $A34 || rc=1
@@ -610,7 +624,7 @@ if sel S36; then
   build_ui_objs || rc=1
   # (1) フッターの優先順位: 起動中(F1)は取得中(F2)より強い。変異 = 取得中なら起動中にしない
   if mut2_prep "フッターの優先順位(起動中 > 取得中)を入れ替える" ui_render.c 's/if (v->have_any == 0u) {/if ((v->have_any == 0u) \&\& (v->busy == 0u)) {/'; then
-    "$CC" $STD -DAPP_STK_PREVIEW=1 -I"$MUT2/src/app" -I"$HERE" "$HERE/test_ui_stock.c" "$MUT2/src/app/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$MUT2/t" >"$MUT2/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT2/cc.log"; rc=1; }
+    "$CC" $STD -DAPP_STK_PREVIEW=1 -I"$MUT2/src/app" -I"$HERE" "$HERE/test_ui_stock.c" "$MUT2/src/app/ui_render.c" $CLKC "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$MUT2/t" >"$MUT2/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT2/cc.log"; rc=1; }
     if [ -x "$MUT2/t" ]; then "$MUT2/t" "$HERE/data/states" >"$MUT2/run.log" 2>&1; mut2_verdict "フッターの優先順位" $?; fi
   fi
   # (2) 更新要求の最小間隔(5 秒): 変異 = 間隔を見ない
@@ -624,7 +638,7 @@ if sel S36; then
     if [ -x "$MUT2/t" ]; then "$MUT2/t" >"$MUT2/run.log" 2>&1; mut2_verdict "更新要求の最小間隔(5 秒)を外す" $?; fi
   fi
   # (3)(4) app_main: タップの src の取り違え、stk_ui の値を表示へ渡さない
-  A36="$APP/ui_render.c $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/ui_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o"
+  A36="$APP/ui_render.c $CLKC $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/ui_preview.c $APP/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
   run_main_mut() { # $1=名前 $2=sed 式
     if mut2_prep "$1" app_main.c "$2"; then
       EXTRA_CFLAGS="" build_fit_test "$MUT2/t" "$MUT2/tests/host/test_app_main.c" $A36 >"$MUT2/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT2/cc.log"; rc=1; return; }
@@ -671,7 +685,145 @@ if sel S38; then
   echo "  2 回の --emit-c8 で同一のファイル = $m(C0〜C11.c8 12 + clk_*.pal 8 = 20)"
   [ "$m" -eq 20 ] || rc=1
   "$PY" -I "$ROOT/tools/gen_stock_assets.py" --check | grep -E '^出力の sha256' | sed 's/(2 回.*//'
+  STOCK_SHA="205b6010b8d173e3f4a7ba4322b9cbd38ea51785c1748991acb805ef4245eb45"      # Phase 5 の値(H-C8: 株価画面の生成物が 1 バイトも変わらない)
+  if "$PY" -I "$ROOT/tools/gen_stock_assets.py" --check | grep -q "$STOCK_SHA"; then echo "  株価の出力の sha256 は Phase 5 の値のまま"; else echo "  NG: gen_stock_assets.py --check の sha256 が Phase 5 の値(${STOCK_SHA:0:12}…)から変わった"; rc=1; fi
   result S38 $rc
+fi
+
+# ---------------------------------------------------------------- S39
+if sel S39; then
+  echo "### S39 時計・天気画面の表示値(docs/design.md §13.8 と H-C1): test_clk_core(clk_kind_of の全コード・clk_temp_int・clk_view_make の境界・字番号の並び)を既定と -DCLK_WX_STALE_S=120 の 2 通りで / C の生成物(gen_clock_assets.py --emit-c)が 2 回で同一・コミット済みの src/app と一致・コンパイルで警告ゼロ・RAM に入るデータが無い"
+  rc=0
+  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_clk_core.c" "$APP/clk_core.c" -o "$BUILD/test_clk_core" || rc=1
+  [ -x "$BUILD/test_clk_core" ] && { "$BUILD/test_clk_core" || rc=1; }
+  cc_nowarn $STD $WARN -DCLK_WX_STALE_S=120 -I"$APP" -I"$HERE" "$HERE/test_clk_core.c" "$APP/clk_core.c" -o "$BUILD/test_clk_core120" || rc=1
+  [ -x "$BUILD/test_clk_core120" ] && { "$BUILD/test_clk_core120" | tail -1 || rc=1; [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1; }
+  echo "  clk_core.c / .h が platform.h / FIT ヘッダを include していないこと。float / double が無いこと"
+  if grep -nE '#\s*include\s*[<"](platform|board_pins|r_[a-z_0-9]+_if)\.h[>"]' "$APP/clk_core.c" "$APP/clk_core.h" "$APP/ui_clock.c"; then rc=1; fi
+  for f in clk_core.c clk_core.h ui_clock.c; do
+    if "$CC" -x c -fpreprocessed -dD -E -P "$APP/$f" 2>/dev/null | grep -nE '\b(float|double)\b'; then echo "  NG: $f に float / double"; rc=1; fi
+  done
+  echo "  C の生成物(--emit-c)が 2 回で同一、コミット済みの src/app と一致(CR は無視)"
+  rm -rf "$BUILD/clk_c1" "$BUILD/clk_c2"
+  "$PY" -I "$ROOT/tools/gen_clock_assets.py" --emit-c --out-dir "$BUILD/clk_c1" --preview-dir "$BUILD/clk_c1/prev" >/dev/null || rc=1
+  "$PY" -I "$ROOT/tools/gen_clock_assets.py" --emit-c --out-dir "$BUILD/clk_c2" --preview-dir "$BUILD/clk_c2/prev" >/dev/null || rc=1
+  n=0
+  for b in clk_assets.h clk_data.c clk_preview.c; do
+    n=$((n+1))
+    cmp -s "$BUILD/clk_c1/$b" "$BUILD/clk_c2/$b" || { echo "  NG: 再実行で出力が違う: $b"; rc=1; }
+    tr -d '\r' < "$APP/$b" | cmp -s "$BUILD/clk_c1/$b" - || { echo "  NG: コミット済み src/app/$b がジェネレータの出力と違う(再生成が必要)"; rc=1; }
+  done
+  echo "  比較した C ファイル = $n(3)"
+  echo "  生成物のコンパイル: gnu99 / c99 -pedantic-errors / c11、-Wall -Wextra -Wpedantic -Wconversion で警告ゼロ(APP_CLK_PREVIEW = 0 / 1)"
+  for std in "-std=gnu99" "-std=c99 -pedantic-errors" "-std=c11"; do
+    for f in clk_data clk_preview ui_clock clk_core; do
+      cc_nowarn $std $WARN -I"$APP" -c "$APP/$f.c" -o "$BUILD/gen_$f.o" || rc=1
+    done
+    cc_nowarn $std $WARN -DAPP_CLK_PREVIEW=1 -I"$APP" -c "$APP/clk_preview.c" -o "$BUILD/gen_clk_preview1.o" || rc=1
+    cc_nowarn $std $WARN -DAPP_CLK_PREVIEW=1 -I"$APP" -c "$APP/clk_core.c" -o "$BUILD/gen_clk_core1.o" || rc=1
+  done
+  echo "  RAM に入るデータが無い(nm の D/d/B/b/C が無い。const は r)"
+  if nm "$BUILD"/gen_clk_data.o "$BUILD"/gen_clk_preview1.o "$BUILD"/gen_clk_core.o "$BUILD"/gen_ui_clock.o | grep -E ' [DdBbCc] ' | grep -vE ' [DdBbCc] \.'; then echo "  NG: RAM に入るデータがある"; rc=1; else echo "  (データシンボルなし)"; fi
+  result S39 $rc
+fi
+
+# ---------------------------------------------------------------- S40
+if sel S40; then
+  echo "### S40 画面の切り替え(docs/design.md §13.3・H-C6): test_ui_screen(株価 10,000ms / 時計・天気 5,000ms ちょうどで切り替え・32bit の巻き戻り・時刻未同期は切り替えず t_scr も動かない・使えなくなったら株価へ・タップで株価へ戻り t_scr 更新・表示キー・ui_pal_id)"
+  rc=0
+  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_ui_screen.c" "$APP/ui_logic.c" -o "$BUILD/test_ui_screen" || rc=1
+  [ -x "$BUILD/test_ui_screen" ] && { "$BUILD/test_ui_screen" || rc=1; }
+  for std in "-std=c99 -pedantic-errors" "-std=c11"; do
+    cc_nowarn $std $WARN -I"$APP" -I"$HERE" "$HERE/test_ui_screen.c" "$APP/ui_logic.c" -o "$BUILD/test_ui_screen_std" || rc=1
+  done
+  result S40 $rc
+fi
+
+# ---------------------------------------------------------------- S41
+if sel S41; then
+  echo "### S41 時計・天気画面の描画(docs/design.md §13.4・H-C7): test_ui_clock(全画素を書く・面の外に書かない・12 状態の配置・CRC のゴールデン・使う添字・パレット・アイコンの透明色・分の変化・時刻の字)と、ホストの C 描画(fb_hostrender)と Python のプレビュー(--emit-c8)が C0〜C11 で x < 480 だけでなく 139,264 バイト全部 0 バイト差(H-C7 ⑤)。パレットも clk_<kind>.pal と同じ"
+  rc=0
+  build_ui_objs || rc=1
+  A41="$APP/ui_render.c $CLKC $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/clk_preview.c"
+  cc_nowarn $STD $WARN -DAPP_CLK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_clock.c" $A41 "$UIOBJ"/*.o -o "$BUILD/test_ui_clock" || rc=1
+  [ -x "$BUILD/test_ui_clock" ] && { "$BUILD/test_ui_clock" "$HERE/data/states" || rc=1; }
+  cc_nowarn $STD $WARN -I"$APP" -c "$ROOT/tools/fb_hostrender.c" -o "$BUILD/fb_hostrender.o" || rc=1
+  cc_nowarn $STD -O1 -I"$APP" "$ROOT/tools/fb_hostrender.c" "$APP/ui_render.c" $CLKC "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/fb_hostrender" || rc=1
+  rm -rf "$BUILD/h7"; mkdir -p "$BUILD/h7/c" "$BUILD/h7/py"
+  "$PY" -I "$ROOT/tools/gen_clock_assets.py" --emit-c8 "$BUILD/h7/py" --preview-dir "$BUILD/h7/prev" >/dev/null || rc=1
+  if [ -x "$BUILD/fb_hostrender" ]; then
+    for n in 0 1 2 3 4 5 6 7 8 9 10 11; do
+      "$BUILD/fb_hostrender" "$HERE/data/states/C$n.state" "$BUILD/h7/c/C$n.c8" --pal "$BUILD/h7/c/C$n.pal" || rc=1
+      if cmp -s "$BUILD/h7/c/C$n.c8" "$BUILD/h7/py/C$n.c8"; then echo "  H-C7 ⑤ C$n: C と Python が 139,264 バイト中 0 バイト差(x < 480 は 130,560 画素)"; else echo "  NG: C$n の C 描画と Python のプレビューが違う"; cmp -l "$BUILD/h7/c/C$n.c8" "$BUILD/h7/py/C$n.c8" | head -3; rc=1; fi
+    done
+    for kn in "0 sun" "1 partly" "2 cloud" "3 fog" "4 rain" "5 snow" "6 thunder"; do         # C0〜C6 の天気の種類は 0〜6(C7 と C9 は unknown)
+      ci="${kn%% *}"; cn="${kn##* }"
+      cmp -s "$BUILD/h7/c/C$ci.pal" "$BUILD/h7/py/clk_$cn.pal" || { echo "  NG: C$ci のパレットが clk_$cn.pal と違う"; rc=1; }
+    done
+    cmp -s "$BUILD/h7/c/C9.pal" "$BUILD/h7/py/clk_unknown.pal" || { echo "  NG: C9 のパレットが clk_unknown.pal と違う"; rc=1; }
+    cmp -s "$BUILD/h7/c/C7.pal" "$BUILD/h7/py/clk_unknown.pal" || { echo "  NG: C7(have = 0)のパレットが clk_unknown.pal と違う"; rc=1; }
+  fi
+  result S41 $rc
+fi
+
+# ---------------------------------------------------------------- S42
+if sel S42; then
+  echo "### S42 変異試験(Phase 6b): 製品コードの複製に 1 か所だけ誤りを入れ、試験が失敗することを確かめる(画面の切り替えの秒数・切り替えの判定・パレット差し替えの順序(ClutUpdate_NoReflect を反映つきにする)・パレット番号の更新・時計・天気の座標)。製品のファイルは書き換えない"
+  rc=0
+  MUT3="$BUILD/mut3"
+  mut3_prep() { # $1=名前 $2=APP の中のファイル $3=sed 式。$MUT3/src/app に APP の全 .c / .h(wifi_secret.h を除く)の複製を作り、$2 に変異を入れる。当たらなければ失敗
+    rm -rf "$MUT3"; mkdir -p "$MUT3/src/app" "$MUT3/tests/host"
+    find "$APP" -maxdepth 1 \( -name '*.h' -o -name '*.c' \) ! -name wifi_secret.h -exec cp {} "$MUT3/src/app/" \;
+    cp "$HERE/test_framework.h" "$HERE"/test_*.c "$MUT3/tests/host/"
+    mkdir -p "$MUT3/tools"; cp "$ROOT/tools/fb_hostrender.c" "$MUT3/tools/"          # test_ui_clock.c が ../../tools/fb_hostrender.c を include する
+    cp "$MUT3/src/app/$2" "$MUT3/mut.orig"
+    sed -i "$3" "$MUT3/src/app/$2"
+    if cmp -s "$MUT3/src/app/$2" "$MUT3/mut.orig"; then echo "  NG: 変異が当たっていない: $1"; rc=1; return 1; fi
+    return 0
+  }
+  mut3_verdict() { # $1=名前 $2=試験の終了コード
+    if [ "$2" -eq 0 ]; then echo "  NG: 変異 [$1] を試験が検出しなかった(合格してしまった)"; rc=1; else echo "  ok: 変異 [$1] で試験が失敗した"; fi
+  }
+  M="$MUT3/src/app"
+  build_ui_objs || rc=1
+  # (1)(2) 画面の切り替え: test_ui_screen
+  run_screen_mut() { # $1=名前 $2=ファイル $3=sed 式
+    if mut3_prep "$1" "$2" "$3"; then
+      "$CC" $STD -I"$M" -I"$MUT3/tests/host" "$MUT3/tests/host/test_ui_screen.c" "$M/ui_logic.c" -o "$MUT3/t" >"$MUT3/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない: $1"; head -5 "$MUT3/cc.log"; rc=1; return; }
+      "$MUT3/t" >"$MUT3/run.log" 2>&1; mut3_verdict "$1" $?
+    fi
+  }
+  run_screen_mut "株価の表示時間 10 秒 → 9 秒" ui_logic.h 's|#define APP_DWELL_STOCK_MS   (10000u)|#define APP_DWELL_STOCK_MS   (9000u)|'
+  run_screen_mut "株価 → 時計・天気の判定 >= を > にする" ui_logic.c 's|usable && (el >= (uint32_t)APP_DWELL_STOCK_MS)|usable \&\& (el > (uint32_t)APP_DWELL_STOCK_MS)|'
+  run_screen_mut "時刻未同期でも時計・天気へ切り替える" ui_logic.c 's|bool usable = (u->cview.clock_min <= (uint16_t)CLK_MINUTES_MAX);|bool usable = true;|'
+  run_screen_mut "タップで株価へ戻さない" ui_logic.c 's|ui_set_screen(u, (uint8_t)UI_SCR_STOCK, u->now);|(void)0;|'
+  # (3) パレット差し替えの順序: lcd_flip_pal が NoReflect でなく反映つきの ClutUpdate を呼ぶ(H-C9 (vi))
+  if mut3_prep "ClutUpdate_NoReflect を反映つきの ClutUpdate にする" lcd_panel.c 's|R_GLCDC_ClutUpdate_NoReflect(GLCDC_FRAME_LAYER_2, &clut)|R_GLCDC_ClutUpdate(GLCDC_FRAME_LAYER_2, \&clut)|'; then
+    "$CC" $STD -Wall -Wextra $RXDEF -ffunction-sections -fdata-sections -I"$M" -I"$MUT3/tests/host" $FIT_INC \
+        "$MUT3/tests/host/test_lcd_panel.c" "$SMC/r_glcdc_rx/src/r_glcdc_private.c" "$UIOBJ"/*.o -Wl,--gc-sections $LDX -o "$MUT3/t" >"$MUT3/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; grep -E "error" "$MUT3/cc.log" | head -5; rc=1; }
+    if [ -x "$MUT3/t" ]; then "$MUT3/t" >"$MUT3/run.log" 2>&1; mut3_verdict "ClutUpdate_NoReflect を反映つきにする" $?; fi
+  fi
+  # (4)(5) app_main: パレット番号の更新を外す / 画面のパレットを見ずに常に lcd_flip_pal(同じパレットでの呼び出しの違反)
+  A42="$M/ui_render.c $M/ui_clock.c $M/clk_core.c $M/ui_logic.c $M/stk_core.c $M/gfx.c $M/app_logfmt.c $M/ui_preview.c $M/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
+  run_main_mut3() { # $1=名前 $2=ファイル $3=sed 式 $4=試験のビルドフラグ
+    if mut3_prep "$1" "$2" "$3"; then
+      EXTRA_CFLAGS="$4" build_fit_test "$MUT3/t" "$MUT3/tests/host/test_app_main.c" $A42 >"$MUT3/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない: $1"; head -5 "$MUT3/cc.log"; rc=1; return; }
+      "$MUT3/t" >"$MUT3/run.log" 2>&1; mut3_verdict "$1" $?
+    fi
+  }
+  run_main_mut3 "入れ替え完了でパレット番号 s_pal_shown を更新しない" app_main.c 's|^            s_pal_shown = s_pal_next;$|            /* mutated */|' "-DAPP_CLK_PREVIEW=1"
+  run_main_mut3 "パレットが同じでも lcd_flip_pal を呼ぶ" app_main.c 's|switch ((pal != s_pal_shown) ? lcd_flip_pal|switch ((1) ? lcd_flip_pal|' "-DAPP_WX=0 -DT_CLK_INJECT"
+  # (6) 時計・天気の描画: 気温の x を 1 画素ずらす(CRC のゴールデンと Python との 0 バイト差が壊れる)
+  if mut3_prep "気温の描画の x を 1 画素ずらす" ui_clock.c 's|draw_seq(fb, clk_g72, temp, tn, x0 + xt, CLK_TEMP_BASE|draw_seq(fb, clk_g72, temp, tn, x0 + xt + 1, CLK_TEMP_BASE|'; then
+    "$CC" $STD -DAPP_CLK_PREVIEW=1 -I"$M" -I"$MUT3/tests/host" "$MUT3/tests/host/test_ui_clock.c" "$M/ui_render.c" "$M/ui_clock.c" "$M/clk_core.c" "$M/ui_logic.c" "$M/stk_core.c" "$M/gfx.c" "$M/clk_preview.c" "$UIOBJ"/*.o -o "$MUT3/t" >"$MUT3/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT3/cc.log"; rc=1; }
+    if [ -x "$MUT3/t" ]; then "$MUT3/t" "$HERE/data/states" >"$MUT3/run.log" 2>&1; mut3_verdict "気温の x をずらす(CRC のゴールデン)" $?; fi
+    "$CC" $STD -O1 -I"$M" "$ROOT/tools/fb_hostrender.c" "$M/ui_render.c" "$M/ui_clock.c" "$M/clk_core.c" "$M/ui_logic.c" "$M/stk_core.c" "$M/gfx.c" "$UIOBJ"/*.o -o "$MUT3/fbm" >"$MUT3/cc2.log" 2>&1 || { echo "  NG: 変異版 fb_hostrender がコンパイルできない"; rc=1; }
+    if [ -x "$MUT3/fbm" ]; then
+      "$MUT3/fbm" "$HERE/data/states/C0.state" "$MUT3/C0.c8" >/dev/null 2>&1
+      if cmp -s "$MUT3/C0.c8" "$BUILD/h7/py/C0.c8"; then echo "  NG: 変異 [気温の x をずらす] で Python との突き合わせが一致したまま(S41 を先に実行しておくこと)"; rc=1; else echo "  ok: 変異 [気温の x をずらす] で Python との 0 バイト差が壊れた"; fi
+    fi
+  fi
+  result S42 $rc
 fi
 
 echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS SUSPECT(不具合の可能性)=$SUSPECTS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"

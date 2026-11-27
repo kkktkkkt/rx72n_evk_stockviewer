@@ -242,3 +242,68 @@ H-6⑥(更新要求の返値)の試験の期待値は、設計どおり(取得�
 - 動作: **最初の n 回の接続だけ**、`wifi_sw.h` に固定のダミー(`APP_STK_BADAP_SSID` / `APP_STK_BADAP_PASS`。存在しない AP と誤ったパスワード)で `AT+CWJAP` する。n + 1 回目から本物の `WIFI_SSID` / `WIFI_PASS`。ダミーも本物もログに出ない。
 - **1 回の数え方**: `wifi_core` が `join` の step に入るたびに 1 回(= `WIFI_RANGE_CONNECT` の実行 1 回 = `wx_sched` の再接続 1 周期)。同じ実行の中での `join` のやり直し(タイムアウト・接続失敗の `try=2`)は数えず、ダミーのまま。範囲 `ALL` など `join` を含む実行も 1 回。
 - 実機での使い方(`APP_STK_BADAP = 2` の例): ビルドして書き込み、UART(COM7)を見る。期待するログ: 起動 3 秒後に `[wifi] step=join res=fail try=1 ms=… code=…`(接続失敗は `code=4` かタイムアウト `1`、パスワード違いは `2`)→ やり直しでも失敗 → `[wifi] result=fail stage=join` → `[stk] res=fail sym=0 src=boot err=8` → `[stk] net=err`(LCD はオフライン表示)。約 60 秒後に 2 回目の接続(ダミー。同じ失敗)→ さらに約 120 秒後の 3 回目から本物で接続 → `[stk] net=on` と `[stk] res=ok`(3 銘柄)。再接続の間隔は設計 §5.7 の 60 / 120 / 300 秒(更新要求 `x` / `t` で待ちを飛ばして直ちに再接続もできる。その場合も 1 回に数える)。**実機では未実行**。
+
+## Phase 6b(時計・天気画面の描画と、株価画面との切り替え。ネットワークなし): 実装したこと
+
+実機・ヘッドレスビルドは動かしていない(コーディング担当の範囲外)。ホスト試験(`bash tests/host/run.sh`)と、RX 用 GCC 14.2 の単独のコンパイル(`-c`。`-Wstack-usage=100 -Wall -Wextra`)で、警告なしを確認した。**実機の色化け・ちらつき(R14)は未確認 = ビルド担当 → デバッグ担当 → ユーザーの V-C1 へ**。
+
+### ファイル
+
+| 区分 | ファイル | 内容 |
+|---|---|---|
+| 生成(新規) | `tools/gen_clock_assets.py` に `--emit-c` / `--out-dir`(既定 `src/app`)を追加 → `src/app/clk_assets.h` `clk_data.c` `clk_preview.c` | 1 行目に生成元とフォントの sha256。手で編集しない。`gen_stock_assets.py` は無変更(`--check` の sha256 は Phase 5 の `205b6010…` のまま) |
+| 新規 | `src/app/clk_core.h/.c` | 天気の種類 `CLK_SUN`〜`CLK_UNKNOWN`、`clk_view_t`(8 バイト)、`clk_slot_t`、`clk_date_t`、`clk_kind_of`、`clk_kind_name`、`clk_temp_int`、`clk_view_make`、`clk_view_kind`(inline)、字番号の並び `clk_seq_time` / `clk_seq_date` / `clk_seq_temp`。標準 C のみ |
+| 新規 | `src/app/ui_clock.c` | `ui_render_clock(const clk_view_t *, uint8_t *fb)`(設計 §13.4 の描画の順。座標・字の並びは生成物の定数だけ) |
+| 変更 | `src/app/gfx.h/.c` | `gfx_blit8_key`(透明色を飛ばして重ねる)を追加。既存の関数は無変更 |
+| 変更 | `src/app/ui_render.h/.c` | `ui_render` の先頭に時計・天気画面の分岐 1 か所。`ui_pal_ptr(id)`(0 = `ui_pal`、1〜8 = `clk_pal[id-1]`)。株価の描画コードは無変更 |
+| 変更 | `src/app/ui_logic.h/.c` | `UI_SCR_STOCK/CLOCK`、`APP_DWELL_STOCK_MS`(10,000)/ `APP_DWELL_CLOCK_MS`(5,000)(`#ifndef`。-D で上書き可)、`ui_t` に `screen` `drawn_screen` `t_scr` `now` `cview` `cdrawn`、`ui_set_clk` `ui_screen_step` `ui_set_screen` `ui_pal_id`。タップは `ev_push` の 1 か所で株価へ戻す。表示キーは画面ごと |
+| 変更 | `src/app/lcd_panel.h/.c` | `lcd_flip_pal(i, pal)`(`R_GLCDC_ClutUpdate_NoReflect` を 1 回 → 成功なら続けて `R_GLCDC_BufferChange`。1 つの関数に閉じる)。`lcd_build_cfg` `lcd_init` `lcd_flip` は無変更 |
+| 変更 | `src/app/app_debug.h` | `APP_ERR_LCD_CLUT`(= 11) |
+| 変更 | `src/app/app_logfmt.h/.c` | `applog_fmt_scr`(`[scr] to=… pal=… clk=… kind=… temp=… tick=…`) |
+| 変更 | `src/app/app_main.c` | `draw_step`: パレットが今表示中と違うときだけ `lcd_flip_pal`、同じなら `lcd_flip`。受け付けたら `[scr]` を 1 行。完了で `s_pal_shown = s_pal_next`。`tick_step`: `ui_screen_step`(プレビュー 1 と `APP_STK_PREVIEW` では呼ばない)、`g_app_dbg.scr = s_ui.screen` |
+| 変更 | `src/app/wifi_sw.h` | `APP_CLK_PREVIEW`(0〜2。既定 0)。`APP_STK_PREVIEW` と同時に 1 以上は `#error`。1 以上の `APP_WX` の既定は 0 |
+| 変更 | `tools/fb_hostrender.c` `tools/c8png.py` | 状態ファイルに `scr` と `clk.*`、`--pal` は画面のパレット(`ui_pal_ptr(ui_pal_id)`)、`c8png.py sheet … C` で C0〜C11 を 3 列 x 4 行 |
+| 試験 | `tests/host/test_clk_core.c`(H-C1)`test_ui_screen.c`(H-C6)`test_ui_clock.c`(H-C7)、`test_gfx.c`(`gfx_blit8_key`)、`test_lcd_panel.c`(H-C9)、`test_logfmt.c`(H-C5 の `[scr]`)、`test_app_main.c`(3 つの新しいビルドの種類)、`run.sh` の S39〜S42 | 下の表 |
+
+### `APP_CLK_PREVIEW`(ネットワークなし。実機の目視・gdb 用)
+
+| 値 | 動き |
+|---|---|
+| 1 | **設計どおり**(§13.2・§13.3): 300 tick(3 秒)ごとに 偶数番 = 株価(状態 S1 と同じ固定の値)、奇数番 = 時計・天気 C(番 / 2 mod 12)。画面は tick で決める(タップしても次の周期で元に戻る)。毎回パレットが入れ替わる(V-C1・G-C) |
+| 2 | **依頼文の「固定の時刻・天気・気温を 10 秒 / 5 秒」**: 固定の値(C0 = 09:41 晴れ 18°)を、本物の `ui_screen_step`(株価 10 秒 / 時計・天気 5 秒)で出す。タップは株価へ戻す |
+
+`APP_STK_PREVIEW`(株価 8 状態を 3 秒ごと)とは同時に使えない(`#error`)。株価の固定の値は `app_main.c` の `s_clk_stock`(`ui_preview_view` は `APP_STK_PREVIEW = 1` でしか作られないため)。
+
+### 設計から外れた点・判断が要る点(設計役の確認が要る)
+
+1. **`APP_CLK_PREVIEW` の 1 と 2**: 設計は 3 秒ごと(1)だけ。依頼文は 10 秒 / 5 秒の固定値(2)。両方入れた。どちらかに絞るなら設計役が決める。
+2. **`clk_wday_g20[7]`(`clk_data.c` の配列)を作らず、`clk_assets.h` のマクロ `CLK_WDAY_G20` にした**: 字番号の並びを作る `clk_core.c` を、生成データにリンクせずホストで試験できるようにするため。`clk_corner_x/y` は設計の「`CLK_CORNER_X/Y[4]`(ヘッダーの定数)」を `clk_data.c` の `const int16_t clk_corner_x[4]` `clk_corner_y[4]` にした。
+3. **`applog_fmt_scr` の種類の名前の表を `app_logfmt.c` にも持つ**(`clk_kind_name` と同じ 8 つ)。`app_logfmt.c` を標準 C だけで自己完結させ、S8 などのリンクを変えないため。`test_clk_core.c` と `test_logfmt.c` が同じ名前を別々に固定する。
+4. **`[scr]` は、既定のビルドでも出る**(株価画面の描き直しのたびに `[scr] to=stock pal=0 clk=none kind=none temp=none tick=…`)。設計 §13.9(受け付けるたびに 1 行)のとおり。Phase 5 の判定スクリプトの行の正規表現に当てはまらない行が増える(`[hb]` `[stk]` など既存の書式は変えていない)。
+5. **既定のビルド(`APP_CLK_PREVIEW = 0`)で時計・天気画面へは切り替わらない**(`cview` は未同期のまま = `ui_screen_step` が待つ。6d で `clk_ui` → `ui_set_clk` をつなぐまで)。実機の既定の動作は変わらない。`g_app_dbg.scr` と `[hb] scr=` は 0 のまま。
+6. `ui_tap_inject`(UART の `x`)は、直前の `ui_update` の時刻を `t_scr` にする(設計 §13.3 の「`ui->now`」)。`uart_command` が `ui_update` より前に呼ばれるので、10ms 古い。次の `to=clock` までは `x` の tick から 999(U-C6 の 1,000 ± 3 に収まる)。
+7. `clk_core.h` に `CLK_CLOCK_NONE`(0xFFFF)`CLK_MINUTES_MAX`(1439)を持つ(`stk_core.h` の同じ値と、`test_clk_core.c` で一致を確認)。
+
+### 試験(ホスト。実機ではない)
+
+| 項目 | 試験 |
+|---|---|
+| H-C1 | `test_clk_core.c`(S39)。`-DCLK_WX_STALE_S=120` でも通る |
+| H-C5(`[scr]`)| `test_logfmt.c`(S8)。全組み合わせで R-SCR に一致・小バッファ・引数不正 |
+| H-C6 | `test_ui_screen.c`(S40)。⑧(`-DAPP_STK_PREVIEW` / `APP_CLK_PREVIEW` の `-fsyntax-only` と `#error`)は S7・S22 |
+| H-C7 | `test_ui_clock.c`(S41)。⑤ の C と Python の全画素一致は S41 の `cmp`(C0〜C11 とも 139,264 バイトが 0 バイト差。パレット 1,024 バイトも同じ) |
+| H-C9 | `test_lcd_panel.c`(S6)。(i)〜(vi) |
+| H-C10 | S1(`ui_clock` `clk_core` を追加)・S6・S7・S14・S28・S34・S35・S36・S37 が合格のまま。S38 は株価の sha256 が Phase 5 の値のままであることも見る |
+| 結合 | S34: `APP_CLK_PREVIEW = 1`(24 回の入れ替えの面の中身・パレット・`[scr]` の tick)、`= 2`(本物の切り替えとタップ)、`-DAPP_WX=0 -DT_CLK_INJECT`(時計・天気の値を注入。分だけ変わると同じパレット = `lcd_flip`)。S34 の既定の製品は `[scr]` が株価だけで `lcd_flip_pal` を呼ばない |
+| 変異 | S42: 株価の表示時間 10 → 9 秒、判定の `>=` → `>`、時刻未同期でも切り替える、タップで戻さない、`ClutUpdate_NoReflect` → 反映つき、`s_pal_shown` を更新しない、同じパレットでも `lcd_flip_pal`、気温の x を 1 画素ずらす(CRC と Python との 0 バイト差) |
+
+### ROM・スタック(RX 用 GCC 14.2、`-Og`、単独の `-c`。リンクはしていない)
+
+- `.text` の増分(`app_main` `app_logfmt` `gfx` `lcd_panel` `ui_logic` `ui_render` + `clk_core` `ui_clock`): 6,898 → 9,840 = **+2,942 バイト**。`.rodata` 相当(`clk_data.o`): **135,773 バイト**(`gen_clock_assets.py --check` の 135,602 + 字の表など)。合計 **約 138,700 バイト**(設計の見積 約 143,000 より少ない)。`.bss`: +30 バイト(`ui_t` と `s_pal_*`)。
+- `-Wstack-usage=100` の警告なし。最大は `draw_seq` の 80、`gfx_blit8_key` 72、`applog_fmt_scr` 68。
+
+### 6c・6d に残したこと
+
+- 天気の取得(`wx_parse_weather`・`wx_sched` の天気・`wifi_at.c` の天気・`APP_STK_FAULT = 4`)は未着手。
+- 6d: `clk_ui(&s_cview, now_ms)` と `ui_set_clk(&s_ui, &s_cview)` を `tick_step` へ(いまは `APP_CLK_PREVIEW` だけが値を渡す)。
+- ビルド担当: `HardwareDebug` の makefile へ新しい `.c`(`clk_core.c` `ui_clock.c` `clk_data.c` `clk_preview.c`)の反映。

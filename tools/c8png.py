@@ -6,8 +6,8 @@
   python tools/c8png.py sample <face.bin> <pal.bin>             箱8個の中心(x=35+58k, y=80)の idx と色
   python tools/c8png.py cmpface <dev_face> <dev_pal> <host_face> <host_pal>
                                                                 製品(P2b): 表示面とパレットの比較。x < 480 の添字の一致、パネル色の一致(右の 32 列は見ない)。差があれば最初の位置
-  python tools/c8png.py sheet  <fb_hostrender> <states_dir> <out.png>
-                                                                S0〜S7 のホストの C 描画を 2 列 x 4 行に並べる(V-0 の確認用。判定ではない)
+  python tools/c8png.py sheet  <fb_hostrender> <states_dir> <out.png> [C]
+                                                                S0〜S7 のホストの C 描画を 2 列 x 4 行に並べる(V-0 の確認用。判定ではない)。末尾に C を付けると C0〜C11(時計・天気)を 3 列 x 4 行
 終了コード: 0 = 一致/正常、1 = 違いあり、2 = 使い方・ファイルの誤り"""
 import os
 import struct
@@ -59,23 +59,24 @@ def cmd_cmp(a_p, b_p):
     return 1 if diff else 0
 
 
-def cmd_sheet(host, states_dir, out_p, work=None):
-    """S0〜S7 のホストの C 描画(fb_hostrender)を 2 列 x 4 行の 1 枚の PNG にする(V-0 の確認用。判定ではない)"""
+def cmd_sheet(host, states_dir, out_p, work=None, prefix='S'):
+    """S0〜S7 のホストの C 描画(fb_hostrender)を 2 列 x 4 行の 1 枚の PNG にする(V-0 の確認用。判定ではない)。prefix = 'C' なら C0〜C11 を 3 列 x 4 行(V-C0・V-C1)"""
     import subprocess
     import tempfile
     from PIL import Image
     work = work or tempfile.mkdtemp(prefix='c8sheet_')
     os.makedirs(work, exist_ok=True)
     gap = 16
-    sheet = Image.new('RGB', (2 * W + 3 * gap, 4 * H + 5 * gap), (52, 56, 64))
-    for n in range(8):
-        sf = os.path.join(states_dir, 'S%d.state' % n)
-        fb, pf = os.path.join(work, 'S%d.c8' % n), os.path.join(work, 'S%d.pal' % n)
+    cols, count = (3, 12) if prefix == 'C' else (2, 8)
+    sheet = Image.new('RGB', (cols * W + (cols + 1) * gap, 4 * H + 5 * gap), (52, 56, 64))
+    for n in range(count):
+        sf = os.path.join(states_dir, '%s%d.state' % (prefix, n))
+        fb, pf = os.path.join(work, '%s%d.c8' % (prefix, n)), os.path.join(work, '%s%d.pal' % (prefix, n))
         subprocess.check_call([os.path.abspath(host), sf, fb, '--pal', pf])
         face, pal = read(fb, FACE_BYTES), load_pal(pf)
         im = Image.new('RGB', (W, H))
         im.putdata([to_panel(pal[face[y * STRIDE + x]]) for y in range(H) for x in range(W)])
-        sheet.paste(im, (gap + (n % 2) * (W + gap), gap + (n // 2) * (H + gap)))
+        sheet.paste(im, (gap + (n % cols) * (W + gap), gap + (n // cols) * (H + gap)))
     sheet.save(out_p)
     print('保存: %s' % out_p)
     return 0
@@ -128,7 +129,7 @@ def cmd_sample(face_p, pal_p):
 
 def main(argv):
     if len(argv) >= 5 and argv[1] == 'sheet':
-        return cmd_sheet(argv[2], argv[3], argv[4])
+        return cmd_sheet(argv[2], argv[3], argv[4], prefix=(argv[5] if len(argv) >= 6 else 'S'))
     cmds = {'png': (cmd_png, 3), 'cmp': (cmd_cmp, 2), 'cmppal': (cmd_cmppal, 2), 'sample': (cmd_sample, 2), 'cmpface': (cmd_cmpface, 4)}
     if len(argv) < 2 or argv[1] not in cmds or len(argv) - 2 != cmds[argv[1]][1]:
         print(__doc__)

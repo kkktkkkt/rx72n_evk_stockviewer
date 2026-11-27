@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include "gfx.h"
 #include "ui_assets.h"
+#include "clk_assets.h"
 #include "stk_core.h"
 #include "ui_render.h"
 
@@ -156,6 +157,11 @@ static void draw_row(uint8_t *fb, const stk_row_t *r, uint8_t row, uint8_t dir)
     draw_text(fb, sa->font, buf, sa->x, sa->y, sa->align, ui_ramp[k_acc][dir]);
 }
 
+const uint32_t *ui_pal_ptr(uint8_t id)
+{
+    return ((id >= 1u) && (id <= (uint8_t)CLK_KINDS)) ? clk_pal[id - 1u] : ui_pal;
+}
+
 void ui_render(const ui_t *ui, uint8_t *fb)
 {
     const stk_view_t *v = &ui->view;
@@ -163,6 +169,10 @@ void ui_render(const ui_t *ui, uint8_t *fb)
     char buf[8];
     uint8_t i;
 
+    if (ui->screen == (uint8_t)UI_SCR_CLOCK) {                                                   /* 時計・天気画面(§13.3)。株価の描画は変えない */
+        ui_render_clock(&ui->cview, fb);
+        return;
+    }
     gfx_blit8(fb, ui_hdr, UI_W, 0, 0, UI_W, UI_HDR_H, 0, 0);                                   /* 1 */
     for (i = 0u; i < (uint8_t)STK_ROWS; i++) {                                                   /* 2 */
         dir[i] = ui_row_dir(&v->row[i]);

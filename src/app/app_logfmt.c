@@ -182,6 +182,40 @@ size_t applog_fmt_perf(char *buf, size_t size, uint32_t n, uint32_t copy_us, uin
                                    (unsigned long)slide_us));
 }
 
+size_t applog_fmt_scr(char *buf, size_t size, bool to_clock, uint8_t pal, uint16_t clk_min, uint8_t kind, bool have, int8_t temp, uint32_t tick)
+{
+    static const char *const names[8] = { "sun", "partly", "cloud", "fog", "rain", "snow", "thunder", "unknown" };
+    size_t pos = 0u;
+
+    if (!arg_ok(buf, size)) {
+        return 0u;
+    }
+    if ((pal > 8u) || (have && ((kind > 7u) || (temp < -99) || (temp > 99)))) {
+        return 0u;
+    }
+    if (!adv(snprintf(buf, size, "[scr] to=%s pal=%u", to_clock ? "clock" : "stock", to_clock ? (unsigned)pal : 0u), size, &pos)) {
+        return fin(buf, size, 0);
+    }
+    if (clk_min > 1439u) {
+        if (!adv(snprintf(buf + pos, size - pos, " clk=none"), size, &pos)) {
+            return fin(buf, size, 0);
+        }
+    } else if (!adv(snprintf(buf + pos, size - pos, " clk=%02u%02u", (unsigned)(clk_min / 60u), (unsigned)(clk_min % 60u)), size, &pos)) {
+        return fin(buf, size, 0);
+    }
+    if (have) {
+        if (!adv(snprintf(buf + pos, size - pos, " kind=%s temp=%d", names[kind], (int)temp), size, &pos)) {
+            return fin(buf, size, 0);
+        }
+    } else if (!adv(snprintf(buf + pos, size - pos, " kind=none temp=none"), size, &pos)) {
+        return fin(buf, size, 0);
+    }
+    if (!adv(snprintf(buf + pos, size - pos, " tick=%lu\r\n", (unsigned long)tick), size, &pos)) {
+        return fin(buf, size, 0);
+    }
+    return pos;
+}
+
 size_t applog_fmt_err(char *buf, size_t size, uint32_t code, uint32_t detail)
 {
     if (!arg_ok(buf, size)) {

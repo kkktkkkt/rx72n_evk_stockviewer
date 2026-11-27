@@ -649,3 +649,40 @@ cd D:\workspace\rx72n\rx72n_gcc
 ### 注意
 - `HardwareDebug\` の中身は製品版(A、19:39)。書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。
 - `.settings/*.properties` のタイムスタンプ行をビルドが書き換えた可能性がある(内容の変化は未確認)。
+
+## 追記: 2026-11-27 23:45〜23:49 (JST) 時計・天気画面(Phase 6b)の構成 A / P1 / A 再ビルド(ビルド担当)
+
+前提: e2studio / e2studioc / make / rfp-cli / e2-server-gdb / rx-elf-gdb のプロセス無し。`jobs/runner.alive` 23:45:22(新しい)。`jobs/inbox` 空。`wifi_secret.h` は開いていない・内容を出していない。書込み・実機操作・COM・gdb・rfp-cli は**未実施**。
+
+| 時刻(JST) | コマンド(`tools/submit-job.sh`) | 結果 | 備考 |
+|---|---|---|---|
+| 23:45:30〜23:46:50 | A: `build '{"mode":"Headless","clean":true}' 400`(ジョブ `234526-build`) | exit 0 だが、ログが途中で切れ、`ELFが見つからない` と出た(ランナー/スクリプトの確認タイミングの問題と見る。実際は 23:46:54 にリンク完了、ELF・MOT・MAP を確認) | ログ `jobs/outbox/234526-build.log` は不完全。**同じ条件で再実行して正常終了を確認**(下の 234718) |
+| 23:47:27〜23:47:45 | A(同じ条件の再実行。ジョブ `234718-build`、exit 0、26 秒) | **成功**(`Build Finished. 0 errors, 2 warnings`) | 正常終了。`clk_core.c` `clk_data.c` `clk_preview.c` `ui_clock.c` を含む 74 ファイルを再コンパイル(clean)。Makefile はヘッドレスで自動再生成された(手動の手順は不要) |
+| 23:48:09〜23:48:27 | **P1**: `src/app/wifi_sw.h` の `APP_CLK_PREVIEW` を (0) → (1) の 1 行だけ → `build '{"mode":"Headless","clean":true}' 400`(ジョブ `234800-build`、exit 0、26 秒) | **成功**(`0 errors, 2 warnings`) | 警告は既知の smc_gen 2 件のみ。`APP_WX` は既定で 0 になる(`APP_CLK_PREVIEW` 非 0 のため) |
+| 23:48:27 | **P1 の値を (1) → (0) に戻す**(Edit で 1 行) | OK | `grep` で `APP_CLK_PREVIEW` = (0) を確認 |
+| 23:48:48〜23:49:05 | A 最終: `build '{"mode":"Headless","clean":true}' 400`(ジョブ `234838-build`、exit 0、26 秒) | **成功**(`0 errors, 2 warnings`) | `HardwareDebug` は製品版に戻した |
+
+### 成果物(`jobs\artifacts\`。git 管理外)
+| 構成 | ファイル | ELF(バイト) | MOT(バイト) | text / data / bss | ROM(text+data) |
+|---|---|---|---|---|---|
+| A 製品(`APP_CLK_PREVIEW`=0、`APP_WX`=1 の既定) | `A2-product.elf` `A2-product.mot` `A2-product.map` | 1,932,040 | 1,915,442 | **635,548 / 2,876 / 22,592** | 638,424 |
+| P1 時計プレビュー(`APP_CLK_PREVIEW`=1、`APP_WX`=0) | `P1-clk1.elf` `P1-clk1.mot` `P1-clk1.map` | 1,777,184 | 1,866,010 | **619,072 / 2,876 / 18,368** | 621,948 |
+| A 最終(`HardwareDebug` の中身。ELF のサイズは A2 と同じ) | `HardwareDebug\rx72n_stockview.elf` `.mot` | 1,932,040 | 1,915,442 | 635,548 / 2,876 / 22,592 | 638,424 |
+
+- 前回の製品(2026-11-27 19:39、Phase 4 まで、clk なし)との差: text **+138,664**、bss 0、data 0。内訳は `clk_data.o` の text 135,773 バイト(画像などの定数データ。`.rodata` 相当で ROM のみ)と `clk_core.o` 878、`ui_clock.o` 689 ほか。**`clk_data.c` は `APP_CLK_PREVIEW` = 0 でも中身が消えず、製品の ROM に入る**(ROM 使用量 638,424 バイト = 4MB の約 15.9%)。これを製品に入れたくなければ、コーディング担当へ差し戻しが必要(設計の確認事項)。
+- P1 と A の差: text +16,476(`wifi_at` `wifi_core` `wx_core` が P1 では 0 バイトになる分)、bss +4,224(同)。
+
+### 構成の証拠(`rx-elf-nm` / `rx-elf-size`)
+- 製品 A: `clk_` で始まるシンボル(`_clk_pal` `_clk_icon` `_clk_glyph_pool` `_clk_kind_of` など)が 34 件ある(clk_core と clk_data が入っている)。`clk_preview` のシンボルは **0 件**(`clk_preview.o` は 0 バイト)。
+- P1: `clk_preview` のシンボルが **1 件**。`clk_preview.o` は text 96 バイト。`clk_core.o` 878、`clk_data.o` 135,773、`ui_clock.o` 689 は A と同じ。`wx_core.o` `wifi_core.o` `wifi_at.o` は 0 バイト。
+- RAM2(`0x00800000` 台)の出力セクションは確認していない(この手順では `objdump` を実行していない)。
+
+### 警告・エラー
+- 全ビルド(A ×3、P1 ×1)とも **0 errors**。警告は毎回 2 件のみで、既知の smc_gen の `-Wstack-usage=100` 非対応(`src/smc_gen/r_bsp/mcu/all/r_bsp_common.c:105` `delay_wait`、`src/smc_gen/r_bsp/mcu/all/r_rx_intrinsic_functions.c:347` `R_BSP_ChangeToUserMode`)。`src/app/` の警告は 0 件(clean ビルドで全数確認)。
+- ログ末尾の llvm の manifest メッセージは従来どおり(影響なし)。
+
+### 注意
+- `wifi_sw.h` の `APP_CLK_PREVIEW` は (0) に戻した。`git diff -- src/app/wifi_sw.h` に `APP_CLK_PREVIEW` の値の変更行は無い(差分は、コーディング担当の未コミットの追加行(定義・`#error`・`APP_WX` の条件)だけ)。
+- 最終の `HardwareDebug` は製品版(A、23:49)。
+- A の ELF・MOT・MAP には、`APP_WX` = 1 のため `wifi_secret.h` の Wi-Fi 設定が入りうる(設計 §21.5)。`jobs\artifacts\A2-product.*` も同じ。外へ出さないこと。P1 は `APP_WX` = 0 のため入らない。
+- 書込み・実機操作は未実施。ランナーは起動したまま。

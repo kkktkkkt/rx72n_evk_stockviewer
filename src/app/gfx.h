@@ -27,6 +27,11 @@ void gfx_fillrect(uint16_t *fb, int32_t x, int32_t y, int32_t w, int32_t h, uint
 void gfx_blit8(uint8_t *fb, const uint8_t *src, int32_t src_stride,
                int32_t sx, int32_t sy, int32_t w, int32_t h, int32_t dx, int32_t dy);
 
+/* 透明色を飛ばして重ねる: src(行の長さ src_stride)の (sx,sy) から w x h のうち、画素が key でないものだけを fb の (dx,dy) へ書く(key の画素は fb を変えない)。
+ * gfx_blit8 と同じ切り取り(面の外・右の 32 列へは書かない)。fb / src が NULL・w か h が 0 以下は何もしない。 */
+void gfx_blit8_key(uint8_t *fb, const uint8_t *src, int32_t src_stride,
+                   int32_t sx, int32_t sy, int32_t w, int32_t h, int32_t dx, int32_t dy, uint8_t key);
+
 void gfx_fill8(uint8_t *fb, int32_t x, int32_t y, int32_t w, int32_t h, uint8_t idx);
 
 /* 段階の表で重ね描き: a8(w x h、行の長さ w)の濃度のレベル l = (a + 4) >> 3(0..32)の画素のうち、l != 0 の所を ramp[l] にする。

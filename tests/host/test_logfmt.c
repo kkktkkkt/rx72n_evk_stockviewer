@@ -512,6 +512,105 @@ int main(void)
         }
     }
 
+    TEST("[scr] (H-C5): applog_fmt_scr の文字列・境界値・R-SCR に fullmatch・小バッファ・引数不正(docs/design-uart.md §14)");
+    {
+        static const char *const NM[8] = { "sun", "partly", "cloud", "fog", "rain", "snow", "thunder", "unknown" };
+        char b[APPLOG_LINE_MAX + GUARD];
+        size_t n;
+        unsigned to, pal, k, i;
+        int pat_ok = 1, exact_ok = 1, pal_rule_ok = 1;
+        static const uint16_t CLKS[] = { 0u, 1u, 581u, 599u, 1439u, 1440u, 0xFFFEu, 0xFFFFu };
+        static const int8_t TEMPS[] = { -99, -10, -1, 0, 9, 18, 99 };
+        static const uint32_t TICKS[] = { 0u, 1u, 12345u, 0xFFFFFFFFu };
+
+        n = applog_fmt_scr(b, sizeof b, true, 1u, 581u, 0u, true, 18, 1234u);
+        CHECK_EQ(n, strlen("[scr] to=clock pal=1 clk=0941 kind=sun temp=18 tick=1234\r\n"));
+        CHECK(strcmp(b, "[scr] to=clock pal=1 clk=0941 kind=sun temp=18 tick=1234\r\n") == 0);
+        n = applog_fmt_scr(b, sizeof b, false, 0u, 581u, 0u, true, 18, 1234u);                 /* 株価: pal = 0。clk と kind と temp は時計・天気の値(株価のときも付く) */
+        CHECK(strcmp(b, "[scr] to=stock pal=0 clk=0941 kind=sun temp=18 tick=1234\r\n") == 0);
+        n = applog_fmt_scr(b, sizeof b, false, 5u, 581u, 4u, true, -2, 7u);                    /* to_clock = 0 なら pal を 0 にそろえる */
+        CHECK(strcmp(b, "[scr] to=stock pal=0 clk=0941 kind=rain temp=-2 tick=7\r\n") == 0);
+        n = applog_fmt_scr(b, sizeof b, true, 8u, 0xFFFFu, 7u, false, 0, 0xFFFFFFFFu);         /* 天気なし・時刻なし */
+        CHECK(strcmp(b, "[scr] to=clock pal=8 clk=none kind=none temp=none tick=4294967295\r\n") == 0);
+        n = applog_fmt_scr(b, sizeof b, true, 2u, 0u, 1u, true, 0, 0u);                        /* 00:00・0° */
+        CHECK(strcmp(b, "[scr] to=clock pal=2 clk=0000 kind=partly temp=0 tick=0\r\n") == 0);
+        for (to = 0u; to < 2u; to++) {
+            for (pal = 0u; pal < 9u; pal++) {
+                for (k = 0u; k < 8u; k++) {
+                    for (i = 0u; i < sizeof(CLKS) / sizeof(CLKS[0]); i++) {
+                        unsigned h, t, c;
+                        for (h = 0u; h < 2u; h++) {
+                            for (t = 0u; t < sizeof(TEMPS) / sizeof(TEMPS[0]); t++) {
+                                for (c = 0u; c < sizeof(TICKS) / sizeof(TICKS[0]); c++) {
+                                    memset(b, POISON, sizeof b);
+                                    n = applog_fmt_scr(b, APPLOG_LINE_MAX, to != 0u, (uint8_t)pal, CLKS[i], (uint8_t)k, h != 0u, TEMPS[t], TICKS[c]);
+                                    if (!line_ascii_ok(b, n) || ((unsigned char)b[APPLOG_LINE_MAX] != POISON)) { pat_ok = 0; continue; }
+                                    {   /* R-SCR: to=(stock|clock) pal=([0-8]) clk=(\d{4}|none) kind=(名前|none) temp=(-?\d{1,2}|none) tick=(\d+) */
+                                        char tmp[APPLOG_LINE_MAX];
+                                        const char *p = tmp;
+                                        int cl = (CLKS[i] <= 1439u);
+                                        memcpy(tmp, b, n - 2u); tmp[n - 2u] = '\0';
+                                        if (strncmp(p, "[scr] to=", 9) != 0) { pat_ok = 0; continue; }
+                                        p += 9;
+                                        if (to) { if (strncmp(p, "clock pal=", 10) != 0) { pat_ok = 0; continue; } p += 10; }
+                                        else    { if (strncmp(p, "stock pal=", 10) != 0) { pat_ok = 0; continue; } p += 10; }
+                                        if (!((*p >= '0') && (*p <= '8') && (p[1] == ' '))) { pat_ok = 0; continue; }
+                                        if ((unsigned)(*p - '0') != (to ? pal : 0u)) { pal_rule_ok = 0; }       /* to_clock = 0 なら 0 */
+                                        p += 2;
+                                        if (strncmp(p, "clk=", 4) != 0) { pat_ok = 0; continue; }
+                                        p += 4;
+                                        if (cl) {
+                                            unsigned hh = (CLKS[i] / 60u), mm = (CLKS[i] % 60u);
+                                            if (!((p[0] == (char)('0' + hh / 10u)) && (p[1] == (char)('0' + hh % 10u)) && (p[2] == (char)('0' + mm / 10u)) && (p[3] == (char)('0' + mm % 10u)) && (p[4] == ' '))) { pat_ok = 0; continue; }
+                                            p += 5;
+                                        } else {
+                                            if (strncmp(p, "none ", 5) != 0) { pat_ok = 0; continue; }
+                                            p += 5;
+                                        }
+                                        {
+                                            char want[64];
+                                            if (h) { (void)snprintf(want, sizeof want, "kind=%s temp=%d tick=%lu", NM[k], (int)TEMPS[t], (unsigned long)TICKS[c]); }
+                                            else   { (void)snprintf(want, sizeof want, "kind=none temp=none tick=%lu", (unsigned long)TICKS[c]); }
+                                            if (strcmp(p, want) != 0) { exact_ok = 0; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        CHECK(pat_ok);
+        CHECK(exact_ok);
+        CHECK(pal_rule_ok);
+
+        /* 範囲外は失敗(0・buf[0] = '\0')。have = 0 のとき kind と temp は見ない */
+        memset(b, POISON, sizeof b); CHECK_EQ(applog_fmt_scr(b, sizeof b, true, 9u, 581u, 0u, true, 18, 1u), 0); CHECK_EQ(b[0], 0);
+        memset(b, POISON, sizeof b); CHECK_EQ(applog_fmt_scr(b, sizeof b, true, 1u, 581u, 8u, true, 18, 1u), 0); CHECK_EQ(b[0], 0);
+        memset(b, POISON, sizeof b); CHECK_EQ(applog_fmt_scr(b, sizeof b, true, 1u, 581u, 0u, true, 100, 1u), 0); CHECK_EQ(b[0], 0);
+        memset(b, POISON, sizeof b); CHECK_EQ(applog_fmt_scr(b, sizeof b, true, 1u, 581u, 0u, true, -100, 1u), 0); CHECK_EQ(b[0], 0);
+        CHECK(applog_fmt_scr(b, sizeof b, true, 8u, 581u, 200u, false, 100, 1u) > 0u);          /* have = 0: kind・temp は無視 */
+        CHECK(strstr(b, "kind=none temp=none") != NULL);
+        CHECK_EQ(applog_fmt_scr(NULL, 100u, true, 1u, 581u, 0u, true, 18, 1u), 0);
+        CHECK_EQ(applog_fmt_scr(b, 0u, true, 1u, 581u, 0u, true, 18, 1u), 0);
+        /* 小バッファ: 行の長さ + 1 未満はすべて 0 で buf[0] = '\0'、番兵は無傷。ちょうど足りれば成功 */
+        {
+            const char *ref = "[scr] to=clock pal=1 clk=0941 kind=sun temp=18 tick=1234\r\n";
+            size_t len = strlen(ref), sz;
+            int ok = 1;
+            for (sz = 1u; sz <= len + 1u; sz++) {
+                memset(b, POISON, sizeof b);
+                n = applog_fmt_scr(b, sz, true, 1u, 581u, 0u, true, 18, 1234u);
+                if (sz <= len) { if ((n != 0u) || (b[0] != '\0')) { ok = 0; } }
+                else           { if ((n != len) || (strcmp(b, ref) != 0)) { ok = 0; } }
+                if ((unsigned char)b[sz] != POISON && sz < sizeof b - 1u && sz <= len) { ok = 0; }       /* sz 以降を書かない(NUL 終端は sz 内) */
+            }
+            CHECK(ok);
+        }
+        CHECK(strlen("[scr] to=clock pal=8 clk=2359 kind=thunder temp=-99 tick=4294967295\r\n") < 100u);   /* 最長の行は約 70 バイト */
+    }
+
     TEST("applog_err_changed");
     {
         CHECK_EQ(applog_err_changed(0u, 0u, 0u, 0u), 0);
