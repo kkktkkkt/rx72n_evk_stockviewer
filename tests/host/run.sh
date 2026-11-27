@@ -524,19 +524,8 @@ if sel S31; then
   result S31 $rc
 fi
 
-# ---------------------------------------------------------------- S32
-# 不具合の可能性(設計と実装の食い違い・設計の穴)。落ちる試験を残してある。FAIL には数えず、SUSPECT として別に数える(0 になれば解消)
-if sel S32; then
-  echo "### S32 不具合の可能性(test_stk_indep --suspect): close 配列の途中で切れた応答を成功にしない・clock_min の範囲外を時刻にしない。落ちたら SUSPECT(FAIL には数えない)"
-  rc=0
-  build_ui_objs || rc=1
-  [ -x "$BUILD/test_stk_indep" ] || cc_nowarn $STD -Wall -Wextra -Wconversion -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_stk_indep.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/wx_core.c" "$UIOBJ/ui_gfx_data.o" "$UIOBJ/ui_layout.o" "$UIOBJ/ui_strips.o" -lm -o "$BUILD/test_stk_indep" || rc=1
-  if [ $rc -ne 0 ]; then result S32 1
-  else
-    if timeout 300 "$BUILD/test_stk_indep" "$HERE/data" --suspect; then echo "==> PASS  S32 (不具合の可能性は解消している)"; echo
-    else echo "==> SUSPECT  S32 (不具合の可能性が残っている。上の FAIL 行が該当。FAIL には数えない)"; SUSPECTS=$((SUSPECTS+1)); echo; fi
-  fi
-fi
+# S32(不具合の可能性の別枠)は、設計の修正で SUSPECT が 0 になったので、試験を S31(test_stk_indep の I)へ格上げして廃止した。
+# 新しい「不具合の可能性」を見つけたら、落ちる試験を test_stk_indep の t_suspect に足し、ここへ S32(--suspect を走らせ、落ちたら SUSPECTS を増やす)を作り直す。
 
 echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS SUSPECT(不具合の可能性)=$SUSPECTS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"
 [ $FAILS -eq 0 ]

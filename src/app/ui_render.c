@@ -61,7 +61,7 @@ static void draw_text(uint8_t *fb, uint8_t font, const char *s, int32_t x, int32
 
 static void fmt_hhmm(char *out, uint16_t m)
 {
-    if (m == (uint16_t)STK_NONE16) {
+    if (m > (uint16_t)STK_MINUTES_MAX) {                    /* 0xFFFF = なし、1440〜0xFFFE = 範囲外。どちらも --:-- */
         out[0] = '-'; out[1] = '-'; out[2] = ':'; out[3] = '-'; out[4] = '-'; out[5] = '\0';
         return;
     }
@@ -79,7 +79,7 @@ uint8_t ui_row_dir(const stk_row_t *r)
     if (r->have == 0u) {
         return (uint8_t)STK_FLAT;
     }
-    return (r->diff_x100 > 0) ? (uint8_t)STK_UP : ((r->diff_x100 < 0) ? (uint8_t)STK_DOWN : (uint8_t)STK_FLAT);
+    return (r->pct_bp > 0) ? (uint8_t)STK_UP : ((r->pct_bp < 0) ? (uint8_t)STK_DOWN : (uint8_t)STK_FLAT);   /* 丸めた騰落率の符号(§4.2) */
 }
 
 uint8_t ui_foot_index(const stk_view_t *v)
@@ -150,9 +150,9 @@ static void draw_row(uint8_t *fb, const stk_row_t *r, uint8_t row, uint8_t dir)
     k_acc  = (r->stale != 0u) ? (uint8_t)UI_R_STALE : (uint8_t)UI_R_ACC;
     (void)stk_fmt_price(buf, sizeof buf, r->price_x100, kind);
     draw_text(fb, sp->font, buf, sp->x, sp->y, sp->align, ui_ramp[k_main][dir]);
-    (void)stk_fmt_pct(buf, sizeof buf, r->pct_bp, dir);
+    (void)stk_fmt_pct(buf, sizeof buf, r->pct_bp);
     draw_text(fb, sc->font, buf, sc->x, sc->y, sc->align, ui_ramp[k_acc][dir]);
-    (void)stk_fmt_amt(buf, sizeof buf, r->diff_x100, kind);
+    (void)stk_fmt_amt(buf, sizeof buf, r->diff_x100, kind, dir);
     draw_text(fb, sa->font, buf, sa->x, sa->y, sa->align, ui_ramp[k_acc][dir]);
 }
 

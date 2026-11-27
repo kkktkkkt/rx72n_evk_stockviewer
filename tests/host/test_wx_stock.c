@@ -127,7 +127,7 @@ static void t_h3(void)
         CHECK_EQ(r.mtime, f->mtime); CHECK_EQ(r.rs, f->rs); CHECK_EQ(r.re, f->re); CHECK_EQ(r.cur, f->cur);
         CHECK_EQ(r.have_date, 1); CHECK_EQ(r.jst_s, f->utc + 32400u);
         CHECK(stk_calc(r.price_x100, r.prev_x100, &c)); CHECK_EQ(c.pct_bp, f->bp);
-        CHECK_EQ(stk_market(true, f->utc, r.mtime, r.rs, r.re), f->mkt);
+        CHECK_EQ(stk_market(stk_sym((uint8_t)(i % 3u)), true, f->utc + 32400u, r.mtime, r.rs, r.re), f->mkt);   /* 並びは 6723.T・^N225・^GSPC の繰り返し */
         /* 解析が触らない項目(wifi_core が入れる)は元のまま */
         CHECK_EQ(r.sym, 0xA5); CHECK_EQ(r.closed, 0xA5); CHECK_EQ(r.ms, 0xA5A5A5A5u); CHECK_EQ(r.first_ms, 0xA5A5A5A5u); CHECK_EQ(r.len, 0xA5A5);
         /* バッファに NUL 終端が無くてよい(末尾を禁止ページに接して渡している)。先頭に接しても同じ */
@@ -141,59 +141,95 @@ static void t_h3(void)
 }
 
 /* ---------------------------------------------------------------- H-4 ① あらゆる長さに切る */
-static size_t term_idx(const char *t, const char *from, const char *key)       /* 値の次(区切り)の位置 */
-{
-    const char *p = strstr(from, key);
-    if (p == NULL) { return 0u; }
-    p += strlen(key);
-    while ((*p >= '0' && *p <= '9') || *p == '.' || *p == '-') { p++; }
-    return (size_t)(p - t);
-}
-
 static void t_h4_cut(void)
 {
-    size_t i, len;
+    size_t i, len, bad_n;
     int    at;
     long   bad = 0;
+    int    full_ok = 0;
 
-    TEST("H-4 ① 6 つの実応答を 0〜全長に切って、末尾/先頭を禁止ページに接して解析(範囲外を読むと異常終了)。最初に成功する長さ = 必要な値がそろう長さ");
+    TEST("H-4 ① 6 つの実応答を 0〜全長に切って、末尾/先頭を禁止ページに接して解析(範囲外を読むと異常終了)。全長より短い先頭部分は、どの長さでも成功にならない(S32 の SUSPECT-1)");
     if (!guard_init()) { printf("  (ガードページを作れない: 普通のバッファで試験する)\n"); }
     for (i = 0u; i < NFX; i++) {
         const fx_t *f = &FX[i];
         const char *t = g_fx[i];
-        const char *rg = strstr(t, "\"regular\":{");
-        size_t need = 0u, tmp, brk;
-        const char *cl = strstr(strstr(t, "\"indicators\":"), "\"close\":[");
+        size_t hdr_end = (size_t)(strstr(t, "\r\n\r\n") - t) + 4u;      /* 本文の始まり */
+        size_t cl = (size_t)(strstr(strstr(t, "\"indicators\":"), "\"close\":[") - t) + 9u;   /* close 配列の中身の始まり */
+        size_t br = (size_t)(strchr(t + cl, ']') - t);                    /* close 配列の ] の位置 */
+        size_t n_cl3 = 0u;
 
-        tmp = term_idx(t, t, "\"regularMarketPrice\":");  if (tmp > need) { need = tmp; }
-        tmp = term_idx(t, t, "\"chartPreviousClose\":");  if (tmp > need) { need = tmp; }
-        tmp = term_idx(t, t, "\"regularMarketTime\":");   if (tmp > need) { need = tmp; }
-        tmp = term_idx(t, rg, "\"start\":");              if (tmp > need) { need = tmp; }
-        tmp = term_idx(t, rg, "\"end\":");                if (tmp > need) { need = tmp; }
-        need += 1u;                                                   /* 区切りまで届いて、初めて値が確定する */
-        brk = (size_t)(strchr(cl, ']') - t) + 1u;                     /* close 配列の ] まで届いて、初めて直前の足が確定する */
-        CHECK(rg != NULL && need > 100u && brk > need);
+        CHECK(hdr_end > 100u && cl > hdr_end && br > cl);
         for (len = 0u; len <= g_fxn[i]; len++) {
             for (at = 0; at < 2; at++) {
                 wx_result_t r;
                 bool ok = wx_parse_http(place(t, len, at), len, &r);
 
-                if (len < need) {
-                    if (ok || r.ok != 0u || r.err != ((len < 12u) ? 3u : 5u)) { bad++; }
-                    if ((len >= 12u) && (r.http != 200u)) { bad++; }
-                } else {
-                    if (!ok || r.ok != 1u || r.err != 0u || r.http != 200u) { bad++; continue; }
-                    if ((r.price_x100 != f->price) || (r.mtime != f->mtime) || (r.rs != f->rs) || (r.re != f->re) || (r.cur != f->cur)) { bad++; }
-                    if ((len < brk) || (f->bar == 0u)) {              /* 配列が途切れている・直前の足が無い: chartPreviousClose へ */
-                        if ((r.has_bar_prev != 0u) || (r.prev_x100 != f->meta_prev)) { bad++; }
-                    } else if ((r.has_bar_prev != 1u) || (r.prev_x100 != f->prev)) { bad++; }
+                if (len == g_fxn[i]) {                                   /* 全長は成功 */
+                    if (!ok || r.ok != 1u || r.err != 0u || r.http != 200u || r.price_x100 != f->price || r.prev_x100 != f->prev || r.has_bar_prev != f->bar) { bad++; }
+                    full_ok++;
+                    continue;
                 }
+                if (ok || (r.ok != 0u)) { bad++; continue; }              /* どの途切れも成功にしない */
+                if ((r.err != 3u) && (r.err != 5u)) { bad++; continue; }
+                if ((len >= 12u) && (r.http != 200u)) { bad++; }
+                /* 段 3: 状態行まで届かない・空行が無い = 3。本文が 0 バイト = 5(JSON でない)。本文が { で始まって閉じない = 3 */
+                if ((len < hdr_end) && (r.err != 3u) && (len != hdr_end)) { bad++; }
+                if ((len == hdr_end) && (r.err != 5u)) { bad++; }
+                if ((len > hdr_end) && (r.err != 3u)) { bad++; }
+                if ((len >= cl) && (len <= br) && (r.err == 3u)) { n_cl3++; }
             }
         }
-        if (bad != 0) { printf("  %s: 不一致 %ld 件(need=%u brk=%u)\n", f->file, bad, (unsigned)need, (unsigned)brk); }
+        bad_n = (br - cl + 1u) * 2u;                                     /* close 配列の中身の途中(] の手前まで)で切った長さ x 2 通りの置き方 */
+        if (bad != 0) { printf("  %s: 不一致 %ld 件\n", f->file, bad); }
         CHECK_EQ(bad, 0);
+        CHECK_EQ(n_cl3, bad_n);                                          /* それらはすべて err = 3(GSPC_2d では 31 通りの ] の手前を含む) */
         bad = 0;
     }
+    CHECK_EQ(full_ok, (int)(NFX * 2u));
+    TEST("H-4 ① 全長 + 末尾の空白・改行は成功。全長 + 余計な文字は失敗(err = 3)");
+    {
+        static char big[4200];
+        size_t k;
+        for (k = 0u; k < NFX; k++) {
+            wx_result_t r;
+            size_t n = g_fxn[k];
+            memcpy(big, g_fx[k], n);
+            memcpy(big + n, " \r\n\t ", 5u);
+            CHECK(wx_parse_http(place(big, n + 5u, 1), n + 5u, &r)); CHECK_EQ(r.price_x100, FX[k].price);
+            big[n] = '}';
+            CHECK(!wx_parse_http(place(big, n + 1u, 1), n + 1u, &r)); CHECK_EQ(r.err, 3);
+            big[n] = 'x';
+            CHECK(!wx_parse_http(place(big, n + 1u, 1), n + 1u, &r)); CHECK_EQ(r.err, 3);
+        }
+    }
+}
+
+/* stk_json_complete(設計 §5.2 段 3b)の単体 */
+static void t_json_complete(void)
+{
+    static const struct { const char *s; int want; } J[] = {
+        { "", 0 }, { "{", 0 }, { "}", 0 }, { "{}", 1 }, { " {} ", 1 }, { "{}\r\n", 1 }, { "{} x", 0 }, { "{}}", 0 }, { "{}{}", 0 }, { "{} {", 0 },
+        { "{\"a\":\"}\"}", 1 }, { "{\"a\":\"}\"", 0 }, { "{\"a\":\"{\"}", 1 }, { "{\"a\":\"[\"}", 1 },
+        { "{\"a\":\"\\\"}", 0 },                 /* {"a":"\"}  = 文字列が閉じない */
+        { "{\"a\":\"\\\\\"}", 1 },               /* {"a":"\\"} = 閉じる */
+        { "{\"a\":[1,2]}", 1 }, { "{\"a\":[1,2}", 0 }, { "{\"a\":[1,2", 0 }, { "{\"a\":[", 0 }, { "[", 0 }, { "]", 0 }, { "[]", 1 }, { "[[]]", 1 }, { "[[]", 0 },
+        { "{\"a\":{\"b\":{\"c\":[{}]}}}", 1 }, { "{\"a\":{\"b\":{\"c\":[{}]}}", 0 }, { "\"x\"", 0 }, { "123", 0 }, { "{\"a\"", 0 }, { "{\"a\":\"", 0 }
+    };
+    size_t i;
+    char   deep[300];
+
+    TEST("H-4 ① stk_json_complete の単体: 空・{・{}・文字列の中の }・エスケープ・余分な閉じ・閉じた後の文字・入れ子・配列だけ");
+    for (i = 0u; i < sizeof J / sizeof J[0]; i++) {
+        bool g = stk_json_complete(J[i].s, strlen(J[i].s));
+        if ((int)g != J[i].want) { printf("  [%s]: got %d want %d\n", J[i].s, (int)g, J[i].want); }
+        CHECK_EQ((int)g, J[i].want);
+    }
+    CHECK(stk_json_complete("{}xxxx", 2u));                         /* n で止まる(NUL 終端を仮定しない) */
+    CHECK(!stk_json_complete("{}", 1u));
+    memset(deep, '{', 100); memset(deep + 100, '}', 100);
+    CHECK(stk_json_complete(deep, 200u)); CHECK(!stk_json_complete(deep, 199u)); CHECK(!stk_json_complete(deep, 100u));
+    memset(deep, '[', 120); memset(deep + 120, ']', 119); deep[239] = 'x';
+    CHECK(!stk_json_complete(deep, 240u));                          /* 閉じが 1 つ足りない */
 }
 
 /* ---------------------------------------------------------------- H-4 ② 合成の応答 */
@@ -309,13 +345,13 @@ static void t_h4_syn(void)
     t = T0; t.close = "[2433.0,abc]"; EXPECT_OK(&t, 256450, 243300, 0);                    /* 読めない要素 */
     t = T0; t.close = "[1e3,2]"; EXPECT_OK(&t, 256450, 243300, 0);
     t = T0; t.close = "[12345678,2]"; EXPECT_OK(&t, 256450, 243300, 0);                    /* 整数部 8 桁の要素 */
-    t = T0; t.close = "[2433.0,2564.5"; EXPECT_OK(&t, 256450, 243300, 0);                  /* ] が無い(途切れ) */
+    t = T0; t.close = "[2433.0,2564.5"; EXPECT_ERR(&t, 3u);                               /* ] が無い = JSON が閉じない = 途切れ(段 3b。S32 の SUSPECT-1) */
     t = T0; t.close = "[2433.0 ,2564.5]"; EXPECT_OK(&t, 256450, 243300, 0);                /* 空白は読めない(Yahoo の出力にはない)→ 直前の足なし */
     t = T0; t.close = "[2433.0, 2564.5]"; EXPECT_OK(&t, 256450, 243300, 0);                /* 要素の前の空白は読めない(Yahoo の出力にはない)→ 直前の足なし */
     t = T0; t.close = "null"; EXPECT_OK(&t, 256450, 243300, 0);                            /* 配列でない */
     t = T0; t.close = "[2433.0,2564.5,]"; EXPECT_OK(&t, 256450, 243300, 0);                /* 末尾のカンマ(JSON として不正) */
-    t = T0; t.close = "[2433.0,2564.5]]"; EXPECT_OK(&t, 256450, 243300, 1);
-    {
+    t = T0; t.close = "[2433.0,2564.5]]"; EXPECT_ERR(&t, 3u);                              /* 余分な閉じ = 閉じた後に文字が続く(段 3b) */
+    t = T0; t.close = "[2433.0]"; EXPECT_OK(&t, 256450, 243300, 0);                        /* 1 本だけの足が閉じている(range=2d の ^N225)は正当 */    {
         char b[1800];
         size_t n = build(b, sizeof b, &T0);
         memcpy(strstr(b, "\"indicators\":") + 1, "X", 1u);                                 /* indicators が無い */
@@ -410,20 +446,23 @@ static void t_h4_http(void)
     snprintf(b, sizeof b, "HTTP/1.0 20 OK\r\n\r\n%s", BODY);
     CHECK(!Praw(b, &r)); CHECK_EQ(r.err, 4);
     CHECK(!Praw("", &r)); CHECK_EQ(r.err, 3);
-    CHECK(!Praw("HTTP/1.0 200", &r)); CHECK_EQ(r.err, 5); CHECK_EQ(r.http, 200);
+    CHECK(!Praw("HTTP/1.0 200", &r)); CHECK_EQ(r.err, 3); CHECK_EQ(r.http, 200);
     CHECK(!Praw("HTTP/1.0 20", &r)); CHECK_EQ(r.err, 3);
     CHECK(!wx_parse_http(NULL, 0u, &r)); CHECK_EQ(r.err, 3); CHECK_EQ(r.ok, 0);
     TEST("H-4 ③ 200 でも本文が無い・JSON でない・Yahoo のエラー本文は err=5");
     CHECK(!Praw("HTTP/1.0 200 OK\r\ndate: Fri, 27 Nov 2026 04:04:13 GMT\r\n\r\n", &r)); CHECK_EQ(r.err, 5); CHECK_EQ(r.http, 200); CHECK_EQ(r.have_date, 1);
-    CHECK(!Praw("HTTP/1.0 200 OK\r\ndate: Fri, 27 Nov 2026 04:04:13 GMT\r\n", &r)); CHECK_EQ(r.err, 5);         /* 空行まで届かない */
+    CHECK(!Praw("HTTP/1.0 200 OK\r\ndate: Fri, 27 Nov 2026 04:04:13 GMT\r\n", &r)); CHECK_EQ(r.err, 3); CHECK_EQ(r.http, 200); CHECK_EQ(r.have_date, 1);   /* 空行まで届かない(段 3) */
     CHECK(!Praw("HTTP/1.0 200 OK\r\n\r\n<html><body>Error</body></html>", &r)); CHECK_EQ(r.err, 5);
     CHECK(!Praw("HTTP/1.0 200 OK\r\n\r\n{\"chart\":{\"result\":null,\"error\":{\"code\":\"Not Found\",\"description\":\"No data found\"}}}", &r)); CHECK_EQ(r.err, 5);
-    CHECK(!Praw("HTTP/1.0 200 OK", &r)); CHECK_EQ(r.err, 5);
+    CHECK(!Praw("HTTP/1.0 200 OK", &r)); CHECK_EQ(r.err, 3);
+    CHECK(!Praw("HTTP/1.0 200 OK\r\n\r\n   ", &r)); CHECK_EQ(r.err, 5);                       /* 本文が空白だけ(JSON でない) */
+    CHECK(!Praw("HTTP/1.0 200 OK\r\n\r\n{\"chart\":", &r)); CHECK_EQ(r.err, 3);              /* { で始まるが閉じない */
+    CHECK(!Praw("HTTP/1.0 200 OK\r\n\r\n[]", &r)); CHECK_EQ(r.err, 5);                       /* { で始まらない */
 
     TEST("H-4 ④ date: の大文字小文字(date: / Date: / DATE:)は区別しない。壊れた・無い date: は have_date = 0 でも株価は成功");
     {
         static const char *const D[] = { "date: Fri, 27 Nov 2026 04:04:13 GMT", "Date: Fri, 27 Nov 2026 04:04:13 GMT", "DATE: Fri, 27 Nov 2026 04:04:13 GMT", "dAtE:Fri, 27 Nov 2026 04:04:13 GMT" };
-        static const char *const X[] = { "date: garbage", "date: Fri, 27 Nov 2026 04:04:13", "date: Fri, 32 Nov 2026 04:04:13 GMT", "date: Fri, 27 Xxx 2026 04:04:13 GMT", "x-date: Fri, 27 Nov 2026 04:04:13 GMT", "" };
+        static const char *const X[] = { "date: garbage", "date: Fri, 27 Nov 2026 04:04:13", "date: Fri, 32 Nov 2026 04:04:13 GMT", "date: Fri, 27 Xxx 2026 04:04:13 GMT", "x-date: Fri, 27 Nov 2026 04:04:13 GMT", "x-note: none" };
         size_t k;
         for (k = 0u; k < sizeof D / sizeof D[0]; k++) {
             snprintf(b, sizeof b, "HTTP/1.0 200 OK\r\n%s\r\ncontent-type: x\r\n\r\n%s", D[k], BODY);
@@ -434,8 +473,8 @@ static void t_h4_http(void)
             CHECK(Praw(b, &r)); CHECK_EQ(r.have_date, 0); CHECK_EQ(r.jst_s, 0); CHECK_EQ(r.price_x100, 256450);
         }
         /* 本文の中の date: は読まない */
-        snprintf(b, sizeof b, "HTTP/1.0 200 OK\r\ncontent-type: x\r\n\r\n%s\r\ndate: Fri, 27 Nov 2026 04:04:13 GMT", BODY);
-        CHECK(Praw(b, &r)); CHECK_EQ(r.have_date, 0);
+        snprintf(b, sizeof b, "HTTP/1.0 200 OK\r\ncontent-type: x\r\n\r\n{\"note\":\"\r\ndate: Fri, 27 Nov 2026 04:04:13 GMT\",%s", BODY + 1);
+        CHECK(Praw(b, &r)); CHECK_EQ(r.have_date, 0); CHECK_EQ(r.price_x100, 256450);
     }
 }
 
@@ -502,6 +541,7 @@ int main(int argc, char **argv)
     g_dir = argv[1];
     t_h3();
     t_h4_cut();
+    t_json_complete();
     t_h4_syn();
     t_h4_http();
     t_h4_fuzz();

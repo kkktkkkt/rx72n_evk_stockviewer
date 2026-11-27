@@ -11,7 +11,7 @@
  *      実際にパレットを通った文字の色と下地のコントラスト ≧ 4.5(H-9 を生成物から独立に再計算)
  *   H  解析: 価格・前日の終値の数値を乱数で作った応答(小数の桁数 0〜9、整数部 1〜7 桁)を、別の方法(文字列の桁の演算)で期待値にして wx_parse_http と比較(差分ファズ)、
  *      LF だけの改行、ヘッダー内のキーを読まない、など
- *   --suspect  設計と実装の食い違い・設計の穴の「不具合の可能性」だけを走らせる(現在の実装で落ちるものを含む。run.sh の S32 が別枠で数える)
+ *   I  SUSPECT(S32 から格上げ。設計の修正で解消): close 配列の途中で切れた応答を成功にしない・clock_min の範囲外を時刻にしない。--suspect ならこれだけを走らせる
  * 使い方: test_stk_indep <data_dir>(= tests/host/data) [--suspect]。-DAPP_WIFI_TEST=1 でコンパイルする(wx_core.c は APP_WIFI_ON = 0 では中身が消える)。 */
 #define HOSTRENDER_NO_MAIN
 #include "../../tools/fb_hostrender.c"
@@ -97,7 +97,8 @@ static void t_calc(void)
             if (stk_calc(price, prev, &c) || (c.pct_bp != 0) || (c.diff_x100 != 0) || (c.dir != STK_FLAT)) { bad++; }
         } else {
             if (!stk_calc(price, prev, &c) || (c.pct_bp != (int32_t)bp) || (c.diff_x100 != price - prev)) { bad++; }
-            if (c.dir != ((price > prev) ? STK_UP : ((price < prev) ? STK_DOWN : STK_FLAT))) { bad++; }
+            if (c.dir != ((c.pct_bp > 0) ? STK_UP : ((c.pct_bp < 0) ? STK_DOWN : STK_FLAT))) { bad++; }      /* dir は丸めた bp の符号(設計 §4.2) */
+            if (((price > prev) && (c.pct_bp < 0)) || ((price < prev) && (c.pct_bp > 0)) || ((price == prev) && (c.pct_bp != 0))) { bad++; }
         }
     }
     CHECK_EQ(bad, 0);
@@ -106,10 +107,10 @@ static void t_calc(void)
 /* ================================================================ B */
 static void t_pipeline(void)
 {
-    long bad = 0, n = 0, neg0 = 0, pos0 = 0, yen0 = 0, i;
+    long bad = 0, n = 0, flat_nz = 0, yen0 = 0, i;
     char sp[32], sc[32], sa[32];
 
-    TEST("B stk_calc → ui_row_dir → stk_fmt_*: 符号(+ − ▲ ▼)が必ず付く・変化なしは記号なし・長さ ≦ maxch(生成された ui_slots)");
+    TEST("B stk_calc → ui_row_dir → stk_fmt_*: 色付き(bp ≠ 0)は + − が必ず付き、金額が 0 でなければ ▲ ▼ も付く。bp = 0 は灰・0.00%・矢印なし(diff ≠ 0 でも)・長さ ≦ maxch(生成された ui_slots)");
     for (i = 0; i < 1500000L; i++) {
         int32_t prev = pick(8), price;
         int row = (int)(rnd() % 3u);
@@ -118,6 +119,7 @@ static void t_pipeline(void)
         uint8_t dir, kind = stk_row_kind((uint8_t)row);
         size_t lp, lc, la;
         const char *ssign;
+        int amt_zero;
 
         switch (rnd() % 3u) {
         case 0:  price = prev + (int32_t)(rnd() % 121u) - 60; break;
@@ -129,31 +131,41 @@ static void t_pipeline(void)
         r.have = 1u; r.price_x100 = price; r.diff_x100 = c.diff_x100; r.pct_bp = c.pct_bp;
         dir = ui_row_dir(&r);
         if (dir != c.dir) { bad++; }
+        if (dir != ((c.pct_bp > 0) ? STK_UP : ((c.pct_bp < 0) ? STK_DOWN : STK_FLAT))) { bad++; }
         lp = stk_fmt_price(sp, sizeof sp, price, kind);
-        lc = stk_fmt_pct(sc, sizeof sc, c.pct_bp, dir);
-        la = stk_fmt_amt(sa, sizeof sa, c.diff_x100, kind);
+        lc = stk_fmt_pct(sc, sizeof sc, c.pct_bp);
+        la = stk_fmt_amt(sa, sizeof sa, c.diff_x100, kind, dir);
         n++;
         if ((lp == 0u) || (lc == 0u) || (la == 0u)) { bad++; continue; }
         if ((lp > ui_slots[UI_SL_PRICE0].maxch) || (lc > ui_slots[UI_SL_PCT0].maxch) || (la > ui_slots[UI_SL_AMT0].maxch)) { bad++; }
         if (strchr(sp, ' ') || strchr(sc, ' ') || strchr(sa, ' ')) { bad++; }
-        ssign = (dir == STK_UP) ? "+" : ((dir == STK_DOWN) ? MNS : "");
+        ssign = (dir == STK_UP) ? "+" : MNS;
+        {                                                          /* 丸めた金額 A が 0 か(円は 0.5 円未満、指数は 0.00) */
+            uint32_t ad = (uint32_t)((c.diff_x100 < 0) ? -c.diff_x100 : c.diff_x100);
+            amt_zero = (kind == STK_KIND_YEN) ? (((ad + 50u) / 100u) == 0u) : (ad == 0u);
+        }
         if (dir == STK_FLAT) {
             if (strcmp(sc, "0.00%") != 0) { bad++; }
-            if (strcmp(sa, (kind == STK_KIND_YEN) ? "0" : "0.00") != 0) { bad++; }
+            if (((uint8_t)sa[0] == 1u) || ((uint8_t)sa[0] == 2u)) { bad++; }                       /* 矢印なし */
+            if (c.diff_x100 == 0) { if (strcmp(sa, (kind == STK_KIND_YEN) ? "0" : "0.00") != 0) { bad++; } }
+            else { flat_nz++; }
         } else {
             if (strncmp(sc, ssign, 1u) != 0) { bad++; }
-            if (((uint8_t)sa[0]) != ((dir == STK_UP) ? 1u : 2u)) { bad++; }
             if (!((sc[1] >= '0') && (sc[1] <= '9'))) { bad++; }
-            if (!((sa[1] >= '0') && (sa[1] <= '9'))) { bad++; }
-            if ((c.pct_bp == 0) && (strcmp(sc + 1, "0.00%") != 0)) { bad++; }
-            if ((c.pct_bp == 0) && (dir == STK_DOWN)) { neg0++; }
-            if ((c.pct_bp == 0) && (dir == STK_UP)) { pos0++; }
-            if ((kind == STK_KIND_YEN) && (strcmp(sa + 1, "0") == 0)) { yen0++; }
+            if (strcmp(sc + 1, "0.00%") == 0) { bad++; }                                            /* bp ≠ 0 なので 0.00% にならない */
+            if (amt_zero) {
+                if (strcmp(sa, (kind == STK_KIND_YEN) ? "0" : "0.00") != 0) { bad++; }              /* A = 0 は色付きでも矢印なし */
+                yen0++;
+            } else {
+                if (((uint8_t)sa[0]) != ((dir == STK_UP) ? 1u : 2u)) { bad++; }
+                if (!((sa[1] >= '0') && (sa[1] <= '9'))) { bad++; }
+            }
         }
         if (strcmp(sc, "0.00%") == 0 && dir != STK_FLAT) { bad++; }          /* 変化なし以外で符号のない 0.00% は出ない */
+        if ((strncmp(sc, "+0.00%", 6u) == 0) || (strncmp(sc, MNS "0.00%", 6u) == 0)) { bad++; }   /* +0.00% −0.00% は出ない */
     }
-    printf("  確かめた組 %ld。丸めて 0.00%% になる上昇 %ld・下落 %ld、円の金額が ▲0 / ▼0 になる %ld(設計 §3.9・§4.2 どおり。目視の確認対象)\n", n, pos0, neg0, yen0);
-    CHECK_EQ(bad, 0); CHECK(neg0 > 100); CHECK(pos0 > 100);
+    printf("  確かめた組 %ld。diff ≠ 0 だが 0.00%% に丸まって変化なしになる %ld、色付きで円の金額が 0(矢印なし)になる %ld\n", n, flat_nz, yen0);
+    CHECK_EQ(bad, 0); CHECK(flat_nz > 100); CHECK(yen0 > 100);
 }
 
 /* ================================================================ C */
@@ -183,11 +195,25 @@ static void t_states(void)
 }
 
 /* ================================================================ D */
-static uint8_t ref_market(bool synced, int64_t now, int64_t mt, int64_t rs, int64_t re)   /* 64bit のモデル(巻き戻りなし) */
+#define JSTOFF (32400u)
+
+/* 64bit のモデル(巻き戻りなし)。設計 §5.4: 取引中 = 取引時間帯 かつ 昼休みでない かつ (data_ok または open_grace)。row 2(^GSPC)は昼休みなし */
+static uint8_t ref_market(int row, bool synced, int64_t now_utc, int64_t mt, int64_t rs, int64_t re)
 {
+    int64_t now_jst = now_utc + 32400, tod = now_jst % 86400;
+    int in_sess, lunch, data_ok, grace;
+
     if (!synced) { return STK_MKT_NONE; }
-    if ((now >= rs) && (now < re) && (mt >= rs) && ((now - mt) <= 1800)) { return STK_MKT_TRADING; }
-    return STK_MKT_CLOSED;
+    in_sess = (now_utc >= rs) && (now_utc < re);
+    lunch = (row != 2) && (tod >= 41400) && (tod < 45000);
+    data_ok = (mt >= rs) && ((now_utc - mt) <= 7200);
+    grace = (mt < rs) && ((now_utc - rs) <= 1800);
+    return (in_sess && !lunch && (data_ok || grace)) ? STK_MKT_TRADING : STK_MKT_CLOSED;
+}
+
+static uint8_t mkt(int row, uint32_t now_utc, uint32_t mt, uint32_t rs, uint32_t re)
+{
+    return stk_market(stk_sym((uint8_t)row), true, now_utc + JSTOFF, mt, rs, re);
 }
 
 static void t_market(void)
@@ -196,68 +222,73 @@ static void t_market(void)
     const uint32_t RS = 1795737600u;                 /* 2026-11-27 09:00 JST = 00:00 UTC */
     const uint32_t RE = RS + 23400u;                 /* 15:30 JST */
     uint32_t t;
-    int lag, wk;
+    int row, wk;
 
-    TEST("D 64bit のモデルとの乱数比較 2,000,000 件(各境界の ±2 秒を厚く)");
-    for (i = 0; i < 2000000L; i++) {
-        int64_t rs = (int64_t)(rnd() % 2000000000u) + 100000;
-        int64_t re = rs + 600 + (int64_t)(rnd() % 90000u);
-        int64_t now, mt;
-        static const int64_t edge[] = { 0, 1, 2, -1, -2, 1800, 1801, 1799, -1800, -1801 };
-        switch (rnd() % 4u) {
-        case 0:  now = rs + edge[rnd() % 10u]; break;
-        case 1:  now = re + edge[rnd() % 10u]; break;
+    TEST("D 64bit のモデルとの乱数比較 3,000,000 件(各境界の ±2 秒を厚く。昼休み・猶予・鮮度 7200 の境界を含む)");
+    for (i = 0; i < 3000000L; i++) {
+        int64_t rs, re, now, mt;
+        static const int64_t edge[] = { 0, 1, 2, -1, -2, 1800, 1801, 1799, -1800, -1801, 7200, 7201, 7199, -7200, -7201 };
+        int r2 = (int)(rnd() % 3u);
+        int mode = (int)(rnd() % 3u);
+
+        if (mode == 0) { rs = (int64_t)(rnd() % 2000000000u) + 100000; re = rs + 600 + (int64_t)(rnd() % 90000u); }
+        else { rs = (int64_t)(rnd() % 20000u) * 86400 + 86400; re = rs + 23400; }                  /* 東京の時間割(rs は UTC の 0 時 = JST 09:00) */
+        switch (rnd() % 5u) {
+        case 0:  now = rs + edge[rnd() % 15u]; break;
+        case 1:  now = re + edge[rnd() % 15u]; break;
+        case 2:  now = rs + ((rnd() & 1u) ? 9000 : 12600) + edge[rnd() % 15u] % 5; break;       /* 昼休みの前後(11:30 / 12:30)の ±2 秒 */
         default: now = rs + (int64_t)(rnd() % (uint32_t)(re - rs + 7200)) - 3600; break;
         }
-        switch (rnd() % 3u) {
-        case 0:  mt = now - edge[rnd() % 10u]; break;
-        case 1:  mt = rs + edge[rnd() % 10u]; break;
-        default: mt = now - (int64_t)(rnd() % 4000u) + 500; break;
+        switch (rnd() % 4u) {
+        case 0:  mt = now - edge[rnd() % 15u]; break;
+        case 1:  mt = rs + edge[rnd() % 15u]; break;
+        case 2:  mt = rs - 70000; break;
+        default: mt = now - (int64_t)(rnd() % 9000u) + 500; break;
         }
         if ((mt < 0) || (now < 0)) { continue; }
-        if (stk_market(true, (uint32_t)now, (uint32_t)mt, (uint32_t)rs, (uint32_t)re) != ref_market(true, now, mt, rs, re)) { bad++; }
+        if (mkt(r2, (uint32_t)now, (uint32_t)mt, (uint32_t)rs, (uint32_t)re) != ref_market(r2, true, now, mt, rs, re)) { bad++; }
     }
     CHECK_EQ(bad, 0);
 
-    TEST("D 東京市場の 1 日(足は 15 分遅れ・昼休みは 11:30 で止まる)を 1 秒刻みで: 09:00〜09:15 は終値(前日の足)、09:15〜12:00 は取引中、12:00:01〜12:45 は終値、12:45〜15:30 は取引中、15:30 以降は終値");
-    for (lag = 900; lag <= 900; lag++) {
+    TEST("D 東京市場の 1 日(足は 15 分遅れ・昼休みは 11:30 で止まる)を 1 秒刻みで: 設計 §5.4 の表。09:00〜11:30 取引中、11:30〜12:30 終値、12:30〜15:30 取引中、ほかは終値。^GSPC(同じ区間を使う)は昼休みなし");
+    for (row = 0; row < 3; row++) {
         long fails = 0;
         for (t = 0u; t < 86400u; t++) {                      /* t = UTC の 00:00 からの秒 = JST 09:00 から */
             uint32_t now = RS + t, mt;
-            uint32_t feed = (t >= (uint32_t)lag) ? (t - (uint32_t)lag) : 0u;     /* 足の時刻(RS からの秒)。0 = 前日の足 */
+            uint32_t feed = (t >= 900u) ? (t - 900u) : 0u;  /* 足の時刻(RS からの秒)。15 分遅れ */
             uint8_t want, got;
-            /* 前場 = 0〜9000 秒(09:00〜11:30)、後場 = 12600〜23400(12:30〜15:30)。足はその中でだけ進む */
-            if (t < (uint32_t)lag) { mt = RS - 70000u; }
+            if (t < 900u) { mt = RS - 70000u; }              /* 最初の足がまだ届かない = 前日の足 */
             else if (feed <= 9000u) { mt = RS + feed; }
-            else if (feed < 12600u) { mt = RS + 9000u; }
+            else if (feed < 12600u) { mt = RS + 9000u; }     /* 前場の最後の足のまま(昼休みと後場の頭) */
             else if (feed <= 23400u) { mt = RS + feed; }
             else { mt = RS + 23400u; }
-            if (t < 900u) { want = STK_MKT_CLOSED; }
-            else if (t < 23400u) {
-                uint32_t age = now - mt;
-                want = (age <= 1800u) ? STK_MKT_TRADING : STK_MKT_CLOSED;
-            } else { want = STK_MKT_CLOSED; }
-            got = stk_market(true, now, mt, RS, RE);
-            if (got != want) { fails++; if (fails < 4) { printf("  t=%u (JST %02u:%02u:%02u): got %u want %u\n", t, 9u + t / 3600u, (t / 60u) % 60u, t % 60u, (unsigned)got, (unsigned)want); } }
+            if (t >= 23400u) { want = STK_MKT_CLOSED; }
+            else if ((t >= 9000u) && (t < 12600u) && (row != 2)) { want = STK_MKT_CLOSED; }
+            else { want = STK_MKT_TRADING; }
+            got = mkt(row, now, mt, RS, RE);
+            if (got != want) { fails++; if (fails < 4) { printf("  row %d t=%u (JST %02u:%02u:%02u): got %u want %u\n", row, t, 9u + t / 3600u, (t / 60u) % 60u, t % 60u, (unsigned)got, (unsigned)want); } }
         }
         CHECK_EQ(fails, 0);
     }
-    /* 代表時刻を文字どおり(設計 §5.4 の文章): 09:14:59 終値 / 09:15:00 取引中 / 12:00:00 取引中 / 12:00:01 終値 / 12:44:59 終値 / 12:45:00 取引中 / 15:29:59 取引中 / 15:30:00 終値 */
-    CHECK_EQ(stk_market(true, RS + 899u, RS - 70000u, RS, RE), STK_MKT_CLOSED);
-    CHECK_EQ(stk_market(true, RS + 900u, RS, RS, RE), STK_MKT_TRADING);
-    CHECK_EQ(stk_market(true, RS + 9000u + 1800u, RS + 9000u, RS, RE), STK_MKT_TRADING);
-    CHECK_EQ(stk_market(true, RS + 9000u + 1801u, RS + 9000u, RS, RE), STK_MKT_CLOSED);
-    CHECK_EQ(stk_market(true, RS + 12600u + 899u, RS + 9000u, RS, RE), STK_MKT_CLOSED);
-    CHECK_EQ(stk_market(true, RS + 12600u + 900u, RS + 12600u, RS, RE), STK_MKT_TRADING);
-    CHECK_EQ(stk_market(true, RE - 1u, RE - 1000u, RS, RE), STK_MKT_TRADING);
-    CHECK_EQ(stk_market(true, RE, RE - 1000u, RS, RE), STK_MKT_CLOSED);
+    /* 代表時刻を文字どおり(設計 §5.4 の表): 09:00:00 取引中(前日の足)/ 09:29:59 取引中 / 11:29:59 取引中 / 11:30:00 終値 / 12:29:59 終値 / 12:30:00 取引中(足は 11:30 のまま)/ 12:44:59 取引中 / 15:29:59 取引中 / 15:30:00 終値 */
+    CHECK_EQ(mkt(0, RS, RS - 70000u, RS, RE), STK_MKT_TRADING);
+    CHECK_EQ(mkt(0, RS + 1799u, RS - 70000u, RS, RE), STK_MKT_TRADING);
+    CHECK_EQ(mkt(0, RS + 9000u - 1u, RS + 8000u, RS, RE), STK_MKT_TRADING);
+    CHECK_EQ(mkt(0, RS + 9000u, RS + 8100u, RS, RE), STK_MKT_CLOSED);
+    CHECK_EQ(mkt(1, RS + 12600u - 1u, RS + 9000u, RS, RE), STK_MKT_CLOSED);
+    CHECK_EQ(mkt(1, RS + 12600u, RS + 9000u, RS, RE), STK_MKT_TRADING);
+    CHECK_EQ(mkt(1, RS + 12600u + 899u, RS + 9000u, RS, RE), STK_MKT_TRADING);
+    CHECK_EQ(mkt(0, RE - 1u, RE - 1000u, RS, RE), STK_MKT_TRADING);
+    CHECK_EQ(mkt(0, RE, RE - 1000u, RS, RE), STK_MKT_CLOSED);
+    CHECK_EQ(mkt(0, RS + 5u * 3600u, RS + 5u * 3600u - 7200u, RS, RE), STK_MKT_TRADING);   /* 鮮度 7200 ちょうど */
+    CHECK_EQ(mkt(0, RS + 5u * 3600u, RS + 5u * 3600u - 7201u, RS, RE), STK_MKT_CLOSED);
 
     TEST("D 週末・休日: 区間(rs / re)が直前の取引日のままなら、何日後でも終値。時計が未同期なら NONE");
     for (wk = 1; wk <= 4; wk++) {
-        CHECK_EQ(stk_market(true, RS + (uint32_t)wk * 86400u + 3600u, RE - 600u, RS, RE), STK_MKT_CLOSED);
-        CHECK_EQ(stk_market(true, RS + (uint32_t)wk * 86400u + 3600u, RS + (uint32_t)wk * 86400u + 3500u, RS, RE), STK_MKT_CLOSED);   /* 足が新しくても区間の外 */
+        CHECK_EQ(mkt(0, RS + (uint32_t)wk * 86400u + 3600u, RE - 600u, RS, RE), STK_MKT_CLOSED);
+        CHECK_EQ(mkt(0, RS + (uint32_t)wk * 86400u + 3600u, RS + (uint32_t)wk * 86400u + 3500u, RS, RE), STK_MKT_CLOSED);   /* 足が新しくても区間の外 */
     }
-    CHECK_EQ(stk_market(false, RS + 3600u, RS + 3000u, RS, RE), STK_MKT_NONE);
+    CHECK_EQ(stk_market(stk_sym(0), false, RS + JSTOFF + 3600u, RS + 3000u, RS, RE), STK_MKT_NONE);
 
     TEST("D ニューヨーク(足の遅れなし): 14:30〜21:00 UTC だけ取引中(冬時間 = 09:30〜16:00 EST)");
     {
@@ -266,7 +297,7 @@ static void t_market(void)
             uint32_t now = GS - 20000u + t;
             uint8_t want = ((now >= GS) && (now < GE)) ? STK_MKT_TRADING : STK_MKT_CLOSED;
             uint32_t mt = (now >= GS) ? ((now < GE) ? now : GE) : (GS - 3600u);
-            if (stk_market(true, now, mt, GS, GE) != want) { bad++; }
+            if (mkt(2, now, mt, GS, GE) != want) { bad++; }
         }
         CHECK_EQ(bad, 0);
     }
@@ -372,8 +403,8 @@ static int build_bg_and_boxes(const stk_view_t *v, uint8_t *bg, struct box *boxe
             if (text_box((uint8_t)(UI_SL_PCT0 + r), "---", &bx)) { boxes[nb++] = bx; }
         } else {
             if ((stk_fmt_price(b, sizeof b, w->price_x100, kind) > 0u) && text_box((uint8_t)(UI_SL_PRICE0 + r), b, &bx)) { boxes[nb++] = bx; }
-            if ((stk_fmt_pct(b, sizeof b, w->pct_bp, dir) > 0u) && text_box((uint8_t)(UI_SL_PCT0 + r), b, &bx)) { boxes[nb++] = bx; }
-            if ((stk_fmt_amt(b, sizeof b, w->diff_x100, kind) > 0u) && text_box((uint8_t)(UI_SL_AMT0 + r), b, &bx)) { boxes[nb++] = bx; }
+            if ((stk_fmt_pct(b, sizeof b, w->pct_bp) > 0u) && text_box((uint8_t)(UI_SL_PCT0 + r), b, &bx)) { boxes[nb++] = bx; }
+            if ((stk_fmt_amt(b, sizeof b, w->diff_x100, kind, dir) > 0u) && text_box((uint8_t)(UI_SL_AMT0 + r), b, &bx)) { boxes[nb++] = bx; }
         }
         rowbox_end[r + 1] = nb;
     }
@@ -666,7 +697,8 @@ static void t_parse_fuzz(void)
 
         n = build_resp(b, sizeof b, H200, "2564.5", "2433.0", "[2433.0,2564.5]");
         for (k = 0u; k < n; k++) { if (b[k] != '\r') { tmp[m++] = b[k]; } }               /* CR を全部消す = LF だけ */
-        CHECK(wx_parse_http(tmp, m, &r)); CHECK_EQ(r.price_x100, 256450); CHECK_EQ(r.prev_x100, 243300); CHECK_EQ(r.have_date, 1);
+        /* 設計 §5.2 段 3: 空行(CRLF CRLF)が無ければ「ヘッダーの途中で切れた」= err 3。LF だけの応答は受けない(Yahoo は CRLF。以前は成功にしていた) */
+        CHECK(!wx_parse_http(tmp, m, &r)); CHECK_EQ(r.err, 3); CHECK_EQ(r.http, 200); CHECK_EQ(r.have_date, 1);
         n = build_resp(b, sizeof b, "HTTP/1.0 200 OK\r\nx-note: \"regularMarketPrice\":1.5,\"chartPreviousClose\":1.5\r\ndate: Fri, 27 Nov 2026 04:04:13 GMT\r\n\r\n", "2564.5", "2433.0", "[2433.0,2564.5]");
         CHECK(wx_parse_http(b, n, &r)); CHECK_EQ(r.price_x100, 256450);                   /* ヘッダーの偽のキーを読まない */
     }
@@ -741,5 +773,6 @@ int main(int argc, char **argv)
     t_garbage();
     t_colors();
     t_parse_fuzz();
+    t_suspect();                                                   /* S32 から格上げ(設計の修正で 0 になった)。--suspect でも単独で走る */
     TEST_REPORT("test_stk_indep");
 }

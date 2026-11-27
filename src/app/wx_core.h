@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "stk_core.h"
 
 #define WX_BUF_SIZE      (3072u)     /* 応答バッファ。Yahoo の応答 最大 約 1,960 バイトの 1.57 倍(design.md §5.8)。天気は 629 バイト */
 #define WX_REQ_LEN       (190u)      /* 天気(WX_TGT_METEO)の要求の長さ(固定。実測と同じ) */
@@ -19,6 +20,8 @@
 #define WX_RATE_MS       (300000u)   /* 429 の後 */
 #define WX_BOOT_WAIT_MS  (3000u)
 #define WX_STALE_S       (1800u)
+#define WX_FRESH_S       (STK_FRESH_S)       /* 取引中のデータの鮮度の上限(7,200。design.md §5.4)。値は stk_core.h */
+#define WX_OPEN_GRACE_S  (STK_OPEN_GRACE_S)  /* 寄り付き後の猶予(1,800) */
 
 /* 天気アイコンの種類(WMO コードの分類。design.md §22.5) */
 typedef enum { WX_KIND_SUN = 0, WX_KIND_PARTLY, WX_KIND_CLOUD, WX_KIND_FOG, WX_KIND_RAIN, WX_KIND_SNOW, WX_KIND_THUNDER, WX_KIND_UNKNOWN, WX_KIND_END } wx_kind_t;
@@ -75,6 +78,10 @@ size_t wx_build_request(char *buf, size_t size, wx_target_t t, uint8_t sym);
  * currentTradingPeriod.regular の start / end が読め、前日の終値(close 配列の直前の足があればそれ、無ければ chartPreviousClose)と価格が
  * 範囲内(stk_calc が通る)。err: 3 = 状態行まで届かない / 4 = 状態が 200 でない(429 を含む)/ 5 = キー・値が無い・読めない・途切れ / 6 = 範囲外 */
 bool wx_parse_http(const char *buf, size_t len, wx_result_t *out);
+
+/* b[0..n) が、最初の { か [ から始まる 1 つの JSON 値として閉じているか(入れ子の深さが 0 に戻り、その後が空白だけ。文字列の中とエスケープは数えない。
+ * 設計 §5.2 段 3b。wx_parse_http が使う。ホスト試験のために公開) */
+bool stk_json_complete(const char *b, size_t n);
 
 /* 天気(旧。open-meteo)。成功 = 状態 200 かつ気温と天気コードが範囲内で読めた。Phase 3 で wifi_core が wx_parse_http へ切り替えたら削除する */
 bool wx_parse_weather(const char *buf, size_t len, wx_result_t *out);

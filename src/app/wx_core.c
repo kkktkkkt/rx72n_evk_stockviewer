@@ -453,7 +453,7 @@ static bool parse_head(const char *buf, size_t len, wx_result_t *out, const char
         out->have_date = 1u;
         out->jst_s     = utc + JST_OFFSET_S;
     }
-    *bodyp = (body != NULL) ? body : buf;
+    *bodyp = body;                                          /* 空行が無ければ NULL */
     if (http != 200u) {
         out->err = 4u;
         return false;
@@ -470,6 +470,9 @@ bool wx_parse_weather(const char *buf, size_t len, wx_result_t *out)
 
     if (!parse_head(buf, len, out, &body)) {
         return false;
+    }
+    if (body == NULL) {
+        body = buf;
     }
     end = buf + len;
     cur = find_after(body, (size_t)(end - body), "\"current\":");          /* "current_units": は一致しない */
@@ -661,6 +664,57 @@ static uint8_t read_cur(const char *body, const char *end)
     return (uint8_t)WX_CUR_OTHER;
 }
 
+/* b[0..n) が、最初の { から始まる 1 つの JSON 値として閉じているか(設計 §5.2 段 3b)。n で止まる。文字列の中の { } [ ] と \" のエスケープは数えない */
+bool stk_json_complete(const char *b, size_t n)
+{
+    size_t i;
+    int    depth   = 0;
+    bool   in_str  = false;
+    bool   esc     = false;
+    bool   started = false;
+    bool   done    = false;
+
+    for (i = 0u; i < n; i++) {
+        char c = b[i];
+
+        if (done) {                                            /* 閉じた後は空白だけ */
+            if ((c != ' ') && (c != '\r') && (c != '\n') && (c != '\t')) {
+                return false;
+            }
+            continue;
+        }
+        if (in_str) {
+            if (esc) {
+                esc = false;
+            } else if (c == '\\') {
+                esc = true;
+            } else if (c == '"') {
+                in_str = false;
+            } else {
+                /* 文字列の中 */
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+        } else if ((c == '{') || (c == '[')) {
+            depth++;
+            started = true;
+        } else if ((c == '}') || (c == ']')) {
+            if (depth == 0) {
+                return false;
+            }
+            depth--;
+            if (depth == 0) {
+                done = true;
+            }
+        } else {
+            /* 値の文字 */
+        }
+    }
+    return started && done && !in_str;
+}
+
 bool wx_parse_http(const char *buf, size_t len, wx_result_t *out)
 {
     const char *end;
@@ -675,7 +729,22 @@ bool wx_parse_http(const char *buf, size_t len, wx_result_t *out)
     if (!parse_head(buf, len, out, &body)) {
         return false;
     }
-    end      = buf + len;
+    end = buf + len;
+    if (body == NULL) {                                        /* 段 3: 空行が無い(ヘッダーの途中で切れた) */
+        out->err = 3u;
+        return false;
+    }
+    while ((body < end) && ((*body == ' ') || (*body == '\t') || (*body == '\r') || (*body == '\n'))) {
+        body++;
+    }
+    if ((body >= end) || (*body != '{')) {                     /* 段 3b: JSON でない */
+        out->err = 5u;
+        return false;
+    }
+    if (!stk_json_complete(body, (size_t)(end - body))) {      /* 段 3b: 閉じていない = 途切れ(どこで切れても成功にしない) */
+        out->err = 3u;
+        return false;
+    }
     out->err = 5u;                                             /* 以降の失敗は、範囲外(6)を除いて、キー・値が読めない */
     v = find_after(body, (size_t)(end - body), "\"regularMarketPrice\":");
     if ((v == NULL) || !read_x100(v, end, &out->price_x100, NULL)) {

@@ -4,6 +4,7 @@
 #include "stk_core.h"
 
 #define HALF_RANGE   (0x80000000u)       /* 32bit の差を「負」と見なす境 */
+#define STK_JST_OFFSET_S (32400u)        /* JST = UTC + 9 時間 */
 
 /* ---- 整形の部品 ---- */
 
@@ -90,16 +91,29 @@ bool stk_calc(int32_t price_x100, int32_t prev_x100, stk_calc_t *out)
     }
     out->diff_x100 = diff;
     out->pct_bp    = (diff < 0) ? (int32_t)(-q) : (int32_t)q;
-    out->dir       = (diff > 0) ? (uint8_t)STK_UP : ((diff < 0) ? (uint8_t)STK_DOWN : (uint8_t)STK_FLAT);
+    out->dir       = (out->pct_bp > 0) ? (uint8_t)STK_UP : ((out->pct_bp < 0) ? (uint8_t)STK_DOWN : (uint8_t)STK_FLAT);   /* 丸めた騰落率の符号(§4.2) */
     return true;
 }
 
-/* ---- 整形 ---- */
+/* ---- 銘柄表 ---- */
+
+static const stk_sym_t k_sym[STK_ROWS] = {
+    { (uint8_t)STK_KIND_YEN,   STK_LUNCH_S, STK_LUNCH_E },     /* 6723.T */
+    { (uint8_t)STK_KIND_INDEX, STK_LUNCH_S, STK_LUNCH_E },     /* ^N225 */
+    { (uint8_t)STK_KIND_INDEX, 0u,          0u }               /* ^GSPC(昼休みなし) */
+};
+
+const stk_sym_t *stk_sym(uint8_t row)
+{
+    return (row < (uint8_t)STK_ROWS) ? &k_sym[row] : NULL;
+}
 
 uint8_t stk_row_kind(uint8_t row)
 {
     return (row == 0u) ? (uint8_t)STK_KIND_YEN : (uint8_t)STK_KIND_INDEX;
 }
+
+/* ---- 整形 ---- */
 
 size_t stk_fmt_price(char *buf, size_t size, int32_t price_x100, uint8_t kind)
 {
@@ -115,69 +129,63 @@ size_t stk_fmt_price(char *buf, size_t size, int32_t price_x100, uint8_t kind)
     return emit(buf, size, t, n);
 }
 
-size_t stk_fmt_pct(char *buf, size_t size, int32_t pct_bp, uint8_t dir)
+size_t stk_fmt_pct(char *buf, size_t size, int32_t pct_bp)
 {
     char     t[12];
     size_t   n = 0u;
-    uint32_t a;
 
-    if (!arg_ok(buf, size) || (dir > (uint8_t)STK_FLAT) || (pct_bp > STK_BP_MAX) || (pct_bp < -STK_BP_MAX)) {
+    if (!arg_ok(buf, size) || (pct_bp > STK_BP_MAX) || (pct_bp < -STK_BP_MAX)) {
         return 0u;
     }
-    a = abs32(pct_bp);
-    if (dir == (uint8_t)STK_FLAT) {
-        a = 0u;                                                        /* 変化なし: 符号なしの 0.00% */
-    } else {
-        t[n++] = (dir == (uint8_t)STK_UP) ? '+' : '\x03';
+    if (pct_bp != 0) {                                                 /* 0 は符号なしの 0.00%(+0.00% −0.00% は出さない。§4.2) */
+        t[n++] = (pct_bp > 0) ? '+' : '\x03';
     }
-    n += put_x100(&t[n], a);
+    n += put_x100(&t[n], abs32(pct_bp));
     t[n++] = '%';
     return emit(buf, size, t, n);
 }
 
-size_t stk_fmt_amt(char *buf, size_t size, int32_t diff_x100, uint8_t kind)
+size_t stk_fmt_amt(char *buf, size_t size, int32_t diff_x100, uint8_t kind, uint8_t dir)
 {
     char     t[16];
     size_t   n = 0u;
     uint32_t a;
+    uint32_t amt;
 
-    if (!arg_ok(buf, size) || (diff_x100 > STK_X100_MAX) || (diff_x100 < -STK_X100_MAX) || (kind > (uint8_t)STK_KIND_INDEX)) {
+    if (!arg_ok(buf, size) || (diff_x100 > STK_X100_MAX) || (diff_x100 < -STK_X100_MAX) || (kind > (uint8_t)STK_KIND_INDEX) || (dir > (uint8_t)STK_FLAT)) {
         return 0u;
     }
-    a = abs32(diff_x100);
-    if (a == 0u) {                                                     /* 変化なし: 矢印なし */
-        t[n++] = '0';
-        if (kind == (uint8_t)STK_KIND_INDEX) {
-            t[n++] = '.';
-            t[n++] = '0';
-            t[n++] = '0';
-        }
-        return emit(buf, size, t, n);
+    a   = abs32(diff_x100);
+    amt = (kind == (uint8_t)STK_KIND_YEN) ? ((a + 50u) / 100u) : a;   /* 丸めた金額 A(YEN は整数円) */
+    if ((amt != 0u) && (dir != (uint8_t)STK_FLAT)) {                   /* 矢印は方向があって A ≠ 0 のときだけ */
+        t[n++] = (dir == (uint8_t)STK_UP) ? '\x01' : '\x02';
     }
-    t[n++] = (diff_x100 > 0) ? '\x01' : '\x02';
-    n += (kind == (uint8_t)STK_KIND_YEN) ? put_commas(&t[n], (a + 50u) / 100u) : put_x100(&t[n], a);
+    n += (kind == (uint8_t)STK_KIND_YEN) ? put_commas(&t[n], amt) : put_x100(&t[n], amt);
     return emit(buf, size, t, n);
 }
 
 /* ---- 市場の状態 ---- */
 
-uint8_t stk_market(bool synced, uint32_t now_utc, uint32_t mtime, uint32_t rs, uint32_t re)
+uint8_t stk_market(const stk_sym_t *sym, bool synced, uint32_t now_jst, uint32_t mtime, uint32_t rs, uint32_t re)
 {
-    uint32_t span = re - rs;
+    uint32_t now_utc = now_jst - STK_JST_OFFSET_S;
+    uint32_t span    = re - rs;
+    uint32_t tod;
     uint32_t age;
 
-    if (!synced) {
+    if ((!synced) || (sym == NULL)) {
         return (uint8_t)STK_MKT_NONE;
     }
     if ((span == 0u) || (span >= HALF_RANGE) || ((uint32_t)(now_utc - rs) >= span)) {
         return (uint8_t)STK_MKT_CLOSED;                                /* 区間が不正、または now が [rs, re) の外 */
     }
-    if ((uint32_t)(mtime - rs) >= HALF_RANGE) {
-        return (uint8_t)STK_MKT_CLOSED;                                /* mtime < rs(開場前の足) */
+    tod = now_jst % 86400u;
+    if ((sym->lunch_s != sym->lunch_e) && (tod >= sym->lunch_s) && (tod < sym->lunch_e)) {
+        return (uint8_t)STK_MKT_CLOSED;                                /* 昼休み */
     }
-    age = now_utc - mtime;
-    if ((age < HALF_RANGE) && (age > STK_FRESH_S)) {
-        return (uint8_t)STK_MKT_CLOSED;                                /* 最新の足が古い。age が「負」(mtime が先)なら新しいと見なす */
+    if ((uint32_t)(mtime - rs) < HALF_RANGE) {                         /* data_ok: mtime ≧ rs かつ 2 時間以内(mtime が先なら新しい) */
+        age = now_utc - mtime;
+        return ((age >= HALF_RANGE) || (age <= STK_FRESH_S)) ? (uint8_t)STK_MKT_TRADING : (uint8_t)STK_MKT_CLOSED;
     }
-    return (uint8_t)STK_MKT_TRADING;
+    return ((uint32_t)(now_utc - rs) <= STK_OPEN_GRACE_S) ? (uint8_t)STK_MKT_TRADING : (uint8_t)STK_MKT_CLOSED;   /* open_grace */
 }

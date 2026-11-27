@@ -464,24 +464,31 @@ def commas(n):
 
 
 def row_dir(r):
-    return (UP if r["diff"] > 0 else DOWN if r["diff"] < 0 else FLAT) if r["have"] else FLAT
+    # 方向 = 丸めた騰落率 bp の符号(設計 §4.2。diff ≠ 0 でも 0.00% に丸まれば変化なし)。C の ui_row_dir と同じ
+    return (UP if r["bp"] > 0 else DOWN if r["bp"] < 0 else FLAT) if r["have"] else FLAT
 
 
 def fmt_price(p, yen):
     return commas((p + 50) // 100) if yen else "%s.%02d" % (commas(p // 100), p % 100)
 
 
-def fmt_pct(bp, d):
-    if d == FLAT:
+def fmt_pct(bp):
+    if bp == 0:
         return "0.00%"
-    return ("+" if d == UP else "\x03") + "%d.%02d%%" % (abs(bp) // 100, abs(bp) % 100)
+    return ("+" if bp > 0 else "\x03") + "%d.%02d%%" % (abs(bp) // 100, abs(bp) % 100)
 
 
 def fmt_amt(diff, d, yen):
+    # 丸めた金額 A。矢印は方向(d)があって A != 0 のときだけ(設計 §4.2)
     a = abs(diff)
-    if d == FLAT:
-        return "0" if yen else "0.00"
-    num = commas((a + 50) // 100) if yen else "%s.%02d" % (commas(a // 100), a % 100)
+    if yen:
+        num = commas((a + 50) // 100)
+        amt = (a + 50) // 100
+    else:
+        num = "%s.%02d" % (commas(a // 100), a % 100)
+        amt = a
+    if amt == 0 or d == FLAT:
+        return num
     return ("\x01" if d == UP else "\x02") + num
 
 
@@ -510,7 +517,7 @@ def icon_index(v):
 
 
 def hhmm(m):
-    return "--:--" if m == 65535 else "%02d:%02d" % (m // 60, m % 60)
+    return "--:--" if m > 1439 else "%02d:%02d" % (m // 60, m % 60)
 
 
 # ------------------------------------------------------------------ 描画(設計 §3.13。C の ui_render と同じ規則)
@@ -585,7 +592,7 @@ def render(a, v):
         else:
             stale = r["stale"]
             p.text(pf, fmt_price(r["price"], yen), px_, Y0 + py_, pal_, R[("STALE" if stale else "PRICE", t)])
-            p.text(qf, fmt_pct(r["bp"], t), qx, Y0 + qy, qal, R[("STALE" if stale else "ACC", t)])
+            p.text(qf, fmt_pct(r["bp"]), qx, Y0 + qy, qal, R[("STALE" if stale else "ACC", t)])
             p.text(af, fmt_amt(r["diff"], t, yen), ax, Y0 + ay, aal, R[("STALE" if stale else "ACC", t)])
     return p.fb
 

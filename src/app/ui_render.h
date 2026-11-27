@@ -14,6 +14,6 @@ void ui_render(const ui_t *ui, uint8_t *fb);
 /* §3.9 の優先順位。表示の決定の試験用に公開 */
 uint8_t ui_foot_index(const stk_view_t *v);   /* 0..5 = F0..F5 */
 uint8_t ui_icon_index(const stk_view_t *v);   /* 0 = ON、1 = CONN、2 = STALE、3 = OFF */
-uint8_t ui_row_dir(const stk_row_t *r);       /* STK_UP / STK_DOWN / STK_FLAT(値なし = FLAT) */
+uint8_t ui_row_dir(const stk_row_t *r);       /* STK_UP / STK_DOWN / STK_FLAT(丸めた pct_bp の符号。0.00% = FLAT。値なし = FLAT) */
 
 #endif /* UI_RENDER_H */

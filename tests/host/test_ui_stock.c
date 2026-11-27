@@ -162,7 +162,7 @@ static const uint32_t GOLDEN[N_STATES] = {
     0xA5B048D1u,
     0x859388B2u,
     0x44B1D032u,
-    0xB0B77855u,
+    0x96F213A9u,
     0xFD6185CBu,
     0xC99D3874u,
     0xB869F269u,
@@ -343,10 +343,24 @@ static void test_decisions(void)
     CHECK(ok);
     memset(&r, 0, sizeof(r));
     CHECK_EQ(ui_row_dir(&r), STK_FLAT);                    /* 値なし */
-    r.have = 1u; r.diff_x100 = 1;  CHECK_EQ(ui_row_dir(&r), STK_UP);      /* 丸めが 0.00% でも diff != 0 なら上昇 */
-    r.diff_x100 = -1;              CHECK_EQ(ui_row_dir(&r), STK_DOWN);
-    r.diff_x100 = 0;               CHECK_EQ(ui_row_dir(&r), STK_FLAT);
-    r.have = 0u; r.diff_x100 = 500; CHECK_EQ(ui_row_dir(&r), STK_FLAT);
+    /* 方向は丸めた騰落率 pct_bp の符号(§4.2)。diff が 0 でなくても、0.00% に丸まれば変化なし(S32 の O-1・O-2) */
+    r.have = 1u; r.diff_x100 = 1;  r.pct_bp = 0;  CHECK_EQ(ui_row_dir(&r), STK_FLAT);
+    r.diff_x100 = -1;              r.pct_bp = 0;  CHECK_EQ(ui_row_dir(&r), STK_FLAT);
+    r.diff_x100 = 1;               r.pct_bp = 1;  CHECK_EQ(ui_row_dir(&r), STK_UP);
+    r.diff_x100 = -1;              r.pct_bp = -1; CHECK_EQ(ui_row_dir(&r), STK_DOWN);
+    r.diff_x100 = 0;               r.pct_bp = 0;  CHECK_EQ(ui_row_dir(&r), STK_FLAT);
+    r.have = 0u; r.diff_x100 = 500; r.pct_bp = 500; CHECK_EQ(ui_row_dir(&r), STK_FLAT);
+    {                                                        /* 状態 17(円の diff +1、bp 0)は、diff = 0 の行と同じ描画(灰・0.00%・金額 0・矢印なし・符号なし) */
+        static uint8_t fa[NPX], fb2[NPX];
+        stk_view_t v1, v2;
+        CHECK_EQ(make_state(17u, &v1), 0); v2 = v1; v2.row[0].diff_x100 = 0;
+        render_to(&v1, fa); render_to(&v2, fb2);
+        CHECK(memcmp(fa, fb2, NPX) == 0);
+        v2.row[0].pct_bp = 2; v2.row[0].diff_x100 = 30;       /* bp 2・円の金額 0: 赤の行だが、金額は矢印なしの 0 */
+        render_to(&v2, fb2);
+        CHECK(memcmp(fa, fb2, NPX) != 0);
+        CHECK_EQ(ui_row_dir(&v2.row[0]), STK_UP);
+    }
 }
 
 /* 色の向き: パレットを通した ARGB の R / G / B */

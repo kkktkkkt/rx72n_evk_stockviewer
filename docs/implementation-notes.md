@@ -69,34 +69,47 @@
 | `size_t stk_fmt_pct(buf, size, pct_bp, uint8_t dir)` | `+2.31%`、`\x03` + `0.25%`、変化なしは `0.00%`。符号は `dir` で決める |
 | `size_t stk_fmt_amt(buf, size, diff_x100, uint8_t kind)` | `\x01` / `\x02` + 数字。0 は矢印なしの `0` / `0.00` |
 | `uint8_t stk_row_kind(uint8_t row)` | 行 0 = `STK_KIND_YEN`、それ以外 = `STK_KIND_INDEX` |
-| `uint8_t stk_market(bool synced, now_utc, mtime, rs, re)` | 未同期 = `STK_MKT_NONE`。32bit の差で比べる |
+| `uint8_t stk_market(const stk_sym_t *sym, bool synced, now_jst, mtime, rs, re)` | 未同期 = `STK_MKT_NONE`。32bit の差で比べる(下の「Phase 2 の修正」の規則) |
 
 整形の失敗(範囲外・size 不足・kind / dir が不正)は 0 を返して `buf[0] = '\0'`。
 
 ### 設計から外れた点・設計に無い判断(設計役の確認が要る)
 
 1. **旧天気の解析を `wx_parse_weather` として残した**。設計 §5.9 は `wx_result_t` の天気の項目と天気の解析を削除するが、`wifi_core.c` の `wx_publish`・`wifi_at.c`・`wx_fmt_ok`・`wx_fmt_state` と、それらの試験(`test_wifi_core.c`・`test_wifi_at.c`)がまだ天気の結果を使うため、Phase 3 の前に消すと既存の試験と `APP_WX = 1`(天気の製品版)が壊れる。**Phase 3 で `wifi_core` を `wx_parse_http` に切り替えるときに、`wx_parse_weather`・`wmo` `kind` `temp_x10` `obs`・`WX_KIND_*`・`wx_fmt_ok` の天気項目を削除する**。
-2. **`stk_market` の引数に `synced` を足した**(設計 §5.4・H-5 の「時計が未同期 → NONE」を表す手段が無かったため)。`now_utc` は呼び出し側が JST から 32,400 を引いて渡す。
+2. **`stk_market` の引数に `synced` を足した**(設計 §5.4・H-5 の「時計が未同期 → NONE」を表す手段が無かったため)。now_jst はソフト時計の JST の通算秒。
 3. **`stk_fmt_pct` / `stk_fmt_amt` の `dir`・`kind` は `uint8_t`**(設計 §4.3 は `int8_t`。`-Wconversion` で警告になるため)。`stk_fmt_amt` は `dir` を取らず、`diff_x100` の符号から ▲ ▼ を決める(設計どおり)。
-4. **`STK_FRESH_S`(1,800)を `stk_core.h` に置いた**(設計 §5.9 は `WX_FRESH_S` を `wx_core.h` に追加するとしているが、`stk_core` が `wx_core` に依存しないようにするため)。`WX_FRESH_S` は作っていない。
+4. **`STK_FRESH_S`(7,200 に改訂)を `stk_core.h` に置いた**(設計 §5.9 は `WX_FRESH_S` を `wx_core.h` に追加するとしているが、`stk_core` が `wx_core` に依存しないようにするため)。`WX_FRESH_S` は作っていない。
 5. **`wx_parse_http` が `stk_core.c` の `stk_calc` を呼ぶ**(段 7 の範囲検査を 1 か所にするため)。`wx_core.c` を link する試験は `stk_core.c` も link する(`run.sh` を直した)。RX 側は e² studio が `src/app/*.c` を拾うので、**新しい `stk_core.c` を `HardwareDebug` の makefile へ反映するため、プロジェクトの更新(refresh)が要る**(ビルド担当)。
 6. **`currency` は必須にしない**(設計 §5.2 の段 4 のキー一覧に無いため)。無い・3 文字でない = `WX_CUR_NONE`、成功のまま。`cur` は今は表示に使わない(Phase 3 以降で銘柄の種類との照合に使える)。
 7. **close 配列は最大 5 要素ではなく、`]` までの全要素を読んで「最後から 2 番目」を取る**(設計は「最大 5 要素まで」)。`]` が無い(途切れ)・読めない要素・末尾のカンマは「直前の足なし」(= `chartPreviousClose`)。バッファ 3,072 の範囲に収まるので、作業量は変わらない。
 8. **同じキーが 2 回あれば最初の出現を使う**(設計に規定なし。`meta` は本文の先頭にある)。`regularMarketPrice`・`chartPreviousClose`・`regularMarketTime`・`regular` の `start` `end` は**どれか 1 つ欠けても `err = 5`**(直前の足があっても `chartPreviousClose` が無ければ失敗。設計 §5.2 段 4 のとおり)。
 9. **直前の足が範囲外(0 など)のときは `err = 6`**(`chartPreviousClose` へ倒さない。設計 §5.2 段 5〜7 のとおり)。
-10. §5.2 段 8(バッファ超過でもキーがそろえば成功)は **Phase 3 の `wifi_core` の仕事**として手を付けていない。`wx_parse_http` 単独では、途中で切れた応答は「必要な値がそろう長さ」から成功し、足りなければ `err = 5`(12 バイト未満は `err = 3`)。
+10. §5.2 段 8(バッファ超過 = 常に err 7)は Phase 3 の wifi_core の仕事として手を付けていない(wifi_core は今も旧の天気の解析を呼び、溢れたら err 7 にする)。wx_parse_http 単独では、全長より短い応答はどの長さでも成功にならない(下の「Phase 2 の修正」)。
 
 ### 実応答から分かったこと(設計 §2.1 の F10 との差)
 
 - 2026-11-27 13:03 JST の取得では、**`^N225` の `range=2d` も足が 2 本**(設計 F10 では 1 本)。ただし `1d` では 1 本なので、`has_bar_prev = 0` の経路は 1d の 3 応答で試験している。
 - **`^GSPC` の `range=2d`**: `chartPreviousClose` = 7,237.17 だが、直前の足 = 7,201.09(`fulldayChange` −18.31 と一致)。設計 §5.3 の (b) を実応答で確認した(前日比 −25 = −0.25%、Yahoo の −0.254% と一致)。`1d` の `chartPreviousClose` は 7,201.09。
-- 日本株・日経平均の `regularMarketTime` は `Date:` より 約 15 分(901〜902 秒)前 → `stk_market` は「取引中」(遅れ ≦ 1,800)。
+- 日本株・日経平均の `regularMarketTime` は `Date:` より 約 15 分(901〜902 秒)前 → `stk_market` は「取引中」(取引時間帯の中で、遅れ ≦ 7,200)。
 
 ### 確かめていないこと
 
 - RX 用 GCC でのビルド(`-Wstack-usage=100` を含む)。ホストの `-fstack-usage` は `wx_parse_http` が x86 で 176 バイト(旧 `wx_parse_http` = 今の `wx_parse_weather` は 144)。RX の値は別なので、ビルド担当の結果を見る。
 - S12(ASan / UBSan)はこの環境では libasan が無く SKIP。代わりに `test_wx_stock` が禁止ページ(あらゆる長さに切る + 変異ファズ 60,000 回)で範囲外の読み出しを検出する。S12 の対象には `test_stk_core`・`test_wx_stock` も足してある(libasan のある環境で実行される)。
 - 実機での実行(Phase 5)。
+
+## Phase 2 の修正(テスト担当 S32 の指摘 → 設計の改訂 → 実装を合わせた)
+
+| 変更 | 内容 |
+|---|---|
+| `wx_parse_http`(§5.2 段 3・3b) | 空行(CRLF CRLF)が無ければ `err = 3`。本文の最初の空白でない文字が `{` でなければ `err = 5`。`stk_json_complete`(入れ子の深さが 0 に戻り、その後が空白だけ)が偽なら `err = 3`。**どの長さで切れた応答も成功にならない**(全長だけが成功)。`close` が 1 本で閉じている応答は成功(`has_bar_prev = 0`)。LF だけの応答は空行なしで `err = 3`(以前は成功にしていた)。`stk_json_complete` は `wx_core.h` に公開(ホスト試験のため) |
+| `stk_calc` / `stk_fmt_pct` / `stk_fmt_amt`(§4.2・§4.3) | `dir` は丸めた `pct_bp` の符号(0 → `STK_FLAT`)。`stk_fmt_pct(buf, size, pct_bp)`(`dir` 引数を廃止。0 は `0.00%`)、`stk_fmt_amt(buf, size, diff, kind, dir)`(矢印は `dir` が上昇・下落で丸めた金額 ≠ 0 のときだけ。変化なしでも金額はそのまま、例: `0.50`)。`ui_row_dir` も `pct_bp` の符号 |
+| `stk_market`(§5.4) | `stk_market(const stk_sym_t *sym, bool synced, now_jst, mtime, rs, re)`。取引時間帯の中で、昼休み(`stk_sym_t.lunch_s / lunch_e`。6723.T と ^N225 = 11:30〜12:30、^GSPC = なし)でなく、`data_ok`(`mtime ≧ rs` かつ遅れ ≦ 7,200 秒)または `open_grace`(`mtime < rs` かつ `now − rs ≦ 1,800`)なら取引中。`stk_sym(row)` の銘柄表を追加。定数 `STK_FRESH_S` = 7200、`STK_OPEN_GRACE_S` = 1800(`wx_core.h` に `WX_FRESH_S` `WX_OPEN_GRACE_S` として別名) |
+| `ui_render.c` | `fmt_hhmm`: 1440〜65534 も `--:--`(`clock_min` / `upd_min`) |
+| `tools/gen_stock_assets.py` | `row_dir` = `bp` の符号、`fmt_pct(bp)`、`fmt_amt(diff, dir, yen)`、`hhmm` を C と同じ規則に(S0〜S7 のプレビュー PNG は変わらない。S28 合格)。`diff ≠ 0`・`bp = 0` と `bp ≠ 0` で円の金額 0 の状態を作って C(`fb_hostrender`)と Python の出力を比べ、0 バイト差を確認した(一時の状態ファイル。リポジトリには入れていない) |
+| 試験 | `test_stk_core.c`・`test_wx_stock.c`・`test_ui_stock.c`・`test_stk_indep.c` を新しい規則に更新。`test_ui_stock` の 24 状態の CRC は **状態 17(円の diff +1、bp 0)だけが変わった**(赤 `+0.00%` `▲` → 灰 `0.00%`・金額 `0`。意図どおり)。`test_stk_indep` の SUSPECT(S32)は 0 になり、試験を通常の S31 へ格上げ(S32 は廃止) |
+
+設計に無い判断: `stk_market` の `synced` 引数(設計の署名 `stk_market(sym, now_jst, mtime, rs, re)` には未同期の表し方が無い。H-5 の「時計未同期 → NONE」のため、`sym` の次に足した)。
 
 ## 設計から外れた点・設計役への差し戻し(Phase 0)
 
