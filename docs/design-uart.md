@@ -875,7 +875,7 @@ R-HELPW       : \[help\] d=run n=boot p=at s=state \?=help
 
 ## 13. 天気・気温の取得と時刻同期(`docs/design.md` §22)での UART(2026-11-25)
 
-**2026-11-27 注(rx72n_stockview)**: この §13 は複製元(給湯器デモ + 天気)の仕様。**株価ビューの製品は `[wx]`(天気)を `[stk]` に置き換える。書式・正規表現・判定は `docs/design.md`(rx72n_stockview)§7.5 が優先**(§10〜§12 の `[hb]` `[init]` `[boot]` `[err]` `[st]` `[perf]` `[wifi]` `[wifiv]` は書式を変えない)。**Phase 0(TLS の実機検証。専用モード `APP_WIFI_TEST = 1`)では、この §13 の `[wx] res=fail` が使われた**(下の `R-WX-FAIL` を 2026-11-27 に `err` 1〜9・末尾 `len=` へ直した)。専用モードの UART コマンドに **`t`(Yahoo 平文)`y`(Yahoo SSL)`g`(Google SSL)`z`(`y` の前に `AT+CIPSSLCCONF=0,0,0`)** が増えた(`tools/job-runner.ps1` の `tx` の許可文字 `[npsd+?xtygz-]`)。
+**2026-11-27 注(rx72n_stockview)**: この §13 は複製元(給湯器デモ + 天気)の仕様。**株価ビューの製品は `[wx]`(天気)を `[stk]` に置き換える。書式・正規表現・判定は `docs/design.md`(rx72n_stockview)§7.5 が優先**(§10〜§12 の `[hb]` `[init]` `[boot]` `[err]` `[st]` `[perf]` `[wifi]` `[wifiv]` は書式を変えない)。**Phase 0(TLS の実機検証。専用モード `APP_WIFI_TEST = 1`)では、この §13 の `[wx] res=fail` が使われた**(下の `R-WX-FAIL` を 2026-11-27 に `err` 1〜9・末尾 `len=` へ直した)。**(2026-11-27 追記: 時計・天気画面を足したため、`[wx]` の名前を天気の取得で再び使う。書式・正規表現・判定は §14 が優先。ここ §13 の R-WX-* は使わない。)** 専用モードの UART コマンドに **`t`(Yahoo 平文)`y`(Yahoo SSL)`g`(Google SSL)`z`(`y` の前に `AT+CIPSSLCCONF=0,0,0`)** が増えた(`tools/job-runner.ps1` の `tx` の許可文字 `[npsd+?xtygz-]`)。
 
 状態: **設計(未実装・未検証)**。**`APP_WX = 1`(製品)と `APP_WIFI_TEST = 1`(専用モード。`x` だけ)に当てはまる**。`APP_WX = 0` かつ `APP_WIFI_TEST = 0` の出力・コマンドは変えない。
 **判定できないこと**: 画面の見た目(アイコンの形・色)は目視(カメラは補助)。表示面の画素の判定は gdb(`design.md` §22.13 の X7)。UART で言えるのは「ソフトが何を取得し、どの状態にしたか」まで。
@@ -977,3 +977,103 @@ R-HELP-X   : \[help\] n=next p=prev s=state d=demo \+=up -=down x=wx \?=help
 - **判定の順**: 書式(R-WX-*)→ 値の範囲 → 時刻の照合(UX2)→ PC との照合(UX3)。
 - **秘密の確認**: 受信ログ(`jobs/outbox/<id>.log`)に SSID・パスワード・`"latitude"` `"generationtime_ms"` などの本文の語が**無い**こと(一致数だけ報告)。
 - 失敗時はログ全文を添えて報告する(**添える前に、秘密の文字列が含まれていないか確認**)。
+
+---
+
+## 14. 時計・天気画面と自動切り替え(rx72n_stockview `docs/design.md` §13)での UART(2026-11-27)
+
+状態: **設計(未実装・未検証)**。**`APP_WX_PRODUCT = 1`(製品)に当てはまる。`[scr]` は `APP_CLK_PREVIEW = 1`(ネットワークなしの切り替えの試験)でも出る**。専用モード(`APP_WIFI_TEST = 1`)の出力は変えない。
+**この §14 は、§13 の `[wx]`(複製元の天気)を、株価ビューの製品で天気の取得に再び使うための仕様**(`[wx]` の書式は §13 に `len=` と `src=retry` を足した形。**正規表現は下の R-WXW-*。§13.3 の R-WX-* は使わない**)。株価の `[stk]` の書式は変えない(`docs/design.md` §7.5)。
+**判定できないこと**: 画面の見た目(色・形・ちらつき)は目視(`design.md` §13.10 の V-C0〜V-C3)と gdb(G-C)。UART で言えるのは、「ソフトが何を取得し、どの画面・どのパレットを出す入れ替えを受け付けたか」まで。
+**秘密・プライバシー**: **SSID・パスワード・IP・MAC・応答の本文(位置・気温・時刻の JSON)は、どの行にも出さない**。出すのは数値(気温・WMO コード・時刻・番号)と名前だけ。
+
+### 14.0 結論(まず読む)
+
+| # | 決定 | 内容 |
+|---|---|---|
+| 1 | 新しい行 | **`[wx]` の 3 形式**(天気の結果 成功 / 失敗、状態)と **`[scr]`**(表示面の入れ替え)。書式は §14.1 |
+| 2 | 変えない行 | **`[hb]` `[init]` `[boot]` `[err]` `[st]` `[perf]` `[wifi]` `[stk]` `[ev]` の書式は変えない**。`[stk] cycle=` の `ok` `fail` は株価の 3 ビット(0〜7)のまま |
+| 3 | `[hb]` の `scr` | **製品では今の画面**(0 = 株価、1 = 時計・天気)。書式(`scr=(\d+)`)は変えない。専用モードでは今までどおり step 番号 |
+| 4 | コマンド | **変更なし**(`x` `s` `?`)。`x` は時計・天気画面でもタップと同じ(株価画面へ戻して更新)。`s` は `[stk]` の行に続けて **`[wx] have=...` を 1 行**足す。`job-runner.ps1` の許可リストは変更不要 |
+| 5 | `[err]` | **`code=11`(`APP_ERR_LCD_CLUT`)**が増える(パレットの書込みの失敗。`detail` = `glcdc_err_t`。起きたら描画が止まる)。書式は変えない |
+| 6 | 切り替えの間隔を測る | `[scr]` の **`tick`(`[hb]` と同じ 10ms カウンタ)**の差で測る(`to` が変わる行どうし) |
+| 7 | ログの量 | 通常 1 分に数行(`[scr]` は入れ替えを受け付けるたび。画面が変わらないときは分の変わり目だけ)。**`[wifi]` の `res=ok` は製品では出さない(従来どおり)**ので、1 周期で `[stk]` 最大 5 行 + `[wx]` 1 行 + `[scr]` 数行。行キュー 8 行の `drop` は §8.3 の書き方 |
+
+### 14.1 書式
+
+```
+[wx] res=ok src=<boot|timer|touch|uart|retry> temp10=<n> wmo=<n> kind=<sun|partly|cloud|fog|rain|snow|thunder|unknown> http=<n> ms=<n> sync=<0|1> jst=<hhmmss|none> obs=<hhmm> len=<n> closed=<0|1>
+[wx] res=fail src=<boot|timer|touch|uart|retry> err=<1..9> http=<n> ms=<n> len=<n>
+[wx] have=<0|1> temp10=<n> wmo=<n> kind=<名前|none> age=<-1|n>
+[scr] to=<stock|clock> pal=<0..8> clk=<hhmm|none> kind=<名前|none> temp=<-99..99|none> tick=<n>
+```
+
+| キー | 意味 |
+|---|---|
+| `temp10` | 気温(0.1℃。符号つき整数。`129` = 12.9℃、`-4` = −0.4℃)。範囲 −600〜600。**画面の整数の気温は、これを絶対値の 0.5 を遠い方へ丸めたもの**(`-4` → `0`、`-5` → `-1`、`129` → `13`。±99 で頭打ち) |
+| `wmo` | WMO の天気コード(0〜99) |
+| `kind` | 天気の種類(`design.md` §13.6 の表)。`[wx] have=0` と、`[scr]` の天気なしは `none` |
+| `http` `ms` `sync` `jst` `closed` `len` `err` | §13.1 と同じ意味(`err` 1〜9、`len` = バッファに溜めたバイト数。**本文は出さない**)。`ms` = 取得の開始(`wx_mux`)から結果まで |
+| `obs` | 応答の `current.time` の `hhmm`(JST。15 分刻みの「データの時刻」)。無ければ `0000`。**PC の `curl` との照合用** |
+| `src` | §13.1 と同じ。**`retry` = 失敗した取得のやり直し**(天気にも株価にも付く) |
+| `have`(`[wx]` 状態行) | 天気の最後の成功がある = 1。**0 のとき `temp10` = 0、`wmo` = 0、`kind` = none、`age` = -1 にそろえる** |
+| `age` | 最後の成功からの秒(未取得は `-1`)。**3,600 以上は画面では「不明」**(`CLK_WX_STALE_S`) |
+| `[scr] to` | **入れ替えを受け付けた画面**(`stock` = 株価、`clock` = 時計・天気) |
+| `[scr] pal` | 使うパレット番号: **`to=stock` は 0**、**`to=clock` は 1〜8(`1 + kind`。天気なしは 8)** |
+| `[scr] clk` | 時計・天気画面の時刻 `hhmm`(`clock_min` から。未同期は `none`)。**株価画面のときも付く**(分の変わり目の照合に使う) |
+| `[scr] kind` `temp` | 時計・天気画面の天気の種類と整数の気温(天気なしは `none`)。株価画面のときも付く |
+| `[scr] tick` | `[hb]` の `tick` と同じ 10ms カウンタ(その入れ替えを受け付けた時) |
+
+- **共通ルールは §2.1**(ASCII、`\r\n`、最長 255 バイト + NUL)のまま。最長の行(`[wx] res=ok`)は約 150 バイト。
+- **`[wx] res=ok / fail`**: 天気の取得 1 回に 1 行(周期の最初)。**`[wx] have=...`**: `s` を受けた時だけ(`[stk] sym=` の 3 行の次)。
+- **`[scr]`**: **`lcd_flip` / `lcd_flip_pal` が受け付けられた(`LCD_FLIP_OK`)たびに 1 行**。出る場面: ① 画面が変わった(株価 ↔ 時計・天気)② 時計・天気画面で分・日付・天気が変わって描き直した ③ 株価画面で表示値が変わって描き直した(取得中の表示・更新時刻・値)。**BUSY で受け付けられなかった入れ替えは出さない**(受け付けた時に 1 回)。
+- **出さないもの**: 応答の本文・ヘッダー・SSID・パスワード・IP・MAC・座標(`latitude` `longitude`)。
+
+### 14.2 `[ev]` と受信コマンド
+
+| 項目 | 内容 |
+|---|---|
+| `[ev] btn=tap src=<touch\|uart>` | 今までどおり(§10 の旧ボタン名は無い)。**時計・天気画面でのタップは、続けて `[scr] to=stock ...` が出る**(株価画面へ戻る。`[stk] net=on busy=1` と取得が続く) |
+| `x` | 更新(タップと同じ。**株価 3 銘柄 + 天気**の周期。時計・天気画面にいれば株価画面へ戻る)。`[ev] btn=tap src=uart` |
+| `s` | `[st]` `[stk] net=` `[stk] sym=` x 3 の次に **`[wx] have=...`**(1 行) |
+| `?` | `[help] s=state x=update ?=help`(変更なし) |
+
+### 14.3 正規表現(Python の `re`、1行ずつ `fullmatch`)
+
+```
+R-WXW-OK    : \[wx\] res=ok src=(boot|timer|touch|uart|retry) temp10=(-?\d{1,3}) wmo=(\d{1,2}) kind=(sun|partly|cloud|fog|rain|snow|thunder|unknown) http=(\d{3}) ms=(\d+) sync=([01]) jst=(\d{6}|none) obs=(\d{4}) len=(\d+) closed=([01])
+R-WXW-FAIL  : \[wx\] res=fail src=(boot|timer|touch|uart|retry) err=([1-9]) http=(\d{1,3}) ms=(\d+) len=(\d+)
+R-WXW-STATE : \[wx\] have=([01]) temp10=(-?\d{1,3}) wmo=(\d{1,2}) kind=(sun|partly|cloud|fog|rain|snow|thunder|unknown|none) age=(-1|\d+)
+R-SCR       : \[scr\] to=(stock|clock) pal=([0-8]) clk=(\d{4}|none) kind=(sun|partly|cloud|fog|rain|snow|thunder|unknown|none) temp=(-?\d{1,2}|none) tick=(\d+)
+R-HB        : (§10.9 のまま。`scr=(\d+)` は 0 か 1)
+```
+
+**行の中の整合(正規表現のほかに判定するもの)**: `[scr]` で `to=stock` なら `pal=0`、`to=clock` なら `pal` が 1〜8 で **`pal` = 1 + (`kind` の番号。`kind=none` は 7 = unknown → `pal=8`)**。`kind=none` と `temp=none` は同時。`[wx] have=0` のとき `temp10=0 wmo=0 kind=none age=-1`。`[wx] res=ok` の `temp10` ∈ [−600, 600]、`wmo` ∈ [0, 99]、`kind` が WMO の表どおり。
+
+### 14.4 ホストで試験する関数(`design.md` §13.10 の H-C5)
+
+| 関数 | 内容 |
+|---|---|
+| `wx_fmt_wx_ok(buf, size, src, &result, closed)` / `wx_fmt_wx_fail(buf, size, src, &result)` / `wx_fmt_wx_state(buf, size, &slot, now_ms)` | §14.1 の 3 行(`\r\n` 込み)。**全 `src`・全 `kind`・境界値(`temp10` = −600 / 600、`ms` = 0xFFFFFFFF、`age` = −1)で R-WXW-* に fullmatch**。失敗(バッファ不足・引数不正)は 0 で `buf[0] = '\0'` |
+| `applog_fmt_scr(buf, size, to_clock, pal, clk_min, kind, have, temp, tick)` | `[scr]` 1 行。**`to_clock` = 0 なら `pal` を 0 にそろえる**。`pal` > 8、`kind` > 7(`have` = 1 のとき)は 0 で `buf[0] = '\0'`。境界値(`tick` = 0xFFFFFFFF、`temp` = ±99、`clk_min` = 0xFFFF / 1440)で R-SCR に fullmatch |
+| 秘密の混入の検査 | 応答に目印の語(`BODY_SENTINEL`)と本文の語を入れて流し、**全ログ行に `"current"` `latitude` `generationtime` `temperature_2m` `weather_code` `open-meteo` が出ない** |
+
+### 14.5 試験項目(実機。UK1〜UK10。`design.md` §13.10 の U-C1〜U-C10 と対応)
+
+**前提**: §13.5 と同じ(SW3 の 2ch = OFF、給電、`wifi_secret.h` あり、COM7 を他が開いていない、**PC の時計が NTP で合っている**)。`serial` ジョブ(`serial-read.ps1 -Stamp`)。**起動直後を見る回は 60 秒、切り替えの間隔を見る回は 330 秒、周期を見る回は 6,100 秒(10 周期)**。**`[boot]` が見えてから判定する**。
+
+| ID | 対応 | 合格条件(UART) |
+|---|---|---|
+| UK1 | U-C1 | 起動: `[init]` ×4 ok → `[stk] net=conn` → **`[wx] res=ok src=boot` が `[stk] res=ok sym=0` より前**、`sync=1`、`kind` が名前、`ms` ≦ 5,000。**最初の `[scr] to=clock` が `[boot]` の約 10〜12 秒後**(`tick` の差。`[boot]` の時刻を 0 として)。その `[scr]` の `clk` `kind` `temp` が `none` でない |
+| UK2 | U-C2 | PC の `curl` との照合: `obs` が同じなら `temp10` `wmo` が完全一致。違うとき気温差 ≦ 1.5℃・`kind` が同じか隣。`obs` が PC の JST より未来、または 30 分以上前なら不合格 |
+| UK3 | U-C3 | 330 秒録音。`[scr]` の `to` が変わる行どうしの `tick` の差: **`to=clock` → `to=stock` = 500 ± 3、`to=stock` → `to=clock` = 1,000 ± 3**。20 回以上連続。`[hb]` の `uf` が増えない、`drop` が増えない、`err=0` |
+| UK4 | U-C4 | 6,100 秒録音。`[stk] cycle=` が 600 ± 3 秒おき。**毎周期の最初に `[wx] res=ok`**、`cycle ms` ≦ 90,000。10 周期連続で天気と株価 3 つが `res=ok`、`err=9` なし |
+| UK5 | U-C5 | `[scr]` の `clk` が変わる行(どちらの画面でも)の受信時刻(PC の JST)と、その分の 0 秒の差が ±3 秒以内(5 回)。`clk` が逆戻りしない |
+| UK6 | U-C6 | 時計・天気画面にいる間に `tx=x`: `[ev] btn=tap src=uart` → `[scr] to=stock`(50ms 以内)→ `[stk] net=on busy=1` → **`[wx] res=ok src=uart` → `[stk] res=ok sym=0〜2`**。株価画面にいる間の `x`: `to` が変わらず、次の `to=clock` が `x` の `tick` から 1,000 ± 3。取得中の 2 回目は `[stk] req=busy src=uart`。実タッチ(ユーザー)も同じ(`src=touch`) |
+| UK7 | U-C7 | `APP_STK_FAULT = 4`: `[wx] res=fail ... err=4 http=404`、株価 3 つは `res=ok`、約 20 秒後に `[wx] res=fail src=retry`(最大 2 回)、`[stk] cycle= ok=7 fail=0`。時計・天気画面の `[scr]` が `kind=none temp=none pal=8` |
+| UK8 | U-C8 | `APP_STK_BADAP = 2`: 時刻が同期するまで `[scr] to=clock` が 1 行も出ない。復帰後 最初の取得の約 10 秒後に `to=clock`。`[hb]` が途切れない |
+| UK9 | U-C9 | `-DCLK_WX_STALE_S=120` の試験ビルドで、天気を止めて 120 秒以上後に `[scr]` が `kind=none temp=none pal=8`(`s` の `[wx] have=1 ... age=` が 120 以上)。製品は 3,600。省略可(H-C1 で足りる) |
+| UK10 | U-C10 | 受信ログに、U-9 の語・IP・MAC・`[wifiv]` に加え、`"current"` `latitude` `generationtime` `temperature_2m` `weather_code` `open-meteo` が **0 件**(一致数だけ報告)。SSID・パスワードは手元で(`design.md` §7.8) |
+
+- **判定の順**: 書式(R-WXW-*・R-SCR)→ 行の中の整合(§14.3)→ 値の範囲 → 時刻の照合(UK5)→ PC との照合(UK2)→ 間隔(UK3)。
+- **秘密の確認**: 受信ログに SSID・パスワード・本文の語が**無い**こと(一致数だけ報告)。失敗時はログ全文を添える前に、秘密の文字列が含まれていないか確認する。
