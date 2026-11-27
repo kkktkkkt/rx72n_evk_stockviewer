@@ -41,12 +41,22 @@
 /* 製品(LCD・タッチが動く通常の起動)に取得を組み込む = APP_WX = 1 かつ APP_WIFI_TEST = 0。専用モードが優先 */
 #define APP_WX_PRODUCT       ((APP_WX) && !(APP_WIFI_TEST))
 
-/* n(1〜3)= 銘柄 n-1 の要求のパスを壊す(404 を返させて err=4 を起こす。失敗の試験用 = 受入 U-6)。0 = 壊さない。製品は 0 */
+/* 1 = 取得の周期の最初に天気(取得 ID 3。Open-Meteo)を含める(docs/design.md §13.6。天気 → 6723.T → ^N225 → ^GSPC の 4 回)。
+ * 0 = 株価 3 銘柄だけ(Phase 5 と同じ)。Phase 6c は wx_sched(標準 C)までで、wifi_at.c が天気の結果を扱うのは 6d なので、**6c の既定は 0**。6d で既定を 1 にする。
+ * ホスト試験の天気の予定表(test_wx_weather.c)は -DAPP_WX_WEATHER=1 で作る */
+#ifndef APP_WX_WEATHER
+#define APP_WX_WEATHER       (0)
+#endif
+#if ((APP_WX_WEATHER) != 0) && ((APP_WX_WEATHER) != 1)
+#error "APP_WX_WEATHER must be 0 or 1"
+#endif
+
+/* n(1〜3)= 銘柄 n-1 の要求のパスを壊す。4 = 天気の要求のパスを壊す(どれも 404 を返させて err=4 を起こす。失敗の試験用 = 受入 U-6・U-C7)。0 = 壊さない。製品は 0 */
 #ifndef APP_STK_FAULT
 #define APP_STK_FAULT        (0)
 #endif
-#if ((APP_STK_FAULT) < 0) || ((APP_STK_FAULT) > 3)
-#error "APP_STK_FAULT must be 0..3"
+#if ((APP_STK_FAULT) < 0) || ((APP_STK_FAULT) > 4)
+#error "APP_STK_FAULT must be 0..4"
 #endif
 
 /* n(1〜9)= 最初の n 回の接続(WIFI_RANGE_CONNECT の join。再接続の 1 周期 = 1 回。join のやり直しは数えない)だけ、下のダミーの SSID・パスワードで

@@ -28,7 +28,7 @@ static void t_request(void)
     n = wx_build_cipstart(b, sizeof b, WX_TGT_YAHOO_SSL);
     CHECK(strcmp(b, "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") == 0); CHECK_EQ(n, strlen(b));
 #if APP_WIFI_TEST
-    CHECK_EQ(WX_TGT_END, 4);
+    CHECK_EQ(WX_TGT_END, 5);                                                          /* + METEO_TCP(天気。製品にもある) */
     n = wx_build_cipstart(b, sizeof b, WX_TGT_YAHOO_TCP);
     CHECK(strcmp(b, "AT+CIPSTART=\"TCP\",\"query1.finance.yahoo.com\",80\r\n") == 0);
     n = wx_build_cipstart(b, sizeof b, WX_TGT_GOOGLE_SSL);
@@ -37,7 +37,7 @@ static void t_request(void)
     CHECK(strcmp(b, "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") == 0);
     CHECK(!wx_target_ssl(WX_TGT_YAHOO_TCP)); CHECK(wx_target_ssl(WX_TGT_GOOGLE_SSL)); CHECK(wx_target_ssl(WX_TGT_YAHOO_SSL_NOAUTH));
 #else
-    CHECK_EQ(WX_TGT_END, 1);                                                          /* 製品の接続先は Yahoo の SSL だけ */
+    CHECK_EQ(WX_TGT_END, 2);                                                          /* 製品の接続先は Yahoo の SSL と天気の METEO_TCP */
 #endif
     CHECK(wx_target_ssl(WX_TGT_YAHOO_SSL));
     CHECK(!wx_target_ssl(WX_TGT_END)); CHECK(!wx_target_ssl((wx_target_t)255));
@@ -66,7 +66,7 @@ static void t_request(void)
         CHECK_EQ(wx_build_request_t(b, sizeof b, WX_TGT_YAHOO_SSL_NOAUTH, (uint8_t)sym), n);
 #endif
     }
-    memset(b, 'Q', sizeof b); CHECK_EQ(wx_build_request(b, sizeof b, 3u), 0u); CHECK_EQ(b[0], 0);    /* 銘柄の範囲外 */
+    memset(b, 'Q', sizeof b); CHECK_EQ(wx_build_request(b, sizeof b, 4u), 0u); CHECK_EQ(b[0], 0);    /* 銘柄の範囲外 */
     CHECK_EQ(wx_build_request(b, sizeof b, 255u), 0u);
     memset(b, 'Q', sizeof b); CHECK_EQ(wx_build_request_t(b, sizeof b, WX_TGT_END, 1u), 0u); CHECK_EQ(b[0], 0);
     CHECK_EQ(wx_build_request(NULL, 300u, 1u), 0u);

@@ -757,6 +757,9 @@ static void wx_publish(wifi_core_t *c, uint32_t now)
     c->wx.ms       = now - c->wx_t0;
     c->wx.first_ms = c->wx_first_ms;
     c->wx.sym      = c->sym;
+    if (c->wx.ok == 0u) {
+        c->wx.kind = (uint8_t)CLK_UNKNOWN;                   /* 失敗した結果の天気の種類は不明(memset 0 = sun のまま渡さない) */
+    }
     memset(c->wx_buf, 0, sizeof c->wx_buf);
     c->wx_len   = 0u;
     c->ipd_left = 0u;
@@ -829,9 +832,15 @@ static void end_ok(wifi_core_t *c, uint32_t now, uint32_t code)
     next_step(c, now);
 }
 
+/* 今の取得の接続先。天気(sym = WX_WEATHER)は常に METEO_TCP(wifi_core_set_target の値は株価・専用モード用。設計 §13.6) */
+static wx_target_t eff_target(const wifi_core_t *c)
+{
+    return (c->sym == (uint8_t)WX_WEATHER) ? WX_TGT_METEO_TCP : (wx_target_t)c->target;
+}
+
 static uint32_t step_timeout(const wifi_core_t *c)
 {
-    if ((c->step == (uint8_t)WIFI_STEP_WX_TCP) && wx_target_ssl((wx_target_t)c->target)) {
+    if ((c->step == (uint8_t)WIFI_STEP_WX_TCP) && wx_target_ssl(eff_target(c))) {
         return SSL_TCP_TIMEOUT_MS;
     }
     return (uint32_t)k_def[c->step].timeout_ms;
@@ -919,7 +928,7 @@ static void begin_try(wifi_core_t *c, uint32_t now)
         return;
     }
     if (c->step == (uint8_t)WIFI_STEP_WX_SEND) {                /* AT+CIPSEND=<要求の長さ> */
-        n = wx_build_request_t(c->cmd, sizeof c->cmd, (wx_target_t)c->target, c->sym);
+        n = wx_build_request_t(c->cmd, sizeof c->cmd, eff_target(c), c->sym);
         if (n == 0u) {
             end_fail(c, now, WIFI_RES_FAIL, 100u);
             return;
@@ -930,7 +939,7 @@ static void begin_try(wifi_core_t *c, uint32_t now)
         return;
     }
     if (c->step == (uint8_t)WIFI_STEP_WX_TCP) {                 /* AT+CIPSTART="TCP"|"SSL",<host>,<port> */
-        n = wx_build_cipstart(c->cmd, sizeof c->cmd, (wx_target_t)c->target);
+        n = wx_build_cipstart(c->cmd, sizeof c->cmd, eff_target(c));
         if (n == 0u) {
             end_fail(c, now, WIFI_RES_FAIL, 100u);
             return;
@@ -985,7 +994,7 @@ void wifi_core_set_target(wifi_core_t *c, wx_target_t t)
 
 void wifi_core_set_symbol(wifi_core_t *c, uint8_t sym)
 {
-    if ((c->phase == PH_IDLE) && (sym < (uint8_t)WX_NSYM)) {
+    if ((c->phase == PH_IDLE) && (sym < (uint8_t)WX_NFETCH)) {
         c->sym = sym;
     }
 }
@@ -1002,7 +1011,7 @@ bool wifi_core_start(wifi_core_t *c, wifi_range_t range, uint32_t now_ms)
     case WIFI_RANGE_CONNECT: c->mask = MASK_CONNECT; c->step = (uint8_t)WIFI_STEP_RESET;  break;
     case WIFI_RANGE_WX:
 #if APP_WIFI_TEST
-        c->mask = (c->target == (uint8_t)WX_TGT_YAHOO_SSL_NOAUTH) ? MASK_WX_SSLCONF : MASK_WX;
+        c->mask = ((c->target == (uint8_t)WX_TGT_YAHOO_SSL_NOAUTH) && (c->sym != (uint8_t)WX_WEATHER)) ? MASK_WX_SSLCONF : MASK_WX;
 #else
         c->mask = MASK_WX;
 #endif
@@ -1020,6 +1029,12 @@ bool wifi_core_start(wifi_core_t *c, wifi_range_t range, uint32_t now_ms)
     return true;
 }
 
+/* 取得 ID(sym)に合う応答の解析: 天気は wx_parse_weather、株価は wx_parse_http */
+static bool parse_resp(const wifi_core_t *c, wx_result_t *r)
+{
+    return (c->sym == (uint8_t)WX_WEATHER) ? wx_parse_weather(c->wx_buf, c->wx_len, r) : wx_parse_http(c->wx_buf, c->wx_len, r);
+}
+
 /* wx_recv の終わり(CLOSED を受けた・時間切れ・ERROR)。応答を解析して、成功なら次へ、失敗なら打ち切り。結果は wx に残す(本文は消す) */
 static void recv_done(wifi_core_t *c, uint32_t now, int how)
 {
@@ -1027,14 +1042,14 @@ static void recv_done(wifi_core_t *c, uint32_t now, int how)
     bool         ok = false;
 
     if ((c->wx_flags & F_OVER) != 0u) {
-        (void)wx_parse_http(c->wx_buf, c->wx_len, r);        /* http と Date: だけ拾う。溢れた応答は、キーがそろっていても成功にしない(design.md §5.2 段 8) */
+        (void)parse_resp(c, r);                              /* http と Date: だけ拾う。溢れた応答は、キーがそろっていても成功にしない(design.md §5.2 段 8) */
         r->ok  = 0u;
         r->err = 7u;
     } else if (c->wx_len == 0u) {
         memset(r, 0, sizeof *r);
         r->err = 3u;
     } else {
-        ok = wx_parse_http(c->wx_buf, c->wx_len, r);
+        ok = parse_resp(c, r);
     }
     r->closed = (how == RECV_CLOSED) ? 1u : 0u;
     r->len    = c->wx_len;
@@ -1051,7 +1066,7 @@ static void recv_done(wifi_core_t *c, uint32_t now, int how)
 /* wx_send の > を受けた後の要求本体を送る準備(c->cmd に要求を入れて PH_SEND_DATA へ) */
 static void start_request(wifi_core_t *c, uint32_t now)
 {
-    size_t n = wx_build_request_t(c->cmd, sizeof c->cmd, (wx_target_t)c->target, c->sym);
+    size_t n = wx_build_request_t(c->cmd, sizeof c->cmd, eff_target(c), c->sym);
 
     c->wx_flags |= F_REQ;
     if (n == 0u) {

@@ -2598,7 +2598,7 @@ static void t_wx_symbol(void)
         CHECK(last_is("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"));
     }
     begin(SSID_MARK, PASS_MARK);
-    wifi_core_set_symbol(&g_c, 2u); wifi_core_set_symbol(&g_c, 3u); wifi_core_set_symbol(&g_c, 255u);   /* 範囲外は無視 */
+    wifi_core_set_symbol(&g_c, 2u); wifi_core_set_symbol(&g_c, 4u); wifi_core_set_symbol(&g_c, 255u);   /* 範囲外(4 以上。3 は天気)は無視 */
     CHECK_EQ(g_c.sym, 2);
     mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1); sym_rules(1u, 100u);
     wifi_core_set_symbol(&g_c, 1u);
@@ -2684,6 +2684,254 @@ static void t_wx_symbol(void)
     CHECK(first_with("step=wx_tcp res=timeout try=1 ms=20000 code=1") >= 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 1);
 }
 
+/* ================================================================ 天気(取得 ID 3。Phase 6c。H-C4)。製品は Yahoo の SSL のまま、天気だけ METEO_TCP(HTTP 80) */
+
+/* Open-Meteo ふうの応答(設計 §13.1 W4)。temp / code = 値の文字列(そのまま埋める)。目印 BODY_MARK をヘッダーと本文の両方に入れる */
+static void mk_http_wx(const char *status, const char *extra, const char *temp, const char *code)
+{
+    g_http_n = (size_t)snprintf(g_http, sizeof g_http,
+        "%s\r\nDate: Fri, 27 Nov 2026 12:57:50 GMT\r\nContent-Type: application/json; charset=utf-8\r\n%sX-Body: " BODY_MARK "\r\nConnection: close\r\n\r\n"
+        "{\"latitude\":35.7,\"longitude\":139.75,\"generationtime_ms\":0.0514,\"utc_offset_seconds\":32400,\"timezone\":\"Asia/Tokyo\",\"" BODY_MARK "\":\"" BODY_MARK "\","
+        "\"current_units\":{\"time\":\"iso8601\",\"interval\":\"seconds\",\"temperature_2m\":\"C\",\"weather_code\":\"wmo code\"},"
+        "\"current\":{\"time\":\"2026-11-27T21:45\",\"interval\":900,\"temperature_2m\":%s,\"weather_code\":%s}}",
+        status, (extra != NULL) ? extra : "", temp, code);
+}
+
+/* 天気の取得の台本。CIPSTART の文は wx_build_cipstart(METEO_TCP)から作る(WX_METEO_SSL = 1 でも同じ試験が通る)。CIPSEND の長さは wx_build_request から作る */
+static void wx_weather_rules(uint32_t conn_delay, uint32_t get_delay)
+{
+    static char cs[80];
+    static char snd[40];
+    char        req[300];
+    size_t      n = wx_build_request(req, sizeof req, (uint8_t)WX_WEATHER);
+
+    CHECK(n > 0u);
+    CHECK(wx_build_cipstart(cs, sizeof cs, WX_TGT_METEO_TCP) > 0u);
+    cs[strlen(cs) - 2u] = '\0';                                        /* \r\n を外す */
+    (void)snprintf(snd, sizeof snd, "AT+CIPSEND=%u", (unsigned)n);
+    rule("AT+CIPMUX=0",   0, 20, "OK\r\n");
+    rule("AT+CIPCLOSE",   0, 20, "ERROR\r\n");
+    rule(cs,              0, conn_delay, "CONNECT\r\n\r\nOK\r\n");
+    rule(snd,             0, 20, "\r\nOK\r\n> ");
+    rule("GET *",         0, get_delay, g_reply);
+}
+
+static void expect_wx_ok(unsigned closed)
+{
+    const wx_result_t *r = wifi_core_wx(&g_c);
+    wx_date_t d;
+
+    CHECK(last_is("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"));
+    CHECK(wifi_core_pass(&g_c));
+    CHECK_EQ(r->ok, 1); CHECK_EQ(r->err, 0); CHECK_EQ(r->http, 200); CHECK_EQ(r->sym, WX_WEATHER);
+    CHECK_EQ(r->temp_x10, 129); CHECK_EQ(r->wmo, 1); CHECK_EQ(r->kind, CLK_SUN); CHECK_EQ(r->obs, 2145);
+    CHECK_EQ(r->have_date, 1); CHECK_EQ(r->closed, closed);
+    wx_date_fields(r->jst_s, &d);
+    CHECK_EQ(d.hour, 21); CHECK_EQ(d.min, 57); CHECK_EQ(d.sec, 50);                 /* Date: 12:57:50 GMT + 9 時間 */
+    CHECK_EQ(r->price_x100, 0);                                                      /* 株価の項目は 0 */
+    CHECK(r->first_ms > 1000u);
+    CHECK(!core_has(BODY_MARK)); CHECK(!core_has("latitude")); CHECK(!core_has("temperature_2m"));   /* 本文は残らない */
+    CHECK(!core_has_secret());
+    CHECK_EQ(log_has_secret(), 0);
+    CHECK_EQ(count_with(BODY_MARK), 0);
+}
+
+static void t_wx_weather(void)
+{
+    char   req[300];
+    char   want[100];
+    size_t i;
+    static const size_t SPL[] = { 1u, 9u, 100u, 256u, 300u, 400u };
+    static const char *const S_PRICE[3] = { "2433.0", "57953.84", "7182.78" };
+    static const char *const S_PREV[3]  = { "2378.0", "57499.16", "7201.09" };
+
+    TEST("H-C4-1 天気(sym = 3): 5 step・CIPSTART は METEO_TCP(既定 TCP 80)・CIPSEND は要求の長さ(195)・要求本体は wx_build_request(3)・結果は sym = 3 で気温・コード・種類・obs・時刻");
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER);
+    CHECK_EQ(g_c.sym, WX_WEATHER);
+    wx_weather_rules(300u, 100u);
+    mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1");
+    mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 30000u);
+    expect_wx_ok(1u);
+    expect_5steps();
+    CHECK_EQ(g_nsend, 5);
+    CHECK(strcmp(g_sent[0], "AT+CIPMUX=0\r\n") == 0); CHECK(strcmp(g_sent[1], "AT+CIPCLOSE\r\n") == 0);
+    CHECK(strncmp(g_sent[2], "AT+CIPSTART=\"", 13u) == 0);
+#if !WX_METEO_SSL
+    CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"TCP\",\"api.open-meteo.com\",80\r\n") == 0);
+#endif
+    CHECK_EQ(wx_build_request(req, sizeof req, (uint8_t)WX_WEATHER), (APP_STK_FAULT == 4) ? 197u : 195u);
+    (void)snprintf(want, sizeof want, "AT+CIPSEND=%u\r\n", (unsigned)strlen(req));
+    CHECK(strcmp(g_sent[3], want) == 0);
+    CHECK(strcmp(g_sent[4], req) == 0); CHECK_EQ(strlen(g_sent[4]), strlen(req));
+    CHECK(strstr(g_sent[4], "api.open-meteo.com") != NULL); CHECK(strstr(g_sent[4], "query1.finance.yahoo.com") == NULL);
+    CHECK_EQ(wifi_core_wx_seq(&g_c), 1u); CHECK_EQ(wifi_core_done_seq(&g_c), 1u);
+    CHECK_EQ(g_c.target, WX_TGT_YAHOO_SSL);                                           /* 接続先の既定(株価)は変わらない */
+
+    TEST("H-C4-2 TCP(天気)→ SSL(株価)→ SSL → SSL の連続(製品の 1 周期): 天気は TCP、株価は毎回 SSL。毎回 CIPCLOSE が挟まり、結果の sym と解析が取得 ID ごとに正しい");
+    begin(SSID_MARK, PASS_MARK);
+    {
+        static const uint8_t ORDER[4] = { 3u, 0u, 1u, 2u };
+        int k;
+
+        for (k = 0; k < 4; k++) {
+            const wx_result_t *r;
+
+            g_nsend = 0; g_npend = 0; memset(g_used, 0, sizeof g_used); g_nrules = 0;
+            if (ORDER[k] == WX_WEATHER) {
+                mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1"); mk_reply(0u, NULL, 1); wx_weather_rules(300u, 100u);
+            } else {
+                mk_http("HTTP/1.0 200 OK", NULL, S_PRICE[ORDER[k]], S_PREV[ORDER[k]]); mk_reply(0u, NULL, 1); sym_rules(ORDER[k], 100u);
+            }
+            wifi_core_set_symbol(&g_c, ORDER[k]);
+            run(WIFI_RANGE_WX, 30000u);
+            r = wifi_core_wx(&g_c);
+            CHECK_EQ(wifi_core_wx_seq(&g_c), (uint32_t)k + 1u); CHECK_EQ(r->ok, 1); CHECK_EQ(r->sym, ORDER[k]); CHECK_EQ(g_nsend, 5);
+            CHECK(strcmp(g_sent[1], "AT+CIPCLOSE\r\n") == 0);
+            if (ORDER[k] == WX_WEATHER) {
+                CHECK(strncmp(g_sent[2], "AT+CIPSTART=\"", 13u) == 0); CHECK(strstr(g_sent[2], "\"api.open-meteo.com\",") != NULL);
+                CHECK_EQ(r->temp_x10, 129); CHECK_EQ(r->price_x100, 0);
+            } else {
+                CHECK(strcmp(g_sent[2], "AT+CIPSTART=\"SSL\",\"query1.finance.yahoo.com\",443\r\n") == 0);
+                CHECK(r->price_x100 > 0); CHECK_EQ(r->temp_x10, 0); CHECK_EQ(r->kind, CLK_UNKNOWN);
+            }
+            CHECK(!core_has(BODY_MARK));
+        }
+    }
+    CHECK_EQ(log_has_secret(), 0);
+
+    TEST("H-C4-3 +IPD の分割(1 バイト目・9・100・256・300・400 バイト目)と 1 tick に 2 バイト・本文の外のデータに OK / CLOSED / +IPD, / SEND OK を含む → 同じ結果");
+    for (i = 0u; i < (sizeof SPL / sizeof SPL[0]); i++) {
+        begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+        mk_http_wx("HTTP/1.1 200 OK", "X-Pad: a\r\nOK\r\nCLOSED\r\n0,CLOSED\r\n+IPD,5:xyzab\r\nSEND OK\r\nERROR\r\n>\r\nFAIL\r\nb\r\n", "12.9", "1");
+        mk_reply(SPL[i], NULL, 1);
+        run(WIFI_RANGE_WX, 30000u);
+        expect_wx_ok(1u);
+    }
+    begin(SSID_MARK, PASS_MARK);
+    g_rate = 2u; wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1"); mk_reply(100u, NULL, 1);
+    run(WIFI_RANGE_WX, 30000u);
+    expect_wx_ok(1u);
+    CHECK(wifi_core_wx(&g_c)->ms > 2500u);                                            /* 少しずつ流れた証拠(約 630 バイト / 200 バイト毎秒) */
+
+    TEST("H-C4-4 天気の失敗: 404・429(err=4 と http・Date: は読める)・CLOSED が来ない(len が残る)・CLOSED だけ(err=3)・本文なし");
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    mk_http_wx("HTTP/1.1 429 Too Many Requests", NULL, "12.9", "1"); mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 4); CHECK_EQ(wifi_core_wx(&g_c)->http, 429); CHECK_EQ(wifi_core_wx(&g_c)->sym, WX_WEATHER);
+    CHECK_EQ(wifi_core_wx(&g_c)->have_date, 1); CHECK_EQ(wifi_core_wx(&g_c)->temp_x10, 0); CHECK_EQ(wifi_core_wx(&g_c)->kind, CLK_UNKNOWN);
+    CHECK(last_is("[wifi] result=fail stage=wx_recv ping_ip=0 ping_dns=0\r\n")); CHECK(!core_has(BODY_MARK));
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    mk_http_wx("HTTP/1.1 404 Not Found", NULL, "12.9", "1"); mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 4); CHECK_EQ(wifi_core_wx(&g_c)->http, 404);
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    rp_start(); RP_LIT("CLOSED\r\n");
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 3); CHECK_EQ(wifi_core_wx(&g_c)->len, 0u); CHECK_EQ(wifi_core_wx(&g_c)->sym, WX_WEATHER);
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);   /* 本文の途中まで(CLOSED なし → wx_recv の 15 秒で時間切れ) */
+    mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1");
+    rp_start(); rp_ipd(g_http, g_http_n - 10u, NULL);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(first_with("step=wx_recv res=timeout try=1 ms=15000 code=3") >= 0);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 3); CHECK_EQ(wifi_core_wx(&g_c)->len, g_http_n - 10u); CHECK_EQ(wifi_core_wx(&g_c)->closed, 0);
+    CHECK(!core_has(BODY_MARK));
+
+    TEST("H-C4-5 解析の振り分け: 天気の応答を sym 0〜2(株価の解析)で受けると err=5、株価の応答を sym = 3 で受けると err=5。どちらも成功にならない");
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, 0u);
+    mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1"); mk_reply(0u, NULL, 1); sym_rules(0u, 100u);
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 5); CHECK_EQ(wifi_core_wx(&g_c)->sym, 0);
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER);
+    mk_http("HTTP/1.0 200 OK", NULL, "2433.0", "2378.0"); mk_reply(0u, NULL, 1); wx_weather_rules(300u, 100u);
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 5); CHECK_EQ(wifi_core_wx(&g_c)->sym, WX_WEATHER); CHECK_EQ(wifi_core_wx(&g_c)->http, 200);
+
+    TEST("H-C4-6 バッファ超過(3,500 バイト): 天気も err=7 で、http と Date: だけ拾う。CLOSED は読める");
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    {
+        size_t pad = 3600u;
+        char  *big = (char *)malloc(pad + 800u);
+
+        CHECK(big != NULL);
+        if (big != NULL) {
+            memset(big, 'a', pad);
+            big[pad] = '\0';
+            mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1");
+            g_http_n = (size_t)snprintf(g_http, sizeof g_http, "HTTP/1.1 200 OK\r\nDate: Fri, 27 Nov 2026 12:57:50 GMT\r\n\r\n{\"current\":{\"temperature_2m\":1.0,\"weather_code\":1},\"x\":\"%.*s\"}", 3400, big);
+            rp_start(); rp_ipd(g_http, 1500u, NULL); rp_ipd(g_http + 1500, g_http_n - 1500u, NULL); RP_LIT("CLOSED\r\n");          /* 1 つの +IPD は 2 KB 以下(ESP32 と同じ) */
+            run(WIFI_RANGE_WX, 30000u);
+            CHECK_EQ(wifi_core_wx(&g_c)->err, 7); CHECK_EQ(wifi_core_wx(&g_c)->http, 200); CHECK_EQ(wifi_core_wx(&g_c)->have_date, 1);
+            CHECK_EQ(wifi_core_wx(&g_c)->ok, 0); CHECK_EQ(wifi_core_wx(&g_c)->closed, 1); CHECK_EQ(wifi_core_wx(&g_c)->len, WX_BUF_SIZE);
+            CHECK_EQ(wifi_core_wx(&g_c)->temp_x10, 0);                                 /* 溢れた応答は、キーがそろっていても成功にしない */
+            free(big);
+        }
+    }
+
+    TEST("H-C4-7 タイムアウト・err=9: 天気の wx_tcp は TCP の 10 秒(SSL なら 20 秒)・wx_recv は 15 秒・ready は err=9。株価(SSL)の 20 秒は変わらない");
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(25000u, 100u);
+    run(WIFI_RANGE_WX, 60000u);
+#if WX_METEO_SSL
+    CHECK(first_with("step=wx_tcp res=timeout try=1 ms=20000 code=1") >= 0);
+#else
+    CHECK(first_with("step=wx_tcp res=timeout try=1 ms=10000 code=1") >= 0);
+#endif
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 1); CHECK_EQ(wifi_core_wx(&g_c)->sym, WX_WEATHER); CHECK_EQ(wifi_core_wx(&g_c)->http, 0);
+#if !WX_METEO_SSL
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(12000u, 100u);                   /* 12 秒の接続: TCP の 10 秒では時間切れ(SSL なら通る) */
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(first_with("step=wx_tcp res=timeout try=1 ms=10000 code=1") >= 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 1);
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, 1u); sym_rules(1u, 100u); g_rules[2].delay = 12000u;                    /* 株価は 12 秒でも通る(SSL は 20 秒) */
+    mk_http("HTTP/1.0 200 OK", NULL, "57953.84", "57499.16"); mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 1); CHECK_EQ(wifi_core_wx(&g_c)->sym, 1);
+#endif
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    rp_start();                                                                                                                      /* 応答が来ないまま */
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK(first_with("step=wx_recv res=timeout try=1 ms=15000 code=3") >= 0); CHECK_EQ(wifi_core_wx(&g_c)->err, 3);
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1");
+    rp_start(); rp_ipd(g_http, 300u, NULL); RP_LIT("\r\nready\r\n"); rp_ipd(g_http + 300, g_http_n - 300u, NULL);
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 9); CHECK_EQ(wifi_core_wx(&g_c)->len, 300u); CHECK_EQ(wifi_core_wx(&g_c)->sym, WX_WEATHER); CHECK(!core_has(BODY_MARK));
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u); g_rules[2].reply = "ready\r\n";   /* 接続中の再起動 */
+    run(WIFI_RANGE_WX, 60000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->err, 9); CHECK(last_is("[wifi] result=fail stage=wx_tcp ping_ip=0 ping_dns=0\r\n"));
+
+    TEST("H-C4-8 quiet(製品): 天気でも res=start・res=ok の行を出さない。失敗は出す。set_symbol: 3 は受け付け、4 以上・実行中は無視");
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_quiet(&g_c, true); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1"); mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 1); CHECK_EQ(count_with("res=start"), 0); CHECK_EQ(count_with("res=ok"), 0); CHECK(last_is("[wifi] result=pass stage=none ping_ip=0 ping_dns=0\r\n"));
+    begin(SSID_MARK, PASS_MARK);
+    wifi_core_set_symbol(&g_c, 3u); CHECK_EQ(g_c.sym, 3);
+    wifi_core_set_symbol(&g_c, 4u); wifi_core_set_symbol(&g_c, 255u); CHECK_EQ(g_c.sym, 3);
+    wifi_core_set_symbol(&g_c, 1u); CHECK_EQ(g_c.sym, 1);
+    wx_weather_rules(300u, 100u); mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1"); mk_reply(0u, NULL, 1);
+    wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER);
+    CHECK(wifi_core_start(&g_c, WIFI_RANGE_WX, g_now));
+    wifi_core_set_symbol(&g_c, 0u);                                                                                                  /* 実行中は無視 */
+    CHECK_EQ(g_c.sym, WX_WEATHER);
+    run_until_done(30000u);
+    CHECK_EQ(wifi_core_wx(&g_c)->ok, 1); CHECK_EQ(wifi_core_wx(&g_c)->sym, WX_WEATHER);
+
+#if APP_WIFI_TEST
+    TEST("H-C4-9 専用モード: 接続先が z(NOAUTH)のままでも、天気は sslconf なし・METEO_TCP(天気は set_target に従わない)");
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_target(&g_c, WX_TGT_YAHOO_SSL_NOAUTH); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1"); mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK_EQ(g_nsend, 5); CHECK_EQ(count_with("step=wx_sslconf"), 0); CHECK_EQ(wifi_core_wx(&g_c)->ok, 1); CHECK_EQ(wifi_core_wx(&g_c)->sym, WX_WEATHER);
+    CHECK(strncmp(g_sent[2], "AT+CIPSTART=\"", 13u) == 0); CHECK(strstr(g_sent[2], "api.open-meteo.com") != NULL);
+    begin(SSID_MARK, PASS_MARK); wifi_core_set_target(&g_c, WX_TGT_YAHOO_TCP); wifi_core_set_symbol(&g_c, (uint8_t)WX_WEATHER); wx_weather_rules(300u, 100u);
+    mk_http_wx("HTTP/1.1 200 OK", NULL, "12.9", "1"); mk_reply(0u, NULL, 1);
+    run(WIFI_RANGE_WX, 30000u);
+    CHECK(strstr(g_sent[2], "api.open-meteo.com") != NULL); CHECK_EQ(wifi_core_wx(&g_c)->ok, 1);                                    /* t でも天気は天気の接続先 */
+#endif
+}
+
 #if APP_STK_BADAP
 /* APP_STK_BADAP = n: 最初の n 回の接続(join に入る回数。join のやり直しは数えない)だけダミーの SSID / パスワードで AT+CWJAP する。n + 1 回目から本物 */
 static int cwjap_count(const char *ssid)
@@ -2763,6 +3011,7 @@ int main(void)
     t_wx_ranges();
     t_wx_quiet();
     t_wx_symbol();
+    t_wx_weather();
     t_secret();                          /* 最後: g_all(全ログ)を調べる */
     TEST_REPORT("test_wifi_core");
 #endif

@@ -304,6 +304,43 @@ H-6⑥(更新要求の返値)の試験の期待値は、設計どおり(取得�
 
 ### 6c・6d に残したこと
 
-- 天気の取得(`wx_parse_weather`・`wx_sched` の天気・`wifi_at.c` の天気・`APP_STK_FAULT = 4`)は未着手。
+- 天気の取得は 6c で実装(下の「Phase 6c」)。`wifi_at.c` の天気は 6d。
 - 6d: `clk_ui(&s_cview, now_ms)` と `ui_set_clk(&s_ui, &s_cview)` を `tick_step` へ(いまは `APP_CLK_PREVIEW` だけが値を渡す)。
 - ビルド担当: `HardwareDebug` の makefile へ新しい `.c`(`clk_core.c` `ui_clock.c` `clk_data.c` `clk_preview.c`)の反映。
+
+## Phase 6c(天気の取得。ホストのみ。実機・ビルドは 6d): 実装したこと
+
+**要点**: 天気(取得 ID 3)の解析・要求・接続先・予定表・`[wx]` ログ・`APP_STK_FAULT = 4` を入れた。**`wifi_at.c` と `app_main.c` は触っていない**。既定のビルドの動きは Phase 5 と同じ(下の `APP_WX_WEATHER`)。実機では未確認。
+
+### 変更したファイル
+| ファイル | 内容 |
+|---|---|
+| `src/app/wifi_sw.h` | **`APP_WX_WEATHER`(0 / 1。6c の既定は 0)**を追加。`APP_STK_FAULT` の範囲を 0〜4 に |
+| `src/app/wx_core.h` / `.c` | `WX_WEATHER`(3)`WX_NFETCH`(4)`WX_FETCH_ALL`(0x0F)`WX_METEO_HOST` `WX_METEO_SSL`。`wx_result_t` に `temp_x10` `obs` `wmo` `kind`。`WX_TGT_METEO_TCP`。`wx_build_request(sym = 3)` = 195 バイト。`wx_parse_weather`。`wx_fmt_wx_ok` `wx_fmt_wx_fail` `wx_fmt_wx_state`(`wx_wlog_t`)。予定表(`k_order`)。`wx_core.h` が `clk_core.h` を include するので、`wx_core.c` をリンクするときは **`clk_core.c` も要る** |
+| `src/app/wifi_core.h` / `.c` | `wifi_core_set_symbol` が 0〜3 を受け付ける。**sym = 3 のとき接続先は常に `METEO_TCP`、解析は `wx_parse_weather`**(`eff_target` `parse_resp`)。失敗した結果の `kind` は `CLK_UNKNOWN` |
+| `tests/host/` | `test_wx_weather.c`(新規)、`test_wifi_core.c`(`t_wx_weather`)、`test_wx_indep.c`(予定表のモデルを `APP_WX_WEATHER` 対応に)、`test_stk_fault.c`、`test_wx_core.c`(2 か所の期待)、`run.sh`(S22・S24・S27・S33・S35・S36 のリンクに `clk_core.c`、S27 に天気版、**S43 を新設**)、`data/openmeteo_tokyo_1.http` `_2.http`(PC から 1 回ずつ取った実応答) |
+
+### `APP_WX_WEATHER`(設計にない 1 定数。判断が要る)
+- 設計 §13.6 どおりに予定表へ天気を入れると、`wifi_at.c`(6d で直す)が天気の結果を株価として扱い、**既定のビルドが壊れる**(`wx_fmt_ok` が sym 3 を拒否 → drop、天気のやり直しが毎周期)。
+- そこで `wx_sched` の周期に天気を入れるかを `APP_WX_WEATHER` で切り替える。**6c の既定は 0 = 株価 3 銘柄だけ(Phase 5 と同じ)**。1 のとき設計どおり 3 → 0 → 1 → 2。
+- **6d で `wifi_sw.h` の既定を 1 にする**(`wifi_at.c` の天気の分岐と同時に)。
+
+### 後退案(HTTPS)
+`-DWX_METEO_SSL=1` で `AT+CIPSTART="SSL","api.open-meteo.com",443`(SSL のタイムアウト 20 秒)。要求は同じ文字列。既定 0 = TCP 80。ホスト試験は 0 / 1 の両方。
+
+### 設計から外れた点・判断が要る点
+1. **`APP_WX_WEATHER`**(上)。
+2. **`wx_fmt_wx_state` の引数**: 設計(design-uart §14.4)は `(buf, size, &slot, now_ms)` だが、`clk_slot_t` に `wmo` が無く `[wx] have=` の `wmo=` を作れない。**`wx_wlog_t { have, wmo, kind, temp_x10, age_s }` を渡す形**にした(`wx_symlog_t` と同じ流儀)。6d の `wifi_at.c` は `wmo` も保持する。
+3. **`wx_fmt_wx_ok` に `closed` の引数を付けない**(`r->closed` がある)。
+4. 天気の気温は小数 2 桁目で四捨五入(`12.95` → 130)。`current` は最初の `"current":` の `{ }` の中だけを読む。**重複する `"current":` は最初を使う**。値の `:` の後ろの空白は読まない(株価の解析と同じ。Open-Meteo は詰めて出す)。
+5. 天気の `obs`(`current.time` の HHMM)が `00:00` のときと「無い」ときはどちらも 0(区別しない)。
+6. 実応答の `Connection:` と `X-RateLimit-*` は保存していない(状態行・`Date`・`Content-Type`・本文だけ)。
+
+### 6d に残したこと
+- `wifi_sw.h` の `APP_WX_WEATHER` の既定を 1 に。
+- `wifi_at.c`: `wx_report` の天気の分岐(`r->sym == WX_WEATHER`)、`s_wslot`(`clk_slot_t`)と `wmo`、`[wx] res=` の行、`s` の `[wx] have=`(`wx_wlog_t`)、`clk_ui`。**天気の結果を `slot_record` / `wx_fmt_ok` に渡さない**。
+- `test_wifi_at.c` の偽の ESP32 が天気の応答も返すように(6c では `wifi_at.c` を動かさないので未着手)。
+- `app_main.c`: `clk_ui` → `ui_set_clk`。
+
+### 試験(ホスト)
+S22(`test_wifi_core` の `t_wx_weather` = H-C4。専用 / 製品 / `WX_METEO_SSL = 1`)・S24・S27(天気版)・S35(`APP_STK_FAULT = 0〜4`、5 は `#error`)・S43(`test_wx_weather` = H-C2・H-C3・H-C5。変異 6 か所)。RX 用 GCC 14.2(`-Og -Wstack-usage=100`)で `wx_core.c` `wifi_core.c` `clk_core.c` を単独 `-c`: 警告なし(最大スタック `wx_fmt_wx_ok` 60)。

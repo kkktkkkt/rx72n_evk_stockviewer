@@ -215,6 +215,28 @@ static void t_clock(void)
 }
 
 /* ---------------------------------------------------------------- D 取得の予定表 */
+/* -DAPP_WX_WEATHER=1 のビルドでは、周期に天気(取得 ID 3)が最初に加わる(設計 §13.6。取る順 3 → 0 → 1 → 2。天気の 429 は普通の失敗)。モデルは「取る順」と「周期のマスク」だけを差し替える */
+#if APP_WX_WEATHER
+#define M_ALL  (0x0Fu)
+#define M_N    (4)
+static const uint8_t M_ORDER[4] = { 3u, 0u, 1u, 2u };
+#else
+#define M_ALL  (WX_SYM_ALL)
+#define M_N    (3)
+static const uint8_t M_ORDER[3] = { 0u, 1u, 2u };
+#endif
+static int m_pos(uint8_t sym)                      /* 取る順の中の位置(範囲外は -1) */
+{
+    int i;
+    for (i = 0; i < M_N; i++) { if (M_ORDER[i] == sym) { return i; } }
+    return -1;
+}
+static uint8_t m_first(uint8_t mask)               /* mask の中で最初に取る取得 ID(空は 255) */
+{
+    int i;
+    for (i = 0; i < M_N; i++) { if (((mask >> M_ORDER[i]) & 1u) != 0u) { return M_ORDER[i]; } }
+    return 255u;
+}
 typedef struct { uint32_t t; uint8_t act, src, sym, ok; } evt_t;
 #define MAXEV (60000)
 static evt_t g_ev[2][MAXEV]; static int g_nev[2];
@@ -255,11 +277,11 @@ static void sched_run(int idx, uint32_t off, uint32_t req_den, uint32_t hours)
             last_done = rel;
             if (a == WX_ACT_FETCH) {
                 uint8_t bit = (uint8_t)(1u << act_sym);
-                last_was_fetch = 1; last_was_429 = (!plan_ok && plan_http == 429u); prev_conn_fail = 0;
+                last_was_fetch = 1; last_was_429 = (!plan_ok && plan_http == 429u && act_sym < (uint8_t)WX_NSYM); prev_conn_fail = 0;      /* 打ち切るのは株価の 429 だけ */
                 todo_model = (uint8_t)(todo_model & (uint8_t)~bit);
                 if (plan_ok) { failed_model = (uint8_t)(failed_model & (uint8_t)~bit); } else { failed_model = (uint8_t)(failed_model | bit); }
                 if (last_was_429) { failed_model = (uint8_t)(failed_model | todo_model); todo_model = 0u; }          /* 打ち切り: 取っていない銘柄も失敗扱い */
-                if (wx_sched_failed_mask(&s) != failed_model) { g_inv_bad++; }
+                if (wx_sched_failed_mask(&s) != (uint8_t)(failed_model & WX_SYM_ALL)) { g_inv_bad++; }      /* partial 用は株価の 3 ビットだけ */
             } else {
                 last_was_fetch = 0; last_was_429 = 0;
                 if (plan_ok) { conn_fail_run = 0; prev_conn_fail = 0; } else { conn_fail_run++; prev_conn_fail = 1; }
@@ -267,7 +289,7 @@ static void sched_run(int idx, uint32_t off, uint32_t req_den, uint32_t hours)
             req_since = 0;
             if (s.cyc.n != cyc_seen) {                                              /* 周期が終わった */
                 cyc_seen = s.cyc.n; g_cyc_n++;
-                if (((s.cyc.ok | s.cyc.fail) != WX_SYM_ALL) || ((s.cyc.ok & s.cyc.fail) != 0u) || s.cyc.fail != failed_model) { g_inv_bad++; }
+                if (((s.cyc.ok | s.cyc.fail) != WX_SYM_ALL) || ((s.cyc.ok & s.cyc.fail) != 0u) || s.cyc.fail != (uint8_t)(failed_model & WX_SYM_ALL)) { g_inv_bad++; }
                 if (s.cyc.fail != 0u) { g_partial_n++; }
                 if (s.cyc.ms != (t - s.t_fetch0)) { g_inv_bad++; }
             }
@@ -321,7 +343,7 @@ static void sched_run(int idx, uint32_t off, uint32_t req_den, uint32_t hours)
                     uint32_t gap_done = rel - last_done;
                     act_sym = sym;
                     g_fetch_n++;
-                    if (sym >= (uint8_t)WX_NSYM) { g_inv_bad++; }
+                    if (m_pos(sym) < 0) { g_inv_bad++; }
                     if (src == WX_SRC_RETRY) {                                         /* やり直し: 直前に失敗した銘柄だけ・昇順・1 周期 2 パスまで */
                         if (gap_done >= 5000u) {                                       /* 新しいパス: 直前のパスの終わりから 20 秒 */
                             retry_pass++; g_retry_pass_n++; in_pass_sym = -1;
@@ -329,15 +351,15 @@ static void sched_run(int idx, uint32_t off, uint32_t req_den, uint32_t hours)
                             if (retry_pass > (int)WX_RETRY_MAX) { g_time_bad++; }
                             todo_model = failed_model;
                         } else if (!last_was_fetch || gap_done > 20u) { g_time_bad++; }  /* パスの途中は直ちに次の銘柄 */
-                        if ((int)sym <= in_pass_sym) { g_time_bad++; }                 /* 昇順 */
-                        if (!(todo_model & (uint8_t)(1u << sym)) || (todo_model & (uint8_t)((1u << sym) - 1u)) != 0u) { g_time_bad++; }   /* 残りの失敗の中で最小の銘柄 */
-                        in_pass_sym = (int)sym;
+                        if (m_pos(sym) <= in_pass_sym) { g_time_bad++; }               /* 取る順(昇順) */
+                        if (!(todo_model & (uint8_t)(1u << sym)) || (m_first(todo_model) != sym)) { g_time_bad++; }   /* 残りの失敗の中で最初に取る取得 ID */
+                        in_pass_sym = m_pos(sym);
                         g_retry_n++;
-                    } else if (in_pass_sym >= 0 && last_was_fetch && !last_was_429 && gap_done <= 20u && (int)sym == in_pass_sym + 1 && todo_model != 0u) {
-                        in_pass_sym = (int)sym;                                        /* 周期の途中: 直ちに次の銘柄 */
+                    } else if (in_pass_sym >= 0 && last_was_fetch && !last_was_429 && gap_done <= 20u && m_pos(sym) == in_pass_sym + 1 && todo_model != 0u) {
+                        in_pass_sym = m_pos(sym);                                      /* 周期の途中: 直ちに次の取得 */
                         if (!(todo_model & (uint8_t)(1u << sym))) { g_time_bad++; }
                     } else {                                                          /* 周期の始まり(常に銘柄 0 から) */
-                        if (sym != 0u) { g_time_bad++; }
+                        if (sym != M_ORDER[0]) { g_time_bad++; }                      /* 周期の最初の取得(天気ありは天気、なしは銘柄 0) */
                         if (!last_was_fetch) {                                         /* 接続が済んだら直ちに */
                             if (gap_done > 20u && !req_since) { g_time_bad++; }
                         } else if (last_was_429) {                                     /* 429 の後 300 秒 */
@@ -353,7 +375,7 @@ static void sched_run(int idx, uint32_t off, uint32_t req_den, uint32_t hours)
                             g_time_bad++;                                              /* 起動のきっかけは接続の後だけ */
                         }
                         last_c0 = rel; have_c0 = 1; retry_pass = 0; in_pass_sym = 0;
-                        failed_model = 0u; todo_model = (uint8_t)(WX_SYM_ALL & (uint8_t)~1u);
+                        failed_model = 0u; todo_model = (uint8_t)(M_ALL & (uint8_t)~(1u << M_ORDER[0]));
                         if (s.t_fetch0 != t || wx_sched_failed_mask(&s) != 0u) { g_inv_bad++; }
                     }
                 } else {
@@ -369,7 +391,7 @@ static void sched_run(int idx, uint32_t off, uint32_t req_den, uint32_t hours)
                 if (g_nev[idx] < MAXEV) { g_ev[idx][g_nev[idx]].t = rel; g_ev[idx][g_nev[idx]].act = (uint8_t)a; g_ev[idx][g_nev[idx]].src = s.src; g_ev[idx][g_nev[idx]].sym = s.sym; g_ev[idx][g_nev[idx]].ok = 0u; g_nev[idx]++; }
             }
         }
-        if (s.net > 3u || s.state > 5u || s.retry_n > WX_RETRY_MAX || (s.todo & ~WX_SYM_ALL) != 0u || (s.failed & ~WX_SYM_ALL) != 0u
+        if (s.net > 3u || s.state > 5u || s.retry_n > WX_RETRY_MAX || (s.todo & ~M_ALL) != 0u || (s.failed & ~M_ALL) != 0u
             || (s.started != 0u && s.state != WX_S_CONNECT && s.state != WX_S_FETCH)) { g_inv_bad++; }
     }
 }

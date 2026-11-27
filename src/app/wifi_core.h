@@ -206,8 +206,9 @@ void wifi_core_set_quiet(wifi_core_t *c, bool quiet);
 /* 取得(WIFI_RANGE_WX)の接続先を選ぶ。次の wifi_core_start から有効。実行中・範囲外は無視。init の既定は WX_TGT_YAHOO_SSL(製品) */
 void wifi_core_set_target(wifi_core_t *c, wx_target_t t);
 
-/* 取得(WIFI_RANGE_WX)の銘柄(0 = 6723.T、1 = ^N225、2 = ^GSPC)を選ぶ。次の wifi_core_start から有効。実行中・範囲外(3 以上)は無視。init の既定は 0。
- * 結果の wx_result_t.sym にこの値が入る */
+/* 取得(WIFI_RANGE_WX)の取得 ID(0 = 6723.T、1 = ^N225、2 = ^GSPC、3 = WX_WEATHER = 天気)を選ぶ。次の wifi_core_start から有効。実行中・範囲外(4 以上)は無視。init の既定は 0。
+ * 結果の wx_result_t.sym にこの値が入る。**3(天気)のときは wifi_core_set_target の値に関わらず接続先が METEO_TCP(HTTP 80。タイムアウトは wx_tcp 10 秒)になり、
+ * 応答は wx_parse_weather で解析される**(0〜2 は set_target の接続先と wx_parse_http) */
 void wifi_core_set_symbol(wifi_core_t *c, uint8_t sym);
 
 /* 実行を始める。実行中なら何もせず false(d n p の無視)。始めると [wifi] step=<最初> res=start を log へ出す */

@@ -38,11 +38,16 @@ static bool arg_ok(char *buf, size_t size)
 /* 接続先の表(wx_target_t の並び)。要求の Host も同じ host を使う */
 typedef struct { const char *type; const char *host; uint16_t port; } tgt_t;
 static const tgt_t k_tgt[WX_TGT_END] = {
-    { "SSL", WX_HOST, 443u }
+    [WX_TGT_YAHOO_SSL] = { "SSL", WX_HOST, 443u },
 #if APP_WIFI_TEST
-    , { "TCP", WX_HOST, 80u }
-    , { "SSL", "www.google.com", 443u }
-    , { "SSL", WX_HOST, 443u }
+    [WX_TGT_YAHOO_TCP] = { "TCP", WX_HOST, 80u },
+    [WX_TGT_GOOGLE_SSL] = { "SSL", "www.google.com", 443u },
+    [WX_TGT_YAHOO_SSL_NOAUTH] = { "SSL", WX_HOST, 443u },
+#endif
+#if WX_METEO_SSL
+    [WX_TGT_METEO_TCP] = { "SSL", WX_METEO_HOST, 443u }      /* 後退案(WX_METEO_SSL = 1)。名前は METEO_TCP のまま */
+#else
+    [WX_TGT_METEO_TCP] = { "TCP", WX_METEO_HOST, 80u }
 #endif
 };
 static const char *const k_sym_enc[WX_NSYM] = { "6723.T", "%5EN225", "%5EGSPC" };   /* ^ は %5E */
@@ -70,6 +75,15 @@ size_t wx_build_request_t(char *buf, size_t size, wx_target_t t, uint8_t sym)
         return fin(buf, size, snprintf(buf, size, "GET / HTTP/1.0\r\nHost: %s\r\nUser-Agent: " WX_UA "\r\nConnection: close\r\n\r\n", k_tgt[t].host));
     }
 #endif
+    if (t == WX_TGT_METEO_TCP) {                  /* 天気: 固定の要求(外部の入力を含めない。東京の代表座標のみ。設計 §13.6)。それ以外の sym は無い */
+        if (sym != (uint8_t)WX_WEATHER) {
+            return 0u;
+        }
+        /* APP_STK_FAULT = 4: パスの末尾に "ZZ"(/v1/forecastZZ。PC 実測で 404 を返す = 設計 W6) */
+        return fin(buf, size, snprintf(buf, size, "GET /v1/forecast%s?latitude=35.68&longitude=139.76&current=temperature_2m,weather_code&timezone=Asia%%2FTokyo HTTP/1.0\r\n"
+                                       "Host: %s\r\nUser-Agent: " WX_UA "\r\nConnection: close\r\n\r\n",
+                                       ((unsigned)APP_STK_FAULT == 4u) ? "ZZ" : "", k_tgt[t].host));
+    }
     if (sym >= (uint8_t)WX_NSYM) {
         return 0u;
     }
@@ -81,7 +95,7 @@ size_t wx_build_request_t(char *buf, size_t size, wx_target_t t, uint8_t sym)
 
 size_t wx_build_request(char *buf, size_t size, uint8_t sym)
 {
-    return wx_build_request_t(buf, size, WX_TGT_YAHOO_SSL, sym);
+    return wx_build_request_t(buf, size, (sym == (uint8_t)WX_WEATHER) ? WX_TGT_METEO_TCP : WX_TGT_YAHOO_SSL, sym);
 }
 
 /* ================================================================ 日付 */
@@ -311,6 +325,10 @@ static bool parse_head(const char *buf, size_t len, wx_result_t *out, const char
     out->mtime         = 0u;
     out->rs            = 0u;
     out->re            = 0u;
+    out->temp_x10      = 0;
+    out->obs           = 0u;
+    out->wmo           = 0u;
+    out->kind          = (uint8_t)CLK_UNKNOWN;
     if (buf == NULL) {
         out->err = 3u;
         return false;
@@ -548,6 +566,158 @@ bool stk_json_complete(const char *b, size_t n)
     return started && done && !in_str;
 }
 
+/* ---- 天気(Open-Meteo の current。design.md §13.6)---- */
+
+/* 気温 ℃(JSON の数)→ 0.1℃。符号・整数部・小数(1 桁目 + 2 桁目の四捨五入)。0 = 成功、5 = 無い・読めない(null・文字列・指数・数字なし・小数点だけ・途切れ)、
+ * 6 = 範囲外(整数部 3 桁以上・|t| > 60.0)。値の後ろに区切りが要る */
+static uint8_t read_wtemp(const char *p, const char *end, int16_t *out)
+{
+    bool     neg = false;
+    unsigned id  = 0u;
+    unsigned fd  = 0u;
+    uint32_t iv  = 0u;
+    uint32_t fv  = 0u;                                         /* 小数の 1 桁目 */
+    uint32_t r2  = 0u;                                         /* 小数の 2 桁目(四捨五入) */
+    uint32_t t10;
+
+    if ((p < end) && (*p == '-')) {
+        neg = true;
+        p++;
+    }
+    while ((p < end) && is_dig(*p)) {
+        if (iv < 1000u) {
+            iv = (iv * 10u) + (uint32_t)(*p - '0');            /* 巨大な数でも溢れない(1000 で頭打ち。桁数 id で範囲外にする) */
+        }
+        id++;
+        p++;
+    }
+    if ((p < end) && (*p == '.')) {
+        p++;
+        while ((p < end) && is_dig(*p)) {
+            if (fd == 0u) {
+                fv = (uint32_t)(*p - '0');
+            } else if (fd == 1u) {
+                r2 = (uint32_t)(*p - '0');
+            } else {
+                /* 3 桁目以降は無視 */
+            }
+            fd++;
+            p++;
+        }
+        if (fd == 0u) {
+            return 5u;                                         /* "5." */
+        }
+    }
+    if ((id == 0u) || (p >= end) || !is_vend(*p)) {
+        return 5u;                                             /* null・文字列・".5"・"-"・途切れ・指数表記 */
+    }
+    t10 = (iv * 10u) + fv + ((r2 >= 5u) ? 1u : 0u);
+    if ((id > 2u) || (t10 > 600u)) {
+        return 6u;
+    }
+    *out = neg ? (int16_t)(-(int32_t)t10) : (int16_t)t10;
+    return 0u;
+}
+
+/* 天気コード(WMO)。0 = 成功、5 = 途切れ、6 = 整数 0〜99 でない(null・文字列・負・100 以上・小数・指数) */
+static uint8_t read_wcode(const char *p, const char *end, uint8_t *out)
+{
+    unsigned n = 0u;
+    uint32_t v = 0u;
+
+    while ((p < end) && is_dig(*p)) {
+        if (v < 1000u) {
+            v = (v * 10u) + (uint32_t)(*p - '0');
+        }
+        n++;
+        p++;
+    }
+    if (p >= end) {
+        return 5u;
+    }
+    if ((n == 0u) || (v > 99u) || !is_vend(*p)) {
+        return 6u;                                             /* "-" で始まる(負)も n = 0 でここ */
+    }
+    *out = (uint8_t)v;
+    return 0u;
+}
+
+bool wx_parse_weather(const char *buf, size_t len, wx_result_t *out)
+{
+    const char *end;
+    const char *body;
+    const char *cur;
+    const char *cur_end;
+    const char *v;
+
+    if (!parse_head(buf, len, out, &body)) {
+        return false;
+    }
+    end = buf + len;
+    if (body == NULL) {                                        /* 段 3: 空行が無い(ヘッダーの途中で切れた) */
+        out->err = 3u;
+        return false;
+    }
+    while ((body < end) && ((*body == ' ') || (*body == '\t') || (*body == '\r') || (*body == '\n'))) {
+        body++;
+    }
+    if ((body >= end) || (*body != '{')) {                     /* 段 3b: JSON でない */
+        out->err = 5u;
+        return false;
+    }
+    if (!stk_json_complete(body, (size_t)(end - body))) {      /* 段 3b: 閉じていない = 途切れ(どこで切れても成功にしない) */
+        out->err = 3u;
+        return false;
+    }
+    cur = find_after(body, (size_t)(end - body), "\"current\":");   /* "current_units": は一致しない。重複は最初を使う */
+    if (cur == NULL) {
+        out->err = 5u;
+        return false;
+    }
+    while ((cur < end) && (*cur == ' ')) {
+        cur++;
+    }
+    if ((cur >= end) || (*cur != '{')) {                       /* current がオブジェクトでない(null など) */
+        out->err = 5u;
+        return false;
+    }
+    cur_end = (const char *)memchr(cur, '}', (size_t)(end - cur));   /* current は平らなオブジェクト。} を値の区切りに使えるよう、} の次まで */
+    cur_end = (cur_end != NULL) ? (cur_end + 1) : end;
+    v = find_after(cur, (size_t)(cur_end - cur), "\"temperature_2m\":");
+    if (v == NULL) {
+        out->err = 5u;
+        return false;
+    }
+    out->err = read_wtemp(v, cur_end, &out->temp_x10);
+    if (out->err != 0u) {
+        out->temp_x10 = 0;
+        return false;
+    }
+    v = find_after(cur, (size_t)(cur_end - cur), "\"weather_code\":");
+    if (v == NULL) {
+        out->err = 5u;
+        out->temp_x10 = 0;
+        return false;
+    }
+    out->err = read_wcode(v, cur_end, &out->wmo);
+    if (out->err != 0u) {
+        out->temp_x10 = 0;
+        out->wmo      = 0u;
+        return false;
+    }
+    out->kind = clk_kind_of((uint32_t)out->wmo);
+    v = find_after(cur, (size_t)(cur_end - cur), "\"time\":\"");
+    if ((v != NULL) && ((cur_end - v) >= 16) && is_dig(v[0]) && is_dig(v[1]) && is_dig(v[2]) && is_dig(v[3]) && (v[4] == '-') && (v[7] == '-')
+        && (v[10] == 'T') && is_dig(v[11]) && is_dig(v[12]) && (v[13] == ':') && is_dig(v[14]) && is_dig(v[15])) {
+        uint32_t hh = (uint32_t)(((v[11] - '0') * 10) + (v[12] - '0'));
+        uint32_t mm = (uint32_t)(((v[14] - '0') * 10) + (v[15] - '0'));
+
+        out->obs = ((hh <= 23u) && (mm <= 59u)) ? (uint16_t)((hh * 100u) + mm) : 0u;
+    }
+    out->ok = 1u;
+    return true;
+}
+
 bool wx_parse_http(const char *buf, size_t len, wx_result_t *out)
 {
     const char *end;
@@ -725,6 +895,74 @@ size_t wx_fmt_fail(char *buf, size_t size, wx_src_t src, const wx_result_t *r)
                                    (unsigned)r->sym, k_src_name[src], (unsigned)r->err, (unsigned)r->http, (unsigned long)r->ms, (unsigned)r->len));
 }
 
+size_t wx_fmt_wx_ok(char *buf, size_t size, wx_src_t src, const wx_result_t *r)
+{
+    char   jst[8];
+    size_t n1;
+    size_t n2;
+    size_t n3;
+
+    if (!arg_ok(buf, size) || ((unsigned)src >= (unsigned)WX_SRC_END) || (r == NULL) || (r->temp_x10 < -600) || (r->temp_x10 > 600) || (r->wmo > 99u)
+        || (r->kind >= (uint8_t)CLK_KINDS) || (r->http < 100u) || (r->http > 999u) || (r->obs > 2359u)) {
+        return 0u;
+    }
+    if (r->have_date != 0u) {
+        put_hms(jst, sizeof jst, r->jst_s);
+    } else {
+        (void)snprintf(jst, sizeof jst, "none");
+    }
+    /* 3 回に分ける(wx_fmt_ok と同じ理由: 引数が多いと RX では -Wstack-usage=100 を超える) */
+    n1 = fin(buf, size, snprintf(buf, size, "[wx] res=ok src=%s temp10=%d wmo=%u kind=%s", k_src_name[src], (int)r->temp_x10, (unsigned)r->wmo,
+                                 clk_kind_name(r->kind)));
+    if (n1 == 0u) {
+        return 0u;
+    }
+    n2 = fin(buf + n1, size - n1, snprintf(buf + n1, size - n1, " http=%u ms=%lu sync=%u jst=%s", (unsigned)r->http, (unsigned long)r->ms,
+                                           (unsigned)((r->have_date != 0u) ? 1u : 0u), jst));
+    if (n2 == 0u) {
+        buf[0] = '\0';
+        return 0u;
+    }
+    n3 = fin(buf + n1 + n2, size - n1 - n2, snprintf(buf + n1 + n2, size - n1 - n2, " obs=%04u len=%u closed=%u\r\n", (unsigned)r->obs, (unsigned)r->len,
+                                                     (unsigned)((r->closed != 0u) ? 1u : 0u)));
+    if (n3 == 0u) {
+        buf[0] = '\0';
+        return 0u;
+    }
+    return n1 + n2 + n3;
+}
+
+size_t wx_fmt_wx_fail(char *buf, size_t size, wx_src_t src, const wx_result_t *r)
+{
+    if (!arg_ok(buf, size) || ((unsigned)src >= (unsigned)WX_SRC_END) || (r == NULL) || (r->err < 1u) || (r->err > 9u) || (r->http > 999u)) {
+        return 0u;
+    }
+    return fin(buf, size, snprintf(buf, size, "[wx] res=fail src=%s err=%u http=%u ms=%lu len=%u\r\n",
+                                   k_src_name[src], (unsigned)r->err, (unsigned)r->http, (unsigned long)r->ms, (unsigned)r->len));
+}
+
+size_t wx_fmt_wx_state(char *buf, size_t size, const wx_wlog_t *v)
+{
+    int         t10  = 0;
+    unsigned    wmo  = 0u;
+    long        age  = -1;
+    const char *name = "none";
+
+    if (!arg_ok(buf, size) || (v == NULL)) {
+        return 0u;
+    }
+    if (v->have != 0u) {
+        if ((v->temp_x10 < -600) || (v->temp_x10 > 600) || (v->wmo > 99u) || (v->kind >= (uint8_t)CLK_KINDS) || (v->age_s < 0)) {
+            return 0u;
+        }
+        t10  = (int)v->temp_x10;
+        wmo  = (unsigned)v->wmo;
+        age  = (long)v->age_s;
+        name = clk_kind_name(v->kind);
+    }
+    return fin(buf, size, snprintf(buf, size, "[wx] have=%u temp10=%d wmo=%u kind=%s age=%ld\r\n", (unsigned)((v->have != 0u) ? 1u : 0u), t10, wmo, name, age));
+}
+
 size_t wx_fmt_cycle(char *buf, size_t size, uint32_t n, uint8_t ok_mask, uint8_t fail_mask, uint32_t ms)
 {
     if (!arg_ok(buf, size) || (ok_mask > WX_SYM_ALL) || (fail_mask > WX_SYM_ALL)) {
@@ -814,6 +1052,16 @@ static bool due(const wx_sched_t *s, uint32_t now_ms)
     return (uint32_t)(now_ms - s->t_due) < 0x80000000u;          /* 期限を過ぎた(32bit の巻き戻りに対応) */
 }
 
+/* 1 周期に取る取得 ID のビットと、取る順(設計 §13.6。天気 → 6723.T → ^N225 → ^GSPC)。APP_WX_WEATHER = 0 は株価 3 つだけ(Phase 5 と同じ) */
+#if APP_WX_WEATHER
+#define CYC_MASK   (WX_FETCH_ALL)
+static const uint8_t k_order[WX_NFETCH] = { (uint8_t)WX_WEATHER, 0u, 1u, 2u };
+#else
+#define CYC_MASK   (WX_SYM_ALL)
+static const uint8_t k_order[WX_NSYM] = { 0u, 1u, 2u };
+#endif
+#define N_ORDER    ((uint8_t)(sizeof k_order / sizeof k_order[0]))
+
 wx_act_t wx_sched_poll(wx_sched_t *s, uint32_t now_ms)
 {
     uint8_t i;
@@ -858,19 +1106,19 @@ wx_act_t wx_sched_poll(wx_sched_t *s, uint32_t now_ms)
         return WX_ACT_CONNECT;
     }
     if (s->state == (uint8_t)WX_S_FETCH) {
-        if ((s->new_cycle != 0u) || ((s->todo & WX_SYM_ALL) == 0u)) {
+        if ((s->new_cycle != 0u) || ((s->todo & CYC_MASK) == 0u)) {
             s->new_cycle = 0u;
-            s->todo      = (uint8_t)WX_SYM_ALL;
+            s->todo      = (uint8_t)CYC_MASK;
             s->failed    = 0u;
             s->okmask    = 0u;
             s->nomask    = 0u;
             s->retry_n   = 0u;
             s->t_fetch0  = now_ms;
         }
-        for (i = 0u; (i < (uint8_t)WX_NSYM) && (((s->todo >> i) & 1u) == 0u); i++) {
-            /* 最も小さい未取得の銘柄 */
+        for (i = 0u; (i < N_ORDER) && (((s->todo >> k_order[i]) & 1u) == 0u); i++) {
+            /* k_order の先頭から見て、最初の未取得の取得 ID(やり直しの todo = failed も同じ順) */
         }
-        s->sym     = i;
+        s->sym     = k_order[(i < N_ORDER) ? i : 0u];
         s->started = 1u;
         return WX_ACT_FETCH;
     }
@@ -888,8 +1136,8 @@ static void cycle_end(wx_sched_t *s, uint32_t now_ms)
 {
     s->cyc.n++;
     s->cyc.ms   = now_ms - s->t_fetch0;
-    s->cyc.ok   = s->okmask;
-    s->cyc.fail = s->failed;
+    s->cyc.ok   = (uint8_t)(s->okmask & WX_SYM_ALL);               /* 天気の成否は入れない([stk] cycle= の範囲は 0〜7 のまま) */
+    s->cyc.fail = (uint8_t)(s->failed & WX_SYM_ALL);
 }
 
 void wx_sched_done(wx_sched_t *s, wx_act_t act, bool ok, uint16_t http, uint32_t now_ms)
@@ -928,7 +1176,7 @@ void wx_sched_done(wx_sched_t *s, wx_act_t act, bool ok, uint16_t http, uint32_t
     } else {
         s->failed = (uint8_t)(s->failed | bit);
         s->nomask = (http == 0u) ? (uint8_t)(s->nomask | bit) : (uint8_t)(s->nomask & (uint8_t)~bit);
-        if (http == 429u) {                                      /* 周期を打ち切る(残りは取らない)。300 秒後に周期をやり直す。値は残す */
+        if ((http == 429u) && (s->sym < (uint8_t)WX_NSYM)) {     /* 株価の 429: 周期を打ち切る(残りは取らない)。300 秒後に周期をやり直す。値は残す。天気の 429 は普通の失敗 */
             s->failed = (uint8_t)(s->failed | s->todo);
             s->todo   = 0u;
             cycle_end(s, now_ms);
@@ -949,7 +1197,7 @@ void wx_sched_done(wx_sched_t *s, wx_act_t act, bool ok, uint16_t http, uint32_t
         wait_ms(s, WX_ACT_FETCH, WX_RETRY_MS, now_ms);
     } else {
         cycle_end(s, now_ms);
-        if ((s->okmask == 0u) && (s->nomask == WX_SYM_ALL)) {     /* 3 銘柄とも、応答すら無かった: ESP32 を再接続 */
+        if (((s->okmask & WX_SYM_ALL) == 0u) && ((s->nomask & WX_SYM_ALL) == WX_SYM_ALL)) {     /* 株価 3 つとも、応答すら無かった: ESP32 を再接続(天気の成否は見ない) */
             s->net   = (uint8_t)WX_NET_ERR;
             s->state = (uint8_t)WX_S_CONNECT;
             s->src   = (uint8_t)WX_SRC_TIMER;                    /* 再接続の後の周期のきっかけ */
@@ -1006,7 +1254,7 @@ uint8_t wx_sched_sym(const wx_sched_t *s)
 
 uint8_t wx_sched_failed_mask(const wx_sched_t *s)
 {
-    return s->failed;
+    return (uint8_t)(s->failed & WX_SYM_ALL);                     /* 株価だけ(天気だけの失敗で partial を立てない) */
 }
 
 const wx_cycle_t *wx_sched_cycle(const wx_sched_t *s)
