@@ -35,17 +35,19 @@ UNKNOWN = 7
 WHITE = "#FFFFFF"
 FG = dict(CLOUD="#E5EAF2", SUN="#FBBF24", DROP="#60A5FA", BOLT="#FACC15")
 
-# ---- ramp(設計 §13.2)。k = 0..6。ramp の添字 = 2 + 32 k + (l - 1)、l = 0 は 0(描かない)----
-R_BGW, R_PNW, R_CLOUD, R_SUN, R_DROP, R_BOLT, R_CORN = range(7)
-RAMP_NAMES = ("R_BGW", "R_PNW", "R_CLOUD", "R_SUN", "R_DROP", "R_BOLT", "R_CORN")
-USED_N = 2 + 32 * 7                                    # 226
+# ---- ramp とパレットの配置(設計 §13.2 を変更: アイコンは index スプライトにしたので ramp は文字と角の 3 本だけ)----
+# 添字: 0 = 背景、1 = パネル(スプライトの透明色)、2〜33 R_BGW、34〜65 R_PNW、66〜97 R_CORN、98〜255 = アイコンの色(天気ごと。最大 158 色)
+R_BGW, R_PNW, R_CORN = range(3)
+RAMP_NAMES = ("R_BGW", "R_PNW", "R_CORN")
+FIXED_N = 98
+KEY_IDX = 1                                            # スプライトの透明色(= パネル)
 
 
 def ramp_idx(k):
     return [0] + [2 + 32 * k + (l - 1) for l in range(1, 33)]
 
 
-RAMP = [ramp_idx(k) for k in range(7)]
+RAMP = [ramp_idx(k) for k in range(3)]
 
 # ---- レイアウト(設計 §13.4 の座標表。動かすのはここだけ)----
 PANEL = (40, 168, 400, 92)                             # x, y, w, h
@@ -92,13 +94,11 @@ def hex565(p):
 
 
 def make_palette(kind):
-    """256 個の RGB565。添字の配置は全天気で同じ(設計 §13.2)。誤差 0(計算で作る)"""
+    """256 個の RGB565 のうち、全天気で配置が同じ前半 98 個(背景・パネル・ramp 3 本。誤差 0)。後半はアイコンの色(build が入れる)"""
     bg, pn = c565(KINDS[kind][2]), c565(panel_hex(KINDS[kind][2]))
     pal = np.full(256, bg, dtype=np.uint16)
     pal[1] = pn
-    srcs = ((bg, c565(WHITE)), (pn, c565(WHITE)), (pn, c565(FG["CLOUD"])), (pn, c565(FG["SUN"])),
-            (pn, c565(FG["DROP"])), (pn, c565(FG["BOLT"])), (pn, bg))
-    for k, (b, f) in enumerate(srcs):
+    for k, (b, f) in enumerate(((bg, c565(WHITE)), (pn, c565(WHITE)), (pn, bg))):
         for l in range(1, 33):
             pal[RAMP[k][l]] = int(mix565(b, f, l))
     return pal
@@ -145,118 +145,173 @@ def bake_font(fonts, name):
     return out
 
 
-# ------------------------------------------------------------------ アイコン部品(設計 §13.4。箱 78x78、4 倍で描く)
-def canvas():
-    im = Image.new("L", (ICON_W * S, ICON_W * S), 0)
-    return im, ImageDraw.Draw(im)
+# ------------------------------------------------------------------ アイコン(設計 §13.4 の形)
+# 形は符号付き距離(SDF)で書く。8 倍の副格子で評価し、縁を 1/8 画素の幅で解析的にぼかして平均する(縁の濃度は 8 bit 以上の精度)。
+K = 8
+BLEND = "linear"                                       # 縁の混色: "linear" = 線形光、"srgb" = sRGB の値のまま
+CLOUD_FILLET = 5.0                                     # 雲の円どうしの継ぎ目(谷)を丸める半径(px)
+BOLT_GROW = 0.5                                        # 稲妻の角を丸める膨らみ(px)
 
 
-def circ(d, cx, cy, r):
-    d.ellipse([(cx - r) * S, (cy - r) * S, (cx + r) * S - 1, (cy + r) * S - 1], fill=255)
+def sub_grid():
+    c = (np.arange(ICON_W * K) + 0.5) / K
+    return np.meshgrid(c, c)
 
 
-def thick(d, x1, y1, x2, y2, wd):
-    d.line([x1 * S, y1 * S, x2 * S, y2 * S], fill=255, width=int(round(wd * S)))
-    circ(d, x1, y1, wd / 2.0)
-    circ(d, x2, y2, wd / 2.0)
+def cov_of(sd):
+    c = np.clip(0.5 - sd * K, 0.0, 1.0)
+    return c.reshape(ICON_W, K, ICON_W, K).mean(axis=(1, 3))
 
 
-def rays(d, cx, cy, r0, r1, wd):
+def sd_circle(X, Y, cx, cy, r):
+    return np.hypot(X - cx, Y - cy) - r
+
+
+def sd_capsule(X, Y, x1, y1, x2, y2, r):
+    px, py, bx, by = X - x1, Y - y1, x2 - x1, y2 - y1
+    h = np.clip((px * bx + py * by) / (bx * bx + by * by), 0, 1)
+    return np.hypot(px - bx * h, py - by * h) - r
+
+
+def sd_rrect(X, Y, x0, y0, x1, y1, r):
+    qx, qy = np.abs(X - (x0 + x1) / 2) - ((x1 - x0) / 2 - r), np.abs(Y - (y0 + y1) / 2) - ((y1 - y0) / 2 - r)
+    return np.hypot(np.maximum(qx, 0), np.maximum(qy, 0)) + np.minimum(np.maximum(qx, qy), 0) - r
+
+
+def smin(a, b, k):
+    h = np.maximum(k - np.abs(a - b), 0) / k
+    return np.minimum(a, b) - h * h * k / 4
+
+
+def sd_poly(X, Y, pts):
+    d = np.full(X.shape, 1e9)
+    sg = np.ones(X.shape)
+    for i in range(len(pts)):
+        j = i - 1
+        ex, ey = pts[j][0] - pts[i][0], pts[j][1] - pts[i][1]
+        wx, wy = X - pts[i][0], Y - pts[i][1]
+        t = np.clip((wx * ex + wy * ey) / (ex * ex + ey * ey), 0, 1)
+        d = np.minimum(d, (wx - ex * t) ** 2 + (wy - ey * t) ** 2)
+        c1, c2, c3 = Y >= pts[i][1], Y < pts[j][1], ex * wy > ey * wx
+        sg = np.where((c1 & c2 & c3) | (~c1 & ~c2 & ~c3), -sg, sg)
+    return sg * np.sqrt(d)
+
+
+def sd_cloud(X, Y, sc=1.0, ox=0.0, oy=0.0):
+    """雲。外接 x 8〜70、y 6〜50(sc = 1)。円と角丸四角は、継ぎ目を CLOUD_FILLET で丸めてつなぐ"""
+    x, y = (X - ox) / sc, (Y - oy) / sc
+    d = sd_circle(x, y, 27, 30, 12)
+    d = smin(d, sd_circle(x, y, 43, 22, 16), CLOUD_FILLET)
+    d = smin(d, sd_circle(x, y, 58, 32, 11), CLOUD_FILLET)
+    d = smin(d, sd_rrect(x, y, 8, 30, 70, 50, 10), CLOUD_FILLET)
+    return d * sc
+
+
+def sd_sun(X, Y, cx, cy, r, r0, r1, wd):
+    d = sd_circle(X, Y, cx, cy, r)
     for i in range(8):
         t = np.pi / 4 * i
-        thick(d, cx + r0 * np.cos(t), cy + r0 * np.sin(t), cx + r1 * np.cos(t), cy + r1 * np.sin(t), wd)
+        d = np.minimum(d, sd_capsule(X, Y, cx + r0 * np.cos(t), cy + r0 * np.sin(t), cx + r1 * np.cos(t), cy + r1 * np.sin(t), wd / 2.0))
+    return d
 
 
-def cloud(d, sc=1.0, ox=0.0, oy=0.0, grow=0.0):
-    """雲。外接 x 8〜70、y 6〜50(sc = 1)。grow = 周りを膨らませる px(切り抜き用)"""
-    def P(x, y):
-        return x * sc + ox, y * sc + oy
-    for (x, y, r) in ((27, 30, 12), (43, 22, 16), (58, 32, 11)):
-        cx, cy = P(x, y)
-        circ(d, cx, cy, r * sc + grow)
-    x0, y0 = P(8, 30)
-    x1, y1 = P(70, 50)
-    d.rounded_rectangle([(x0 - grow) * S, (y0 - grow) * S, (x1 + grow) * S - 1, (y1 + grow) * S - 1], radius=(10 * sc + grow) * S, fill=255)
+def cov_qmark(fonts):
+    f = ImageFont.truetype(fonts.path, QMARK_PX * K)
+    f.set_variation_by_axes([700])
+    im = Image.new("L", (ICON_W * K, ICON_W * K), 0)
+    # 設計は 34px・ベースライン 76 だが雲の下端(50)に重なる → 32px・77
+    ImageDraw.Draw(im).text((39 * K, QMARK_BASE * K), "?", font=f, fill=255, anchor="ms")
+    return np.asarray(im, dtype=np.float64).reshape(ICON_W, K, ICON_W, K).mean(axis=(1, 3)) / 255.0
 
 
-def part_sun():
-    im, d = canvas()
-    circ(d, 39, 39, 15)
-    rays(d, 39, 39, 21, 32, 5)
-    return im
+def icon_layers(kind, fonts):
+    """種類 -> 層の一覧 [(濃度 78x78 の float、前景色)]。層どうしは重ならない(重なる所は下の層を切り抜く)"""
+    X, Y = sub_grid()
+    if kind == 0:
+        return [(cov_of(sd_sun(X, Y, 39, 39, 15, 21, 32, 5)), FG["SUN"])]
+    if kind == 1:
+        cs = sd_cloud(X, Y, 0.85, 12, 20)
+        sun = np.maximum(sd_sun(X, Y, 26, 26, 11, 16, 23, 4), 3.0 - cs)      # CLOUD_S を 3px 膨らませた形を切り抜く
+        return [(cov_of(sun), FG["SUN"]), (cov_of(cs), FG["CLOUD"])]
+    if kind == 2:
+        return [(cov_of(sd_cloud(X, Y, 1.0, 0, 12)), FG["CLOUD"])]
+    top = (cov_of(sd_cloud(X, Y)), FG["CLOUD"])
+    if kind == 3:
+        d = np.minimum.reduce([sd_capsule(X, Y, x0, y, x1, y, 2.0) for (y, x0, x1) in ((57, 10, 68), (64, 18, 60), (71, 10, 54))])
+        return [top, (cov_of(d), FG["CLOUD"])]
+    if kind == 4:
+        d = np.minimum.reduce([sd_capsule(X, Y, x, 56, x - 4, 70, 2.5) for x in (25, 40, 55)])
+        return [top, (cov_of(d), FG["DROP"])]
+    if kind == 5:
+        d = np.minimum.reduce([sd_circle(X, Y, x, y, 4) for (x, y) in ((25, 60), (40, 66), (55, 60))])
+        return [top, (cov_of(d), WHITE)]
+    if kind == 6:
+        pts = ((46, 52), (32, 66), (41, 66), (35, 77), (54, 60), (45, 60), (51, 52))
+        return [top, (cov_of(sd_poly(X, Y, pts) - BOLT_GROW), FG["BOLT"])]
+    return [top, (cov_qmark(fonts), WHITE)]
 
 
-def part_cloud():
-    im, d = canvas()
-    cloud(d)
-    return im
+def to_lin(c, blend):
+    c = np.asarray(c, dtype=np.float64) / 255.0
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4) if blend == "linear" else c
 
 
-def part_cloud_s():
-    im, d = canvas()
-    cloud(d, 0.85, 12, 20)
-    return im
+def from_lin(v, blend):
+    if blend != "linear":
+        return v * 255.0
+    return np.where(v <= 0.0031308, v * 12.92, 1.055 * np.power(np.maximum(v, 0), 1 / 2.4) - 0.055) * 255.0
 
 
-def part_sun_s():
-    im, d = canvas()
-    circ(d, 26, 26, 11)
-    rays(d, 26, 26, 16, 23, 4)
-    cut, dc = canvas()
-    cloud(dc, 0.85, 12, 20, grow=3)                    # CLOUD_S を 3px 膨らませた形を切り抜く
-    return ImageChops.subtract(im, cut)
+def v565(rgb8):
+    r, g, b = (np.asarray(rgb8[..., i], dtype=np.int32) for i in range(3))
+    return ((((r * 31 + 127) // 255) << 11) | (((g * 63 + 127) // 255) << 5) | ((b * 31 + 127) // 255)).astype(np.uint16)
 
 
-def part_fog():
-    im, d = canvas()
-    for (y, x0, x1) in ((57, 10, 68), (64, 18, 60), (71, 10, 54)):
-        thick(d, x0, y, x1, y, 4)
-    return im
+def ideal_icon(layers, panel565, blend=None):
+    """理想の画像: 高精度の濃度で、パネルの色(画面に出る色)とアイコンの色を混ぜ、RGB565 に丸める。戻り値 = (RGB565, 濃度の合計)"""
+    blend = blend or BLEND
+    tot = sum(c for c, _ in layers)
+    s = np.minimum(tot, 1.0)
+    w = np.where(tot > 0, s / np.maximum(tot, 1e-12), 0)
+    pn = np.array(hexrgb(hex565(int(panel565))), dtype=np.float64)
+    acc = to_lin(pn, blend)[None, None, :] * (1 - s)[..., None]
+    for c, fg in layers:
+        acc = acc + (c * w)[..., None] * to_lin(np.array(hexrgb(fg), dtype=np.float64), blend)[None, None, :]
+    return v565(np.clip(np.rint(from_lin(acc, blend)), 0, 255)), tot
 
 
-def part_drops():
-    im, d = canvas()
-    for x in (25, 40, 55):
-        thick(d, x, 56, x - 4, 70, 5)
-    return im
+def legacy_shown(layers, panel565):
+    """旧方式(4 倍の副格子 = 17 段の濃度 -> A8 -> 33 段の ramp = mix565)を同じ形に当てた画像(比較の指標用)"""
+    out = np.full((ICON_W, ICON_W), panel565, dtype=np.uint16)
+    for c, fg in layers:
+        lv = (np.rint(np.round(c * 16) / 16 * 255).astype(np.int32) + 4) >> 3
+        out = np.where(lv > 0, mix565(panel565, c565(fg), lv), out).astype(np.uint16)
+    return out
 
 
-def part_dots():
-    im, d = canvas()
-    for (x, y) in ((25, 60), (40, 66), (55, 60)):
-        circ(d, x, y, 4)
-    return im
+def fit_icon_colors(pal, ideal, nfree):
+    """アイコンの色(RGB565)。固定の前半 98 個に無い色を最大 nfree 色まで。足りなければ k-means(乱数なし)。戻り値 = 追加する色の昇順"""
+    fixed = [int(x) for x in pal[:FIXED_N]]
+    fs = set(fixed)
+    cols, cnt = np.unique(ideal, return_counts=True)
+    cand = [(int(c), int(n)) for c, n in zip(cols, cnt) if int(c) not in fs]
+    if len(cand) <= nfree:
+        return sorted(c for c, _ in cand)
+    wt = np.zeros(65536)
+    for c, n in cand:
+        wt[c] = n
+    return [int(x) for x in G.make_palette(wt, fixed)[FIXED_N:]]
 
 
-def part_bolt():
-    im, d = canvas()
-    pts = ((46, 52), (32, 66), (41, 66), (35, 77), (54, 60), (45, 60), (51, 52))
-    d.polygon([(x * S, y * S) for x, y in pts], fill=255)
-    return im
-
-
-def part_qmark(fonts):
-    im, d = canvas()
-    d.text((39 * S, QMARK_BASE * S), "?", font=fonts.get(QMARK_PX, 700), fill=255, anchor="ms")   # 設計は 34px・ベースライン 76 だが雲の下端(50)に 5 画素重なる → 32px・77(雲と 2px あく)
-    return im
-
-
-def to_part(im4):
-    """4 倍の画像 -> (A8、外接矩形に切り詰め、箱の中の位置 ox, oy)"""
-    a = im4.resize((ICON_W, ICON_W), Image.BOX)
-    bb = a.getbbox()
-    return np.asarray(a.crop(bb), dtype=np.uint8).copy(), bb[0], bb[1]
-
-
-# 種類 -> 層(下から。(部品, 置く dx, dy, ramp))
-LAYERS = {0: (("SUN", 0, 0, R_SUN),),
-          1: (("SUN_S", 0, 0, R_SUN), ("CLOUD_S", 0, 0, R_CLOUD)),
-          2: (("CLOUD", 0, 12, R_CLOUD),),
-          3: (("CLOUD", 0, 0, R_CLOUD), ("FOG_LINES", 0, 0, R_CLOUD)),
-          4: (("CLOUD", 0, 0, R_CLOUD), ("DROPS", 0, 0, R_DROP)),
-          5: (("CLOUD", 0, 0, R_CLOUD), ("DOTS", 0, 0, R_PNW)),
-          6: (("CLOUD", 0, 0, R_CLOUD), ("BOLT", 0, 0, R_BOLT)),
-          7: (("CLOUD", 0, 0, R_CLOUD), ("QMARK", 0, 0, R_PNW))}
+def to_sprite(ideal, pal, used_n):
+    """理想の色 -> 最も近いパレットの添字(同点は小さい添字)。透明色 = KEY_IDX(パネル)。戻り値 = (78x78 の添字、切り詰めた配列、ox、oy)"""
+    cols = np.unique(ideal)
+    nearest = G.d2mat(G.comps(cols), G.comps(pal[:used_n])).argmin(axis=1)
+    lut = dict((int(c), int(i)) for c, i in zip(cols, nearest))
+    idx = np.vectorize(lambda c: lut[int(c)], otypes=[np.uint8])(ideal)
+    ys, xs = np.nonzero(idx != KEY_IDX)
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    return idx, idx[y0:y1, x0:x1].copy(), int(x0), int(y0)
 
 
 def make_corners():
@@ -279,14 +334,21 @@ def build(fonts):
             pool += data
         tabs[name] = lst
     a["glyphs"] = tabs
-    parts = {"SUN": part_sun(), "CLOUD": part_cloud(), "SUN_S": part_sun_s(), "CLOUD_S": part_cloud_s(), "FOG_LINES": part_fog(),
-             "DROPS": part_drops(), "DOTS": part_dots(), "BOLT": part_bolt(), "QMARK": part_qmark(fonts)}
-    a["parts"] = {k: to_part(v) for k, v in parts.items()}
-    for k, (arr, ox, oy) in a["parts"].items():
-        pool += arr.tobytes()
     a["pool"] = bytes(pool)
     a["corner"] = make_corners()
-    a["pal565"] = [make_palette(k) for k in range(8)]
+    a["pal565"], a["used_n"], a["sprite"], a["icon"] = [], [], [], []
+    for k in range(8):
+        pal = make_palette(k)
+        layers = icon_layers(k, fonts)
+        ideal, tot = ideal_icon(layers, int(pal[1]))
+        extra = fit_icon_colors(pal, ideal, 256 - FIXED_N)
+        pal[FIXED_N:FIXED_N + len(extra)] = extra
+        used_n = FIXED_N + len(extra)
+        idx, arr, ox, oy = to_sprite(ideal, pal, used_n)
+        a["pal565"].append(pal)
+        a["used_n"].append(used_n)
+        a["sprite"].append((arr, ox, oy))
+        a["icon"].append(dict(layers=layers, ideal=ideal, tot=tot, idx=idx))
     a["pal"] = [[pal_argb(int(p)) for p in pal] for pal in a["pal565"]]
     return a
 
@@ -295,7 +357,9 @@ def digest(a, renders):
     h = hashlib.sha256()
     h.update(a["pool"])
     h.update(repr(sorted(a["glyphs"].items())).encode())
-    h.update(repr(sorted((k, v[1], v[2]) for k, v in a["parts"].items())).encode())
+    for arr, ox, oy in a["sprite"]:
+        h.update(arr.tobytes())
+        h.update(repr((ox, oy, arr.shape)).encode())
     for c in a["corner"]:
         h.update(c.tobytes())
     for p in a["pal565"]:
@@ -357,6 +421,12 @@ class CP(Painter):
     def fill(self, x, y, w, h, idx):
         self.fb[y:y + h, x:x + w] = idx
 
+    def key_blit(self, src, x, y, key=KEY_IDX):
+        """index スプライトを、透明色 key を飛ばして重ねる(C の gfx では新しい関数。画面内に収まる前提)"""
+        h, w = src.shape
+        sub = self.fb[y:y + h, x:x + w]
+        self.fb[y:y + h, x:x + w] = np.where(src != key, src, sub)
+
     def seq(self, font, ks, x, y, align, ramp):
         """字番号の並びを描く。(送り幅の合計 = 戻り値)"""
         gl = self.a["glyphs"][font]
@@ -389,9 +459,8 @@ def render(a, v):
         p.a8(a["corner"][i], cx, cy, RAMP[R_CORN])
     p.seq("F124", hhmm_seq(v["clk.clock"]), CX, TIME_BASE, CENTER, RAMP[R_BGW])        # 4 時刻
     p.seq("F20", date_seq(v), CX, DATE_BASE, CENTER, RAMP[R_BGW])                      # 5 日付・地名
-    for (part, dx, dy, rk) in LAYERS[kind]:                                            # 6 アイコン
-        arr, ox, oy = a["parts"][part]
-        p.a8(arr, x0 + dx + ox, ICON_Y + dy + oy, RAMP[rk])
+    arr, ox, oy = a["sprite"][kind]                                                    # 6 アイコン(index スプライト。透明色 = パネル)
+    p.key_blit(arr, x0 + ox, ICON_Y + oy)
     p.seq("F72", temp_seq(v), x0 + ICON_W + GAP, TEMP_BASE, LEFT, RAMP[R_PNW])         # 7 気温
     p.seq("F20", name_seq(kind), x0 + ICON_W + GAP + tw + GAP, NAME_BASE, LEFT, RAMP[R_PNW])   # 8 天気名
     return p.fb
@@ -424,11 +493,8 @@ def inside(r, box):
 def state_rects(a, v):
     kind = kind_of(v)
     tw, nw, G_, x0 = widths(a, v)
-    ic = None
-    for (part, dx, dy, rk) in LAYERS[kind]:
-        arr, ox, oy = a["parts"][part]
-        q = (x0 + dx + ox, ICON_Y + dy + oy, x0 + dx + ox + arr.shape[1], ICON_Y + dy + oy + arr.shape[0])
-        ic = q if ic is None else (min(ic[0], q[0]), min(ic[1], q[1]), max(ic[2], q[2]), max(ic[3], q[3]))
+    arr, ox, oy = a["sprite"][kind]
+    ic = (x0 + ox, ICON_Y + oy, x0 + ox + arr.shape[1], ICON_Y + oy + arr.shape[0])
     return {"時刻": ink(a, "F124", hhmm_seq(v["clk.clock"]), CX, TIME_BASE, CENTER),
             "日付・地名": ink(a, "F20", date_seq(v), CX, DATE_BASE, CENTER),
             "アイコン": ic,
@@ -438,27 +504,28 @@ def state_rects(a, v):
 
 def check_all(a, fonts, states, renders):
     errs, warns, info = [], [], {}
-    # ① パレット: 226 色・誤差 0・§13.2 の配置・全天気で ramp の添字が同じ
+    # ① パレット: 前半 98 個は配置が全天気で同じ・誤差 0、後半はアイコンの色
     nmax = 0
     for k in range(8):
         pal = a["pal565"][k]
         bg, pn = c565(KINDS[k][2]), c565(panel_hex(KINDS[k][2]))
         if int(pal[0]) != bg or int(pal[1]) != pn:
             errs.append("パレット %s: 添字 0・1 が背景・パネルの RGB565 でない" % KINDS[k][0])
-        for rk, (b, f) in enumerate(((bg, c565(WHITE)), (pn, c565(WHITE)), (pn, c565(FG["CLOUD"])), (pn, c565(FG["SUN"])),
-                                      (pn, c565(FG["DROP"])), (pn, c565(FG["BOLT"])), (pn, bg))):
+        for rk, (b, f) in enumerate(((bg, c565(WHITE)), (pn, c565(WHITE)), (pn, bg))):
             for l in range(1, 33):
                 if int(pal[RAMP[rk][l]]) != int(mix565(b, f, l)):          # 誤差 0(各段が mix565 と一致)
                     errs.append("パレット %s の %s の段 %d が mix565 と違う" % (KINDS[k][0], RAMP_NAMES[rk], l))
             if int(pal[RAMP[rk][32]]) != (f if rk != R_CORN else bg):
                 errs.append("パレット %s の %s の l = 32 が前景そのものでない" % (KINDS[k][0], RAMP_NAMES[rk]))
-        for i in range(USED_N, 256):
+        if not FIXED_N <= a["used_n"][k] <= 256:
+            errs.append("パレット %s: 使う添字の数 %d が範囲外" % (KINDS[k][0], a["used_n"][k]))
+        for i in range(a["used_n"][k], 256):
             if int(pal[i]) != bg:
                 errs.append("パレット %s の添字 %d(未使用)が背景と同じ色でない" % (KINDS[k][0], i))
         for i in range(256):
             if a["pal"][k][i] != pal_argb(int(pal[i])) or (a["pal"][k][i] >> 24) != 0xFF:
                 errs.append("clk_pal[%d][%d] が 0xFF000000 | RGB565 を 8bit に広げた値でない" % (k, i))
-        nmax = max(nmax, len(set(int(x) for x in pal[:USED_N])))
+        nmax = max(nmax, a["used_n"][k])
     # ② フォントに字がある・送り幅が設計どおり
     allch = "".join(CH124 + CH72 + CH20)
     miss = fonts.missing(allch, 24, 700)
@@ -483,23 +550,28 @@ def check_all(a, fonts, states, renders):
                  ("霧", 29), ("雨", 30), ("雪", 31), ("雷", 32), ("不", 33), ("明", 34), ("\u3000", 35)):
         if CH20.index(c) != k:
             errs.append("F20 の字番号 %r = %d(設計は %d)" % (c, CH20.index(c), k))
-    # ③ アイコンの層が重ならない・箱に収まる
-    for kind, layers in LAYERS.items():
-        full = []
-        for (part, dx, dy, rk) in layers:
-            arr, ox, oy = a["parts"][part]
-            m = np.zeros((ICON_W, ICON_W), dtype=bool)
-            y0, x0_ = oy + dy, ox + dx
-            if x0_ < 0 or y0 < 0 or x0_ + arr.shape[1] > ICON_W or y0 + arr.shape[0] > ICON_W:
-                errs.append("アイコン %s の部品 %s が 78x78 の箱からはみ出す" % (KINDS[kind][0], part))
-                continue
-            m[y0:y0 + arr.shape[0], x0_:x0_ + arr.shape[1]] = arr > 0
-            full.append((part, m))
-        for i in range(len(full)):
-            for j in range(i + 1, len(full)):
-                n = int((full[i][1] & full[j][1]).sum())
+    # ③ アイコンの層が重ならない・箱に収まる・スプライトの添字の範囲・縁の質(理想との差)
+    em = []
+    for k in range(8):
+        ic = a["icon"][k]
+        ls = ic["layers"]
+        for i in range(len(ls)):
+            for j in range(i + 1, len(ls)):
+                n = int((np.minimum(ls[i][0], ls[j][0]) > 0.02).sum())
                 if n:
-                    errs.append("アイコン %s: 層 %s と %s が %d 画素重なる" % (KINDS[kind][0], full[i][0], full[j][0], n))
+                    errs.append("アイコン %s: 層 %d と %d が %d 画素で重なる(濃度 0.02 超)" % (KINDS[k][0], i, j, n))
+        pal = a["pal565"][k]
+        if int(ic["idx"].max()) >= a["used_n"][k]:
+            errs.append("アイコン %s: スプライトの添字が使う範囲(%d)を超える" % (KINDS[k][0], a["used_n"][k]))
+        edge = (ic["tot"] > 0.004) & (ic["tot"] < 0.996)
+        after = pal[ic["idx"]]
+        before = legacy_shown(ls, int(pal[1]))
+        ea, eb = G.step_err(ic["ideal"][edge], after[edge]), G.step_err(ic["ideal"][edge], before[edge])
+        ebs = G.step_err(ideal_icon(ls, int(pal[1]), "srgb")[0][edge], before[edge])      # 旧方式は sRGB の値で混ぜるので、その理想との差も
+        em.append(dict(kind=KINDS[k][0], n=int(edge.sum()), a_max=int(ea.max()), a_mean=float(ea.mean()), a_col=len(np.unique(after[edge])),
+                       b_max=int(eb.max()), b_mean=float(eb.mean()), b_col=len(np.unique(before[edge])), bs_max=int(ebs.max()), bs_mean=float(ebs.mean()),
+                       ideal_col=len(np.unique(ic["ideal"][edge]))))
+    info["edge"] = em
     # 角: 外の端 = 濃い、内の端 = 0
     cs = a["corner"]
     if not (cs[0][0, 0] >= 250 and cs[0][15, 15] == 0 and cs[1][0, 15] >= 250 and cs[2][15, 0] >= 250 and cs[3][15, 15] >= 250 and cs[3][0, 0] == 0):
@@ -508,8 +580,8 @@ def check_all(a, fonts, states, renders):
     worst_g, rect_rows = 0, []
     for n, v in enumerate(states):
         fb = renders[n]
-        if int(fb.max()) >= USED_N:
-            errs.append("C%d: 添字 %d(>= %d)を使っている" % (n, int(fb.max()), USED_N))
+        if int(fb.max()) >= a["used_n"][kind_of(v)]:
+            errs.append("C%d: 添字 %d(>= 使う数 %d)を使っている" % (n, int(fb.max()), a["used_n"][kind_of(v)]))
         rc, G_, x0 = state_rects(a, v)
         rect_rows.append((n, rc, G_, x0))
         worst_g = max(worst_g, G_)
@@ -540,9 +612,10 @@ def check_all(a, fonts, states, renders):
         pal = a["pal565"][k]
         bg, pn = hex565(int(pal[0])), hex565(int(pal[1]))
         wh = hex565(int(pal[RAMP[R_BGW][32]]))
+        fgc = lambda f: hex565(c565(f))
         row = dict(kind=nm, wbg=contrast(wh, bg), wpn=contrast(wh, pn),
-                   cloud=contrast(hex565(int(pal[RAMP[R_CLOUD][32]])), pn), sun=contrast(hex565(int(pal[RAMP[R_SUN][32]])), pn),
-                   drop=contrast(hex565(int(pal[RAMP[R_DROP][32]])), pn), bolt=contrast(hex565(int(pal[RAMP[R_BOLT][32]])), pn),
+                   cloud=contrast(fgc(FG["CLOUD"]), pn), sun=contrast(fgc(FG["SUN"]), pn),
+                   drop=contrast(fgc(FG["DROP"]), pn), bolt=contrast(fgc(FG["BOLT"]), pn),
                    bg=bg, panel=pn)
         con.append(row)
         if row["wbg"] < 3.0:
@@ -568,9 +641,9 @@ def check_all(a, fonts, states, renders):
 def rom_table(a):
     pool = len(a["pool"])
     gt = sum(len(v) for v in a["glyphs"].values()) * 12
-    shapes = sum(arr.size for arr, _, _ in a["parts"].values())
-    return [("字 A8(F124・F72・F20)", pool - shapes), ("字の表(%d 個 x 12)" % (gt // 12), gt), ("アイコンの部品 %d 枚(外接矩形)" % len(a["parts"]), shapes),
-            ("角 4 枚", 4 * 256), ("パレット 8 枚", 8 * 1024), ("ramp 7 本 x 33", 7 * 33)]
+    spr = sum(arr.size for arr, _, _ in a["sprite"])
+    return [("字 A8(F124・F72・F20)", pool), ("字の表(%d 個 x 12)" % (gt // 12), gt), ("アイコンの index スプライト 8 枚(外接矩形)", spr),
+            ("角 4 枚", 4 * 256), ("パレット 8 枚", 8 * 1024), ("ramp 3 本 x 33", 3 * 33)]
 
 
 # ------------------------------------------------------------------ プレビュー(PNG)
@@ -582,6 +655,42 @@ def title_font(fonts, px=15, wg=500):
     f = ImageFont.truetype(fonts.path, px)
     f.set_variation_by_axes([wg])
     return f
+
+
+def icon_rgb(a, k):
+    """スプライトをパネルの上に置いた 78x78 の RGB(パネルに出る色)"""
+    p = CP(a)
+    p.fill(0, 0, ICON_W, ICON_W, 1)
+    arr, ox, oy = a["sprite"][k]
+    p.key_blit(arr, ox, oy)
+    return panel_rgb(a["pal565"][k][p.fb[:ICON_W, :ICON_W]])
+
+
+LEGACY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "clock", "legacy_icons_v1.png")
+
+
+def legacy_rgb(k):
+    """旧版(コミット c47b080 の icons.png。2 倍の最近傍)から 1 倍の 78x78 を取り出す"""
+    im = np.asarray(Image.open(LEGACY).convert("RGB"))
+    x, y = 14 + (k % 4) * 170, 14 + (k // 4) * 194 + 24
+    return im[y:y + 156:2, x:x + 156:2].copy()
+
+
+def write_zoom(a, ft, pdir):
+    """icons_zoom.png: 旧版と新版を 4 倍の最近傍で並べる(縁の質の比較)"""
+    if not os.path.exists(LEGACY):
+        print("警告: %s が無いので icons_zoom.png を作らない" % LEGACY)
+        return
+    z, g2, cap = 4 * ICON_W, 12, 22
+    im = Image.new("RGB", (2 * (2 * z + 2 * g2) + g2, 4 * (z + cap + g2) + g2), (52, 56, 64))
+    d = ImageDraw.Draw(im)
+    for k in range(8):
+        x, y = g2 + (k % 2) * (2 * z + 3 * g2), g2 + (k // 2) * (z + cap + g2)
+        d.text((x, y + 2), "%d %s  前(左)" % (k, KINDS[k][0]), font=ft, fill=(236, 239, 244))
+        d.text((x + z + g2, y + 2), "後(右)", font=ft, fill=(236, 239, 244))
+        im.paste(Image.fromarray(legacy_rgb(k)).resize((z, z), Image.NEAREST), (x, y + cap))
+        im.paste(Image.fromarray(icon_rgb(a, k)).resize((z, z), Image.NEAREST), (x + z + g2, y + cap))
+    im.save(os.path.join(pdir, "icons_zoom.png"))
 
 
 def write_previews(a, fonts, states, renders, pdir):
@@ -604,19 +713,15 @@ def write_previews(a, fonts, states, renders, pdir):
     ic = Image.new("RGB", (4 * (sz + g2) + g2, 2 * (sz + g2 + 24) + g2), (52, 56, 64))
     di = ImageDraw.Draw(ic)
     for k in range(8):
-        p = CP(a)
-        p.fill(0, 0, ICON_W, ICON_W, 1)
-        for (part, dx, dy, rk) in LAYERS[k]:
-            arr, ox, oy = a["parts"][part]
-            p.a8(arr, dx + ox, dy + oy, RAMP[rk])
-        im = pil_rgb(p.fb[:ICON_W, :ICON_W], a["pal565"][k]).resize((sz, sz), Image.NEAREST)
+        im = Image.fromarray(icon_rgb(a, k)).resize((sz, sz), Image.NEAREST)
         x, y = g2 + (k % 4) * (sz + g2), g2 + (k // 4) * (sz + g2 + 24)
         di.text((x, y), "%d %s %s" % (k, KINDS[k][0], KINDS[k][1]), font=ft, fill=(236, 239, 244))
         ic.paste(im, (x, y + 24))
     ic.save(os.path.join(pdir, "icons.png"))
+    write_zoom(a, ft, pdir)
     # palette_<kind>: 16 x 16。グループの先頭に白い点、未使用(226〜)は斜線の代わりに小さな × で印
     chip = 28
-    starts = {0, 1} | {2 + 32 * k for k in range(7)}
+    starts = {0, 1} | {2 + 32 * k for k in range(3)}
     for k in range(8):
         im = np.full((16 * chip, 16 * chip, 3), 255, dtype=np.uint8)
         pal = a["pal565"][k]
@@ -625,7 +730,9 @@ def write_previews(a, fonts, states, renders, pdir):
             im[r * chip + 1:(r + 1) * chip - 1, c * chip + 1:(c + 1) * chip - 1] = panel_rgb(np.array([[pal[i]]]))[0, 0]
             if i in starts:
                 im[r * chip + 3:r * chip + 7, c * chip + 3:c * chip + 7] = (255, 0, 255)
-            if i >= USED_N:
+            if i == FIXED_N:
+                im[r * chip + 3:r * chip + 7, c * chip + 3:c * chip + 7] = (0, 200, 255)
+            if i >= a["used_n"][k]:
                 im[r * chip + 12:r * chip + 16, c * chip + 12:c * chip + 16] = (128, 128, 128)
         Image.fromarray(im).save(os.path.join(pdir, "palette_%s.png" % KINDS[k][0]))
 
@@ -674,8 +781,16 @@ def main():
     if dg != dg2:
         errs.append("2 回の生成で出力が違う(%s / %s)" % (dg[:12], dg2[:12]))
     print("フォント: %s sha256=%s" % (os.path.basename(args.font), fonts.sha))
-    print("パレット 8 枚: 使う添字 %d / 256(0〜%d)、各色は mix565 の計算で作る(誤差 0 段。k-means・丸めなし)、未使用 %d 個は背景色" % (
-        USED_N, USED_N - 1, 256 - USED_N))
+    print("パレット 8 枚: 前半 %d 個(背景・パネル・ramp 3 本)は全天気で同じ配置・誤差 0。後半はアイコンの色。使う添字 %s / 256(旧設計は 226)" % (
+        FIXED_N, " ".join("%s=%d" % (KINDS[k][0], a["used_n"][k]) for k in range(8))))
+    print("アイコンの縁(濃度が 0.004〜0.996 の画素)の質。理想 = %dx%d の副格子・混色 %s・RGB565 丸め。誤差 = RGB565 の段(3 チャンネルの最大差)。前 = 旧方式(17 段の濃度 → 33 段 ramp)を同じ形に当てた値" % (K, K, BLEND))
+    for e in info["edge"]:
+        print("  %-8s 縁 %4d 画素 / 理想の色数 %3d  前: 最大 %d 平均 %.3f(sRGB 理想比 %d / %.3f) 色数 %3d  後: 最大 %d 平均 %.3f 色数 %3d" % (
+            e["kind"], e["n"], e["ideal_col"], e["b_max"], e["b_mean"], e["bs_max"], e["bs_mean"], e["b_col"], e["a_max"], e["a_mean"], e["a_col"]))
+    tn = sum(e["n"] for e in info["edge"])
+    print("  全体     縁 %4d 画素          前: 最大 %d 平均 %.3f 色数 計 %d  後: 最大 %d 平均 %.3f 色数 計 %d" % (
+        tn, max(e["b_max"] for e in info["edge"]), sum(e["b_mean"] * e["n"] for e in info["edge"]) / tn, sum(e["b_col"] for e in info["edge"]),
+        max(e["a_max"] for e in info["edge"]), sum(e["a_mean"] * e["n"] for e in info["edge"]) / tn, sum(e["a_col"] for e in info["edge"])))
     for n, d in info["adv"].items():
         print("送り幅 %s: " % n + " ".join("%s=%d" % (c.replace("−", "−"), w) for c, w in d.items() if not c.isdigit()) + " 数字=%d" % d["0"])
     print("コントラスト(WCAG。RGB565 後の色。時刻・日付は白/背景 >= 3.0、気温・天気名は白/パネル >= 4.5、アイコン >= 3.0):")
@@ -689,7 +804,7 @@ def main():
             n, x0, G_, rc["時刻"][0], rc["時刻"][2], rc["時刻"][1], rc["時刻"][3], rc["日付・地名"][0], rc["日付・地名"][2],
             rc["日付・地名"][1], rc["日付・地名"][3], rc["気温"][0], rc["気温"][2], rc["天気名"][0], rc["天気名"][2]))
     rows = rom_table(a)
-    print("ROM(アセット): " + " / ".join("%s %d" % r for r in rows) + " = %d バイト(設計 §13.12 の見積は約 117,000)" % sum(r[1] for r in rows))
+    print("ROM(アセット): " + " / ".join("%s %d" % r for r in rows) + " = %d バイト(旧版 117,202。設計 §13.12 の見積は約 117,000)" % sum(r[1] for r in rows))
     print("出力の sha256(字・部品・角・パレット 8 枚・12 状態の描画): %s(2 回の生成で %s)" % (dg, "一致" if dg == dg2 else "不一致"))
     for w in warns:
         print("警告:", w)

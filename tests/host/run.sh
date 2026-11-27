@@ -650,7 +650,7 @@ fi
 
 # ---------------------------------------------------------------- S38
 if sel S38; then
-  echo "### S38 時計・天気画面のアセット生成(docs/design.md §13、H-C8 の前半): gen_clock_assets.py --check(パレット 8 枚 226 色・誤差 0・字・アイコンの層・配置・コントラスト)/ 2 回の生成で同一 / コミット済みのプレビュー PNG と一致 / 株価の生成物が変わらない"
+  echo "### S38 時計・天気画面のアセット生成(docs/design.md §13、H-C8 の前半): gen_clock_assets.py --check(パレット 8 枚(前半 98 色は誤差 0、後半はアイコンの色)・字・アイコンの層・縁の質の指標・配置・コントラスト)/ 2 回の生成で同一 / コミット済みのプレビュー PNG と一致 / 株価の生成物が変わらない"
   rc=0
   "$PY" -I "$ROOT/tools/gen_clock_assets.py" --check || rc=1
   rm -rf "$BUILD/clk_prev1" "$BUILD/clk_prev2" "$BUILD/clk_c8a" "$BUILD/clk_c8b"; mkdir -p "$BUILD/clk_prev1" "$BUILD/clk_prev2"
@@ -662,8 +662,8 @@ if sel S38; then
     cmp -s "$f" "$BUILD/clk_prev2/$b" || { echo "  NG: 再実行で出力が違う: $b"; rc=1; }
     cmp -s "$f" "$ROOT/tools/assets/clock/preview/$b" || { echo "  NG: コミット済み tools/assets/clock/preview/$b が生成物と違う(再生成が必要)"; rc=1; }
   done
-  echo "  比較したプレビュー PNG = $n(sheet + icons + state_C0〜C11 + palette 8 = 22)"
-  [ "$n" -eq 22 ] || rc=1
+  echo "  比較したプレビュー PNG = $n(sheet + icons + icons_zoom + state_C0〜C11 + palette 8 = 23)"
+  [ "$n" -eq 23 ] || rc=1
   m=0
   for f in "$BUILD"/clk_c8a/*; do
     m=$((m+1)); cmp -s "$f" "$BUILD/clk_c8b/$(basename "$f")" || { echo "  NG: 再実行で .c8 / .pal が違う: $(basename "$f")"; rc=1; }
