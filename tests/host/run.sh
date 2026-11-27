@@ -648,5 +648,31 @@ if sel S37; then
   result S37 $rc
 fi
 
+# ---------------------------------------------------------------- S38
+if sel S38; then
+  echo "### S38 時計・天気画面のアセット生成(docs/design.md §13、H-C8 の前半): gen_clock_assets.py --check(パレット 8 枚 226 色・誤差 0・字・アイコンの層・配置・コントラスト)/ 2 回の生成で同一 / コミット済みのプレビュー PNG と一致 / 株価の生成物が変わらない"
+  rc=0
+  "$PY" -I "$ROOT/tools/gen_clock_assets.py" --check || rc=1
+  rm -rf "$BUILD/clk_prev1" "$BUILD/clk_prev2" "$BUILD/clk_c8a" "$BUILD/clk_c8b"; mkdir -p "$BUILD/clk_prev1" "$BUILD/clk_prev2"
+  "$PY" -I "$ROOT/tools/gen_clock_assets.py" --preview-dir "$BUILD/clk_prev1" --emit-c8 "$BUILD/clk_c8a" >/dev/null || rc=1
+  "$PY" -I "$ROOT/tools/gen_clock_assets.py" --preview-dir "$BUILD/clk_prev2" --emit-c8 "$BUILD/clk_c8b" >/dev/null || rc=1
+  n=0
+  for f in "$BUILD"/clk_prev1/*.png; do
+    b="$(basename "$f")"; n=$((n+1))
+    cmp -s "$f" "$BUILD/clk_prev2/$b" || { echo "  NG: 再実行で出力が違う: $b"; rc=1; }
+    cmp -s "$f" "$ROOT/tools/assets/clock/preview/$b" || { echo "  NG: コミット済み tools/assets/clock/preview/$b が生成物と違う(再生成が必要)"; rc=1; }
+  done
+  echo "  比較したプレビュー PNG = $n(sheet + icons + state_C0〜C11 + palette 8 = 22)"
+  [ "$n" -eq 22 ] || rc=1
+  m=0
+  for f in "$BUILD"/clk_c8a/*; do
+    m=$((m+1)); cmp -s "$f" "$BUILD/clk_c8b/$(basename "$f")" || { echo "  NG: 再実行で .c8 / .pal が違う: $(basename "$f")"; rc=1; }
+  done
+  echo "  2 回の --emit-c8 で同一のファイル = $m(C0〜C11.c8 12 + clk_*.pal 8 = 20)"
+  [ "$m" -eq 20 ] || rc=1
+  "$PY" -I "$ROOT/tools/gen_stock_assets.py" --check | grep -E '^出力の sha256' | sed 's/(2 回.*//'
+  result S38 $rc
+fi
+
 echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS SUSPECT(不具合の可能性)=$SUSPECTS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"
 [ $FAILS -eq 0 ]

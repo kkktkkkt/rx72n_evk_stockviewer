@@ -1,0 +1,10 @@
+# C9 時刻未同期(--:-- と 東京都のみ)
+# 書式: key=整数(docs/design.md §13.10)。書かれないキーは 0(clk.clock だけ 65535 = 未同期)
+scr=1
+clk.clock=65535
+clk.have=0
+clk.kind=7
+clk.temp=0
+clk.mon=0
+clk.day=0
+clk.wday=0

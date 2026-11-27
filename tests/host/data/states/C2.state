@@ -1,0 +1,10 @@
+# C2 くもり 15:30 14°
+# 書式: key=整数(docs/design.md §13.10)。書かれないキーは 0(clk.clock だけ 65535 = 未同期)
+scr=1
+clk.clock=930
+clk.have=1
+clk.kind=2
+clk.temp=14
+clk.mon=11
+clk.day=27
+clk.wday=5

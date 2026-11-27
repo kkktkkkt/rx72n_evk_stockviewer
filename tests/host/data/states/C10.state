@@ -1,0 +1,10 @@
+# C10 0°(元の気温 -0.4℃)00:00
+# 書式: key=整数(docs/design.md §13.10)。書かれないキーは 0(clk.clock だけ 65535 = 未同期)
+scr=1
+clk.clock=0
+clk.have=1
+clk.kind=2
+clk.temp=0
+clk.mon=11
+clk.day=28
+clk.wday=6
