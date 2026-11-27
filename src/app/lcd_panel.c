@@ -9,9 +9,6 @@
 #include "app_debug.h"
 #include "ui_assets.h"
 #include "lcd_panel.h"
-#if APP_CLUT8_TEST
-#include "clut8_test.h"
-#endif
 
 static glcdc_cfg_t s_cfg;
 
@@ -167,9 +164,6 @@ bool lcd_init(void)
 
     /* 4. GLCDC 起動 */
     lcd_build_cfg(&s_cfg);
-#if APP_CLUT8_TEST
-    clut8_test_patch_cfg(&s_cfg);    /* GR2 を CLUT8 に(docs/design.md §19.3.2) */
-#endif
     err = R_GLCDC_Open(&s_cfg);
     if (err != GLCDC_SUCCESS) {
         app_debug_set_err(APP_ERR_LCD_OPEN, (uint32_t)err);

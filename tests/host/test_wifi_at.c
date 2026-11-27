@@ -379,7 +379,6 @@ static void reset_all(void)
  *   a = 以後の応答の Date: を 04:40:50 UTC に(再同期の確認)、f = 以後 TCP を張れない、j = 以後 join に FAIL、g = 以後 join も TCP も正常、
  *   k = 以後 ^N225(銘柄 1)の要求に 404、h = 銘柄 1 の失敗を直す */
 static stk_view_t g_v;                      /* 最後の stk_ui */
-static ui_wx_t    g_ui;                     /* 最後の wx_ui(暫定の旧 UI の枠。Phase 4 まで) */
 static unsigned g_v_net_seen[4];            /* 各 net の値が stk_ui に出た tick 数 */
 static bool     g_v_stale_seen, g_v_busy_seen, g_v_partial_seen;
 static unsigned g_req_ret[8], g_n_req;      /* wx_request の戻り値の列 */
@@ -391,7 +390,7 @@ static void product_main(void)
 
     g_timer_on = true;
     memset(g_v_net_seen, 0, sizeof g_v_net_seen); g_v_stale_seen = false; g_v_busy_seen = false; g_v_partial_seen = false; g_n_req = 0u;
-    memset(&g_v, 0, sizeof g_v); memset(&g_ui, 0, sizeof g_ui);
+    memset(&g_v, 0, sizeof g_v);
     wx_init(0u);
     for (;;) {
         loop_hook();
@@ -416,12 +415,10 @@ static void product_main(void)
             else if (ch == 'h') { g_fail_sym = -1; }
             else { /* 無視 */ }
             stk_ui(&g_v, now * 10u);
-            wx_ui(&g_ui, now * 10u);
             if (g_v.net < 4u) { g_v_net_seen[g_v.net]++; }
             if (g_v.stale_all != 0u) { g_v_stale_seen = true; }
             if (g_v.busy != 0u) { g_v_busy_seen = true; }
             if (g_v.partial != 0u) { g_v_partial_seen = true; }
-            CHECK_EQ(g_ui.net, g_v.net); CHECK_EQ(g_ui.busy, g_v.busy); CHECK_EQ(g_ui.clock_min, g_v.clock_min); CHECK_EQ(g_ui.upd_min, g_v.upd_min);   /* 暫定の枠が stk_ui と食い違わない */
         }
         wx_poll(now * 10u);
     }

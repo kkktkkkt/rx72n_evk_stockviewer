@@ -1,7 +1,8 @@
-/* app_main.c - 株価ビュー(docs/design.md §7.2。Phase 1 の暫定: 表示は stk_view_t の枠だけ。取得との結合は Phase 4)
- * 起動: app_log_init -> [boot] -> ui_init + 面0に描画 -> lcd_init -> touch_init -> 10msタイマ -> [perf] -> ループ
- * ループ: app_log_poll -> 反映待ちの完了確認 -> (10msごと)[hb]/[err]/UART1文字/touch/ui_update/[ev] -> 天気の取得(APP_WX_PRODUCT) -> 描画(裏面 -> 入れ替え)
- * UART出力の仕様: docs/design-uart.md §10。ログ用の大きいバッファは static(メインループ専用。割り込みから使わない)。 */
+/* app_main.c - 株価ビュー(docs/design.md §7.2)。取得の結果(stk_ui)を表示(ui_set_view -> ui_render)へつなぐ
+ * 起動: app_log_init -> [boot] -> ui_init + 面0に描画 -> lcd_init -> touch_init -> 10msタイマ -> [perf] -> wx_init -> ループ
+ * ループ: app_log_poll -> 反映待ちの完了確認 -> (10msごと)[hb]/[err]/UART1文字/touch/stk_ui -> ui_set_view/ui_update/[ev]+更新要求 -> wx_poll(APP_WX_PRODUCT) -> 描画(裏面 -> 入れ替え)
+ * 表示の入力: APP_STK_PREVIEW = 1 は決まった 8 状態、APP_WX_PRODUCT = 1 は取得の結果(stk_ui)、どちらも 0 は「起動中・オフライン」のまま。
+ * UART出力の仕様: docs/design-uart.md §10・docs/design.md §7.5。ログ用の大きいバッファは static(メインループ専用。割り込みから使わない)。 */
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -19,9 +20,6 @@
 #include "ui_render.h"
 #include "ui_assets.h"
 #include "app_main.h"
-#if APP_CLUT8_TEST
-#include "clut8_test.h"
-#endif
 #if APP_WIFI_ON
 #include "wifi_at.h"
 #endif
@@ -36,8 +34,7 @@ static volatile uint32_t s_tick;                 /* 10ms ごとに +1(CMT割り�
 
 static ui_t    s_ui;                             /* 状態機械(メインループ専用) */
 #if APP_WX_PRODUCT
-static stk_view_t s_view;
-static ui_wx_t s_wxv;                            /* 旧 UI の天気・時計の値(wifi_at の wx_ui が作る)。10ms ごとに stk_view_t へ写す(暫定。Phase 3 で置き換え) */
+static stk_view_t s_view;                        /* 取得の結果から作った表示用の値(stk_ui)。10ms ごとに作り直す */
 #endif
 static uint8_t s_back;                           /* 次に描く面(表示中でない方)。表示中 = s_back ^ 1 */
 static bool    s_flip_pending;                   /* lcd_flip を受け付けた。表示面が変わるまで裏面に書かない */
@@ -53,18 +50,6 @@ static uint32_t       s_err_tick;
 static bool           s_err_sent;                /* (A) を一度でも出したか */
 static uint32_t       s_rxerr_tick;
 static bool           s_rxerr_sent;
-
-#if APP_WX_PRODUCT
-/* 暫定: 旧 UI の値から stk_view_t の枠だけ作る(Wi-Fi の状態・時計・更新時刻。値の行は空 = 起動中)。Phase 4 で wx_sched の結果から作る */
-static void view_from_wx(stk_view_t *v, const ui_wx_t *w)
-{
-    memset(v, 0, sizeof(*v));
-    v->net       = w->net;
-    v->busy      = w->busy;
-    v->clock_min = w->clock_min;
-    v->upd_min   = w->upd_min;
-}
-#endif
 
 static void tick_callback(void *pdata)
 {
@@ -127,11 +112,11 @@ static void log_err(uint32_t code, uint32_t detail)
     emit(applog_fmt_err(s_line, sizeof(s_line), code, detail));
 }
 
-/* タップを [ev] 行にする(暫定: 旧書式 btn=tap st=act。設計 §7.5 の `[ev] btn=tap src=...` は Phase 3 で app_logfmt を直した時に合わせる) */
+/* タップを `[ev] btn=tap src=<touch|uart>` にする(設計 §7.5) */
 static void log_event(const ui_ev_t *e)
 {
     if (e->type == (uint8_t)UI_EV_TAP) {
-        emit(applog_fmt_ev_btn(s_line, sizeof(s_line), "tap", "act", (e->src == (uint8_t)UI_SRC_TOUCH) ? "touch" : "uart"));
+        emit(applog_fmt_ev_tap(s_line, sizeof(s_line), (e->src == (uint8_t)UI_SRC_TOUCH) ? "touch" : "uart"));
     }
 }
 
@@ -160,7 +145,7 @@ static void log_errors(uint32_t now)
     }
 }
 
-/* 受信コマンド(1 tick に1文字): x = 更新(タップと同じ)、s ? は応答。それ以外(n p + - d を含む)は無視 */
+/* 受信コマンド(1 tick に1文字): x = 更新(タップと同じ)、s ? は応答。それ以外(n p d を含む)は無視(設計 §7.3) */
 static void uart_command(uint32_t now_ms)
 {
     int ch = app_log_getc();
@@ -216,8 +201,7 @@ static void tick_step(uint32_t now, uint32_t *last_hb, uint32_t *last_uf, bool t
 #if APP_STK_PREVIEW
     ui_set_view(&s_ui, &ui_preview_view[(now / APP_PREVIEW_TICKS) % UI_PREVIEW_N]);   /* 8 つの決まった状態を 3 秒ごとに */
 #elif APP_WX_PRODUCT
-    wx_ui(&s_wxv, now_ms);       /* 旧 UI の値(Wi-Fi・時計)。暫定で stk_view_t の枠に写す */
-    view_from_wx(&s_view, &s_wxv);
+    stk_ui(&s_view, now_ms);     /* 3 銘柄の値・市場の状態・Wi-Fi の状態・時計・更新時刻(設計 §3.9・§4.4) */
     ui_set_view(&s_ui, &s_view);
 #endif
     ui_update(&s_ui, real, now_ms);
@@ -288,15 +272,12 @@ void app_main(void)
     uint32_t     now;
     bool         touch_ok;
 
-#if APP_CLUT8_TEST
-    clut8_test_main();           /* 戻らない。以降の製品コードには到達しない(docs/design.md §19) */
-#endif
     app_debug_init();
     app_log_init();
     emit(applog_fmt_boot(s_line, sizeof(s_line), __DATE__ " " __TIME__,
                          (uint8_t)APP_LOG_SCI_CH, (uint32_t)APP_LOG_BAUD));
 #if APP_WIFI_TEST
-    wifi_test_main();            /* 戻らない。LCD・タッチ・製品 UI は動かさない(docs/design.md §21.4.1) */
+    wifi_test_main();            /* 戻らない。LCD・タッチ・製品 UI は動かさない */
 #endif
 
     /* 面0に起動中の画面を描いてから GLCDC を起動する(RAM2 は起動前に書ける) */

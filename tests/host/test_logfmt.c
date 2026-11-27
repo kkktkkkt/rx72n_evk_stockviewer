@@ -34,17 +34,10 @@ static const char *RX_BOOT = "[boot] fw=rx72n_gcc build=@ ch=2 baud=115200";
 static const char *RX_INIT = "[init] stage=@ ok=# err=# detail=#";
 static const char *RX_HB   = "[hb] tick=# scr=# demo=# frm=# uf=# err=# detail=# pts=# x=# y=# i2c_fail=# streak=# found=# drop=#";
 static const char *RX_ST   = "[st] tick=# scr=# demo=# frm=# uf=# err=# detail=# pts=# x=# y=# i2c_fail=# streak=# found=# drop=# xmin=# xmax=# ymin=# ymax=#";
-static const char *RX_EV   = "[ev] img=# src=@";
+static const char *RX_EV   = "[ev] btn=tap src=@";
 static const char *RX_ERR  = "[err] code=# detail=#";
-static const char *RX_HELP = "[help] n=next p=prev s=state d=demo +=up -=down x=wx ?=help";
+static const char *RX_HELP = "[help] s=state x=update ?=help";
 static const char *RX_SCAN = "[scan] n=#";                      /* + 繰り返し部(専用検査) */
-static const char *RX_EVS  = "[ev] scr=@ from=@ src=@";
-static const char *RX_EVB  = "[ev] btn=@ st=@ src=@";
-static const char *RX_EVV  = "[ev] set=# src=@";
-static const char *RX_EVD  = "[ev] done=@";
-static const char *RX_EVM  = "[ev] demo=@ src=@";
-static const char *RX_EVE  = "[ev] demo=end";
-static const char *RX_UI   = "[ui] scr=@ set=# bath10=# fill10=# flow10=# tr=# btn=@ ph=@";
 static const char *RX_PERF = "[perf] n=# copy_us=# home_us=# slide_us=#";
 
 static int tmpl(const char *t, const char *s)
@@ -91,7 +84,7 @@ static int rx_match(const char *pat, const char *line, size_t n)
 
 /* ---- 呼び出しの共通化 ---- */
 typedef struct { const char *tag; const applog_state_t *s; bool range; } st_ctx_t;
-typedef struct { uint8_t idx; const char *src; } ev_ctx_t;
+typedef struct { const char *src; } ev_ctx_t;
 typedef struct { const char *build; uint8_t ch; uint32_t baud; } boot_ctx_t;
 typedef struct { const char *stage; bool ok; uint32_t err, detail; } init_ctx_t;
 typedef struct { uint8_t count; const uint8_t *addr; } scan_ctx_t;
@@ -102,17 +95,9 @@ static size_t w_boot(char *b, size_t n, const void *c) { const boot_ctx_t *x = (
 static size_t w_init(char *b, size_t n, const void *c) { const init_ctx_t *x = (const init_ctx_t *)c; return applog_fmt_init(b, n, x->stage, x->ok, x->err, x->detail); }
 static size_t w_state(char *b, size_t n, const void *c) { const st_ctx_t *x = (const st_ctx_t *)c; return applog_fmt_state(b, n, x->tag, x->s, x->range); }
 static size_t w_scan(char *b, size_t n, const void *c) { const scan_ctx_t *x = (const scan_ctx_t *)c; return applog_fmt_scan(b, n, x->count, x->addr); }
-static size_t w_ev(char *b, size_t n, const void *c) { const ev_ctx_t *x = (const ev_ctx_t *)c; return applog_fmt_ev(b, n, x->idx, x->src); }
+static size_t w_ev(char *b, size_t n, const void *c) { const ev_ctx_t *x = (const ev_ctx_t *)c; return applog_fmt_ev_tap(b, n, x->src); }
 static size_t w_err(char *b, size_t n, const void *c) { const err_ctx_t *x = (const err_ctx_t *)c; return applog_fmt_err(b, n, x->code, x->detail); }
 static size_t w_help(char *b, size_t n, const void *c) { (void)c; return applog_fmt_help(b, n); }
-typedef struct { const char *a, *b, *c; } s3_t;
-typedef struct { const char *a; uint32_t n; const char *src; } sn_t;
-static size_t w_evscr(char *b, size_t n, const void *c) { const s3_t *x = (const s3_t *)c; return applog_fmt_ev_scr(b, n, x->a, x->b, x->c); }
-static size_t w_evbtn(char *b, size_t n, const void *c) { const s3_t *x = (const s3_t *)c; return applog_fmt_ev_btn(b, n, x->a, x->b, x->c); }
-static size_t w_evset(char *b, size_t n, const void *c) { const sn_t *x = (const sn_t *)c; return applog_fmt_ev_set(b, n, x->n, x->src); }
-static size_t w_evdone(char *b, size_t n, const void *c) { const s3_t *x = (const s3_t *)c; return applog_fmt_ev_done(b, n, x->a); }
-static size_t w_evdemo(char *b, size_t n, const void *c) { const s3_t *x = (const s3_t *)c; return applog_fmt_ev_demo(b, n, x->a, x->b); }
-static size_t w_ui(char *b, size_t n, const void *c) { return applog_fmt_ui(b, n, (const applog_ui_t *)c); }
 typedef struct { uint32_t n, a, b, c; } perf_t;
 static size_t w_perf(char *b, size_t n, const void *c) { const perf_t *x = (const perf_t *)c; return applog_fmt_perf(b, n, x->n, x->a, x->b, x->c); }
 
@@ -309,49 +294,18 @@ int main(void)
     TEST("U-H1 ev / err / help");
     {
         ev_ctx_t e; err_ctx_t r;
-        e.idx = 0u; e.src = "touch"; sweep("ev 0 touch", w_ev, &e, "[ev] img=0 src=touch\r\n", RX_EV);
-        e.idx = 2u; e.src = "uart";  sweep("ev 2 uart",  w_ev, &e, "[ev] img=2 src=uart\r\n", RX_EV);
-        e.idx = 255u; e.src = "uart"; sweep("ev 255 uart", w_ev, &e, "[ev] img=255 src=uart\r\n", RX_EV);
-        e.idx = 1u; e.src = NULL;    sweep("ev src=NULL", w_ev, &e, "[ev] img=1 src=?\r\n", NULL);
+        e.src = "touch"; sweep("ev tap touch", w_ev, &e, "[ev] btn=tap src=touch\r\n", RX_EV);
+        e.src = "uart";  sweep("ev tap uart",  w_ev, &e, "[ev] btn=tap src=uart\r\n", RX_EV);
+        e.src = NULL;    sweep("ev tap src=NULL", w_ev, &e, "[ev] btn=tap src=?\r\n", NULL);
         r.code = 0u; r.detail = 0u; sweep("err 0/0", w_err, &r, "[err] code=0 detail=0\r\n", RX_ERR);
         r.code = 7u; r.detail = 2u; sweep("err 7/2", w_err, &r, "[err] code=7 detail=2\r\n", RX_ERR);
         r.code = 4294967295u; r.detail = 4294967295u; sweep("err 最大", w_err, &r, "[err] code=4294967295 detail=4294967295\r\n", RX_ERR);
-        sweep("help", w_help, NULL, "[help] n=next p=prev s=state d=demo +=up -=down x=wx ?=help\r\n", RX_HELP);
+        sweep("help", w_help, NULL, "[help] s=state x=update ?=help\r\n", RX_HELP);
     }
 
-    TEST("U-H1 製品デモの [ev](design-uart.md §10.3): scr / btn / set / done / demo");
+    TEST("U-H1 [perf]");
     {
-        s3_t t; sn_t v;
-        t.a = "fill"; t.b = "home"; t.c = "touch";  sweep("ev scr", w_evscr, &t, "[ev] scr=fill from=home src=touch\r\n", RX_EVS);
-        t.a = "home"; t.b = "standby"; t.c = "demo"; sweep("ev scr 2", w_evscr, &t, "[ev] scr=home from=standby src=demo\r\n", RX_EVS);
-        t.a = "home"; t.b = "fill"; t.c = NULL;      sweep("ev scr src=NULL", w_evscr, &t, "[ev] scr=home from=fill\r\n", NULL);
-        t.a = NULL; t.b = NULL; t.c = "uart";        sweep("ev scr NULL", w_evscr, &t, "[ev] scr=? from=? src=uart\r\n", NULL);
-        t.a = "h_up"; t.b = "down"; t.c = "demo";    sweep("ev btn down", w_evbtn, &t, "[ev] btn=h_up st=down src=demo\r\n", RX_EVB);
-        t.a = "h_reheat"; t.b = "act"; t.c = "uart"; sweep("ev btn act", w_evbtn, &t, "[ev] btn=h_reheat st=act src=uart\r\n", RX_EVB);
-        v.n = 43u; v.src = "touch"; sweep("ev set", w_evset, &v, "[ev] set=43 src=touch\r\n", RX_EVV);
-        v.n = 4294967295u; v.src = "uart"; sweep("ev set max", w_evset, &v, "[ev] set=4294967295 src=uart\r\n", RX_EVV);
-        t.a = "fill";   sweep("ev done fill", w_evdone, &t, "[ev] done=fill\r\n", RX_EVD);
-        t.a = "reheat"; sweep("ev done reheat", w_evdone, &t, "[ev] done=reheat\r\n", RX_EVD);
-        t.a = "start"; t.b = "touch"; sweep("ev demo start", w_evdemo, &t, "[ev] demo=start src=touch\r\n", RX_EVM);
-        t.a = "abort"; t.b = "demo";  sweep("ev demo abort", w_evdemo, &t, "[ev] demo=abort src=demo\r\n", RX_EVM);
-        t.a = "end"; t.b = NULL;      sweep("ev demo end", w_evdemo, &t, "[ev] demo=end\r\n", RX_EVE);
-    }
-
-    TEST("U-H1 [ui] と [perf]");
-    {
-        applog_ui_t u;
         perf_t p;
-        u.scr = "reheat"; u.btn = "r_stop"; u.ph = "press"; u.set = 42u; u.bath10 = 391u; u.fill10 = 0u; u.flow10 = 85u; u.tr = 1u;
-        sweep("ui", w_ui, &u, "[ui] scr=reheat set=42 bath10=391 fill10=0 flow10=85 tr=1 btn=r_stop ph=press\r\n", RX_UI);
-        u.scr = "standby"; u.btn = "none"; u.ph = "none"; u.set = 65535u; u.bath10 = 65535u; u.fill10 = 65535u; u.flow10 = 65535u; u.tr = 255u;
-        sweep("ui 最大", w_ui, &u, "[ui] scr=standby set=65535 bath10=65535 fill10=65535 flow10=65535 tr=255 btn=none ph=none\r\n", RX_UI);
-        {   /* NULL 引数は失敗(0)・buf[0]='\0' */
-            char b[64]; applog_ui_t z = u;
-            memset(b, POISON, sizeof(b)); CHECK_EQ(applog_fmt_ui(b, sizeof(b), NULL), 0); CHECK(b[0] == '\0');
-            z.scr = NULL; memset(b, POISON, sizeof(b)); CHECK_EQ(applog_fmt_ui(b, sizeof(b), &z), 0); CHECK(b[0] == '\0');
-            z = u; z.btn = NULL; memset(b, POISON, sizeof(b)); CHECK_EQ(applog_fmt_ui(b, sizeof(b), &z), 0);
-            z = u; z.ph = NULL; memset(b, POISON, sizeof(b)); CHECK_EQ(applog_fmt_ui(b, sizeof(b), &z), 0);
-        }
         p.n = 50u; p.a = 4000u; p.b = 8200u; p.c = 9600u;
         sweep("perf", w_perf, &p, "[perf] n=50 copy_us=4000 home_us=8200 slide_us=9600\r\n", RX_PERF);
         p.n = 4294967295u; p.a = 4294967295u; p.b = 0u; p.c = 1u;
@@ -361,15 +315,10 @@ int main(void)
     TEST("U-H1 新しい行の長さ: すべて APPLOG_LINE_MAX 未満(最大値で)");
     {
         char b[APPLOG_LINE_MAX];
-        perf_t p; applog_ui_t u;
+        perf_t p;
         size_t n;
-        n = applog_fmt_ev_scr(b, sizeof(b), "reheat", "standby", "touch"); CHECK(n > 0u && n < APPLOG_LINE_MAX);
-        n = applog_fmt_ev_btn(b, sizeof(b), "h_reheat", "down", "touch"); CHECK(n > 0u && n < APPLOG_LINE_MAX);
-        n = applog_fmt_ev_set(b, sizeof(b), 4294967295u, "touch"); CHECK(n > 0u && n < APPLOG_LINE_MAX);
+        n = applog_fmt_ev_tap(b, sizeof(b), "touch"); CHECK(n > 0u && n < APPLOG_LINE_MAX);
         p.n = p.a = p.b = p.c = 4294967295u; n = applog_fmt_perf(b, sizeof(b), p.n, p.a, p.b, p.c); CHECK(n > 0u && n < APPLOG_LINE_MAX);
-        u.scr = "standby"; u.btn = "h_reheat"; u.ph = "press"; u.set = u.bath10 = u.fill10 = u.flow10 = 65535u; u.tr = 255u;
-        n = applog_fmt_ui(b, sizeof(b), &u); CHECK(n > 0u && n < 130u);
-        printf("  (実測) [ui] 最長 = %zu バイト(設計の見積: 約 110)\n", n);
     }
 
     TEST("U-H3 引数不正(NULL / size=0)と、失敗時の buf[0]");
@@ -382,14 +331,9 @@ int main(void)
         CHECK_EQ(applog_fmt_init(NULL, 64u, "lcd", true, 0u, 0u), 0);
         CHECK_EQ(applog_fmt_state(NULL, 64u, "hb", &s, false), 0);
         CHECK_EQ(applog_fmt_scan(NULL, 64u, 1u, a), 0);
-        CHECK_EQ(applog_fmt_ev(NULL, 64u, 1u, "uart"), 0);
+        CHECK_EQ(applog_fmt_ev_tap(NULL, 64u, "uart"), 0);
         CHECK_EQ(applog_fmt_err(NULL, 64u, 1u, 1u), 0);
         CHECK_EQ(applog_fmt_help(NULL, 64u), 0);
-        CHECK_EQ(applog_fmt_ev_scr(NULL, 64u, "a", "b", "c"), 0);
-        CHECK_EQ(applog_fmt_ev_btn(NULL, 64u, "a", "b", "c"), 0);
-        CHECK_EQ(applog_fmt_ev_set(NULL, 64u, 1u, "c"), 0);
-        CHECK_EQ(applog_fmt_ev_done(NULL, 64u, "fill"), 0);
-        CHECK_EQ(applog_fmt_ev_demo(NULL, 64u, "start", "c"), 0);
         CHECK_EQ(applog_fmt_perf(NULL, 64u, 1u, 1u, 1u, 1u), 0);
         memset(buf, POISON, sizeof(buf));
         CHECK_EQ(applog_fmt_state(buf, sizeof(buf), "hb", NULL, false), 0);      /* 必須ポインタ NULL */
@@ -399,7 +343,7 @@ int main(void)
                  strlen("[?] tick=1 scr=0 demo=0 frm=0 uf=0 err=0 detail=0 pts=0 x=0 y=0 i2c_fail=0 streak=0 found=0 drop=0\r\n"));
         CHECK(strncmp(g_one, "[?] tick=1", 10) == 0);
         /* 失敗後に成功すれば、前の失敗の影響が残らない */
-        CHECK_EQ(applog_fmt_help(g_one, sizeof(g_one)), strlen("[help] n=next p=prev s=state d=demo +=up -=down x=wx ?=help\r\n"));
+        CHECK_EQ(applog_fmt_help(g_one, sizeof(g_one)), strlen("[help] s=state x=update ?=help\r\n"));
     }
 
     TEST("U-H4 boot: build の空白・制御文字・長さ・NULL");
@@ -458,7 +402,7 @@ int main(void)
     }
 
     /* ===== U-H5: コマンド解釈 ===== */
-    TEST("U-H5 applog_cmd_parse: n p s ? d + - x と その他の全値");
+    TEST("U-H5 applog_cmd_parse: n p s ? d x と その他の全値(+ - は製品から廃止 = NONE)");
     {
         int ch, other_nonnone = 0;
         CHECK_EQ(applog_cmd_parse('n'), APPLOG_CMD_NEXT);
@@ -466,8 +410,8 @@ int main(void)
         CHECK_EQ(applog_cmd_parse('s'), APPLOG_CMD_STATE);
         CHECK_EQ(applog_cmd_parse('?'), APPLOG_CMD_HELP);
         CHECK_EQ(applog_cmd_parse('d'), APPLOG_CMD_DEMO);
-        CHECK_EQ(applog_cmd_parse('+'), APPLOG_CMD_PLUS);
-        CHECK_EQ(applog_cmd_parse('-'), APPLOG_CMD_MINUS);
+        CHECK_EQ(applog_cmd_parse('+'), APPLOG_CMD_NONE);
+        CHECK_EQ(applog_cmd_parse('-'), APPLOG_CMD_NONE);
         CHECK_EQ(applog_cmd_parse('D'), APPLOG_CMD_NONE);
         CHECK_EQ(applog_cmd_parse('='), APPLOG_CMD_NONE);
         CHECK_EQ(applog_cmd_parse('_'), APPLOG_CMD_NONE);
@@ -486,7 +430,7 @@ int main(void)
         CHECK_EQ(applog_cmd_parse('1'), APPLOG_CMD_NONE);
         /* -300 .. 600 を総当たり */
         for (ch = -300; ch <= 600; ch++) {
-            if ((ch == 'n') || (ch == 'p') || (ch == 's') || (ch == '?') || (ch == 'd') || (ch == '+') || (ch == '-') || (ch == 'x')) { continue; }
+            if ((ch == 'n') || (ch == 'p') || (ch == 's') || (ch == '?') || (ch == 'd') || (ch == 'x')) { continue; }
             if (applog_cmd_parse(ch) != APPLOG_CMD_NONE) { other_nonnone++; }
         }
         CHECK_EQ(other_nonnone, 0);

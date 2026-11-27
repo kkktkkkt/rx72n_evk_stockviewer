@@ -11,9 +11,8 @@
 #define LCD_HEIGHT           (272u)
 #define LCD_FB0_ADDR         (0x00800000u)                  /* RAM2 先頭: 面0 */
 
-/* ---- CLUT8 表示(docs/design.md §19, §20)。製品の面は 8bpp・行幅 512。2面で 278,528 バイト(RAM2 の空き 245,760) ---- */
-#include "clut8_sw.h"                                      /* APP_CLUT8_TEST(既定 0。1 で実験ファーム: 製品の画面は出ない)はここで定義 */
-#include "wifi_sw.h"                                       /* APP_WIFI_TEST(既定 0。1 で Wi-Fi 試作ファーム: 製品の画面は出ない)はここで定義 */
+/* ---- CLUT8 表示(docs/design.md §20)。製品の面は 8bpp・行幅 512。2面で 278,528 バイト(RAM2 の空き 245,760) ---- */
+#include "wifi_sw.h"                                       /* APP_WIFI_TEST(既定 0。1 で Wi-Fi の検証専用ファーム: 製品の画面は出ない)・APP_WX などはここで定義 */
 #define LCD_C8_STRIDE        (512u)                          /* CLUT8 の行幅(64の倍数で表示幅以上の最小値) */
 #define LCD_C8_FB_BYTES      (LCD_C8_STRIDE * LCD_HEIGHT)    /* 139,264 */
 #ifndef LCD_C8_FB_A_ADDR                                     /* ホスト試験だけが差し替える */

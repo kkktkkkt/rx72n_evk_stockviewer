@@ -568,3 +568,40 @@ cd D:\workspace\rx72n\rx72n_gcc
 ### 注意
 - 最終成果物(`HardwareDebug\`)は既定構成(`APP_WX` = 0)。`APP_WX` = 1 の ELF は上書きで残していない。`APP_WX` = 1 の成果物には、Wi-Fi の設定が入りうるので、残すなら `jobs\` 以下へ退避すること(今回は退避していない)。
 - 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。
+
+## 追記: 2026-11-27 18:18〜18:19 (JST) Phase 4(結合)後の既定構成ビルド(ビルド担当)
+
+前提: e2studio / e2studioc / make / rfp-cli / e2-server-gdb / rx-elf-gdb のプロセス無し。`jobs/runner.alive` 18:18:04(新しい)、`jobs/inbox` 空。`src/app/wifi_sw.h` は未変更(`APP_WX` = (1) の既定、`APP_STK_PREVIEW` = (0)、`APP_WIFI_TEST` = (0)、`APP_WIFI_AUTOSTART` = (0))。`wifi_secret.h` は開いていない。
+
+| 時刻(JST) | コマンド(`tools/submit-job.sh`) | 結果 | 備考 |
+|---|---|---|---|
+| 18:18:09〜18:18:34 | `build '{"mode":"Headless"}' 400`(ジョブ `181809-build`、exit 0、24 秒) | **成功**(`Build Finished. 0 errors, 0 warnings`) | **makefile は自動で再生成された**(`HardwareDebug/makefile` と `src/app/subdir.mk` が 18:18:28)。手動の refresh・`-import` のやり直し・生成ファイルの削除は不要だった。`subdir.mk` に `clut8_*` `nav_logic` の参照は無い。再コンパイルは 16 ファイル(`touch_decode` `app_logq` `app_logfmt` `ui_preview` `ui_gfx_data` `ui_layout` `app_debug` `ui_logic` `ui_render` `lcd_panel` `app_main` `touch_ft5x` `wifi_at` `wx_core` `wifi_core` `ui_strips`)。`stk_core.c` は前回(17:55)から変更なしのため再コンパイルされず |
+| 18:19:17〜18:19:43 | `build '{"mode":"Headless","clean":true}' 400`(ジョブ、exit 0、28 秒) | **成功**(`0 errors, 2 warnings`) | 全数確認。警告 2 件はいずれも既知の smc_gen(`-Wstack-usage=100` 非対応): `src/smc_gen/r_bsp/mcu/all/r_bsp_common.c:105` `delay_wait`、`src/smc_gen/r_bsp/mcu/all/r_rx_intrinsic_functions.c:347` `R_BSP_ChangeToUserMode`。`src/app/` の警告は 0 件(`wx_fmt_ok` の 116 バイト警告は解消済み) |
+
+### 成果物(clean ビルド 18:19:43 JST、増分の 18:18:31 と同一)
+| 項目 | 値 | 前回の既定(2026-11-27 17:56、`APP_WX` = 0) | 前回の `APP_WX` = 1(17:55) |
+|---|---|---|---|
+| `HardwareDebug\rx72n_stockview.elf` | 1,759,408 バイト(18:19:43) | 1,617,840 | 1,775,228 |
+| `HardwareDebug\rx72n_stockview.mot` | 1,499,330 バイト(18:19:43) | 1,453,842 | 未記録 |
+| `rx-elf-size` text / data / bss | **496,844 / 2,876 / 22,592** | 481,684 / 2,876 / 18,368 | 498,480 / 2,876 / 22,592 |
+| ROM(text + data) | 499,720 | 484,560 | 501,356 |
+
+- 前回の既定(`APP_WX` = 0)との差: text **+15,160**、data 0、bss **+4,224**(`wifi_at` `wx_core` `wifi_core` `stk_core` の追加分)。
+- 前回の `APP_WX` = 1 との差: text **−1,636**、bss 0。Phase 4 の変更(旧 UI の削除、`ui_logic` の縮小など)による差と見込むが、内訳は未分解。
+- ROM 使用量は 499,720 バイト(4MB の約 12%)。
+
+### 旧 UI のシンボルと新モジュールの確認(`rx-elf-nm`、`D:\Renesas\GNURX\GCC_fo_ Renesas_RX_14.2.0.202607-GNURX-ELF\rx-elf\rx-elf\bin\`)
+- `_nav_` `_clut8_` で始まるシンボル: **0 件**(9,542 シンボル中)。
+- 入っているもの: `_stk_calc` `_stk_fmt_price` `_stk_fmt_pct` `_stk_fmt_amt` `_stk_row_kind` `_stk_market` `_stk_view_make` `_stk_ui`(T)、`_ui_render`、`_wx_` 39 件、`_wifi_` 26 件(`_wifi_core_init` `_wifi_core_poll` など)、`_wx_sched` 10 件。
+- 前回 10:52 にあった `_nav_init` `_nav_step` など 6 件は消えた(`nav_logic.c` の削除が反映された)。
+- `rx72n_stockview.map` に `nav_logic` `clut8` の配置は無し。
+
+### 生成物の残り(参考)
+- `HardwareDebug/src/app/` に `clut8_pat.*` `clut8_test.*` `nav_logic.*`(`.d` `.o` `.o.in`)と、`HardwareDebug/*.lst` の一部が残っている。どの makefile からも参照されず、リンクにも入っていない(`map` に無い)ため無害。`HardwareDebug` は `.gitignore` 済みのため、今回は削除していない。
+- RAM2(`0x00800000` 台)の出力セクションは未確認(この手順では `objdump` を実行していない)。
+
+### 秘密情報
+- `APP_WX` = 1 の既定の ELF・MOT には、`wifi_secret.h` の Wi-Fi 設定(SSID・パスワード)が入りうる(設計 §21.5)。値の確認はしていない(`wifi_secret.h` は開いていない)。**`HardwareDebug\` の成果物は外へ渡さない。**
+
+### 注意
+- 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。`wifi_sw.h` は未変更。ランナーは起動したまま。

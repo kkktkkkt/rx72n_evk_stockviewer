@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include "touch_decode.h"
+#include "ui_logic.h"
 #include "test_framework.h"
 
 static void fill_out(nav_sample_t *o)
@@ -92,18 +93,27 @@ static void test_null(void)
     CHECK_EQ(o.points, 0);
 }
 
-static void test_to_nav_integration(void)
+static void test_to_ui_integration(void)
 {
-    /* 異常標本(false)を nav に渡さない前提(app_main)。ここでは decode の出力が nav に通ることだけ確認 */
-    uint8_t raw[5] = {1u, 0x01u, 0xDFu, 0x00u, 0x10u};   /* x=479 */
-    nav_sample_t s;
-    nav_t n;
-    TEST("decode 出力を nav_update に通す(右端 x=479 -> 次へ)");
-    nav_init(&n, 3u, 479u);
+    /* 異常標本(false)は ui_update に渡さない前提(app_main)。ここでは decode の出力が、画面のどこでもタップ 1 回になることを確認 */
+    uint8_t raw[5] = {1u, 0x01u, 0xDFu, 0x00u, 0x10u};   /* x=479(右端) */
+    uint8_t none[5] = {0u, 0u, 0u, 0u, 0u};
+    nav_sample_t s, r;
+    ui_t u;
+    ui_ev_t ev;
+    unsigned k;
+    TEST("decode 出力を ui_update に通す(右端 x=479 の押下 2 標本 + 離し 3 標本 -> UI_EV_TAP 1 回。座標は使わない)");
+    ui_init(&u, 0u);
     CHECK(touch_decode(raw, &s));
-    CHECK(!nav_update(&n, &s, 1000u));
-    CHECK(nav_update(&n, &s, 1010u));
-    CHECK_EQ(nav_index(&n), 1);
+    CHECK(touch_decode(none, &r));
+    CHECK(s.pressed && !r.pressed);
+    for (k = 0u; k < UI_TAP_DOWN_N; k++) { ui_update(&u, &s, 1000u + (k * NAV_SAMPLE_MS)); }
+    CHECK(!ui_event_pop(&u, &ev));
+    for (k = 0u; k < UI_TAP_UP_N; k++) { ui_update(&u, &r, 1100u + (k * NAV_SAMPLE_MS)); }
+    CHECK(ui_event_pop(&u, &ev));
+    CHECK_EQ(ev.type, UI_EV_TAP);
+    CHECK_EQ(ev.src, UI_SRC_TOUCH);
+    CHECK(!ui_event_pop(&u, &ev));
 }
 
 int main(void)
@@ -111,6 +121,6 @@ int main(void)
     test_known();
     test_all_counts();
     test_null();
-    test_to_nav_integration();
+    test_to_ui_integration();
     TEST_REPORT("test_touch_decode");
 }

@@ -164,113 +164,12 @@ size_t applog_fmt_scan(char *buf, size_t size, uint8_t count, const uint8_t *add
     return pos + 2u;
 }
 
-size_t applog_fmt_ev(char *buf, size_t size, uint8_t index, const char *src)
+size_t applog_fmt_ev_tap(char *buf, size_t size, const char *src)
 {
     if (!arg_ok(buf, size)) {
         return 0u;
     }
-    return fin(buf, size, snprintf(buf, size, "[ev] img=%u src=%s\r\n",
-                                   (unsigned)index, (src != NULL) ? src : "?"));
-}
-
-/* pos の後ろに、src があれば " src=<src>" を付けて \r\n で終える */
-static size_t fin_src(char *buf, size_t size, size_t pos, const char *src)
-{
-    int n = (src != NULL) ? snprintf(buf + pos, size - pos, " src=%s\r\n", src)
-                          : snprintf(buf + pos, size - pos, "\r\n");
-
-    if (!adv(n, size, &pos)) {
-        return fin(buf, size, 0);
-    }
-    return pos;
-}
-
-size_t applog_fmt_ev_scr(char *buf, size_t size, const char *to, const char *from, const char *src)
-{
-    size_t pos = 0u;
-
-    if (!arg_ok(buf, size)) {
-        return 0u;
-    }
-    if (!adv(snprintf(buf, size, "[ev] scr=%s from=%s", (to != NULL) ? to : "?", (from != NULL) ? from : "?"),
-             size, &pos)) {
-        return fin(buf, size, 0);
-    }
-    return fin_src(buf, size, pos, src);
-}
-
-size_t applog_fmt_ev_btn(char *buf, size_t size, const char *name, const char *st, const char *src)
-{
-    size_t pos = 0u;
-
-    if (!arg_ok(buf, size)) {
-        return 0u;
-    }
-    if (!adv(snprintf(buf, size, "[ev] btn=%s st=%s", (name != NULL) ? name : "?", (st != NULL) ? st : "?"),
-             size, &pos)) {
-        return fin(buf, size, 0);
-    }
-    return fin_src(buf, size, pos, src);
-}
-
-size_t applog_fmt_ev_set(char *buf, size_t size, uint32_t v, const char *src)
-{
-    size_t pos = 0u;
-
-    if (!arg_ok(buf, size)) {
-        return 0u;
-    }
-    if (!adv(snprintf(buf, size, "[ev] set=%lu", (unsigned long)v), size, &pos)) {
-        return fin(buf, size, 0);
-    }
-    return fin_src(buf, size, pos, src);
-}
-
-size_t applog_fmt_ev_done(char *buf, size_t size, const char *what)
-{
-    size_t pos = 0u;
-
-    if (!arg_ok(buf, size)) {
-        return 0u;
-    }
-    if (!adv(snprintf(buf, size, "[ev] done=%s", (what != NULL) ? what : "?"), size, &pos)) {
-        return fin(buf, size, 0);
-    }
-    return fin_src(buf, size, pos, NULL);
-}
-
-size_t applog_fmt_ev_demo(char *buf, size_t size, const char *what, const char *src)
-{
-    size_t pos = 0u;
-
-    if (!arg_ok(buf, size)) {
-        return 0u;
-    }
-    if (!adv(snprintf(buf, size, "[ev] demo=%s", (what != NULL) ? what : "?"), size, &pos)) {
-        return fin(buf, size, 0);
-    }
-    return fin_src(buf, size, pos, src);
-}
-
-size_t applog_fmt_ui(char *buf, size_t size, const applog_ui_t *u)
-{
-    size_t pos = 0u;
-
-    if (!arg_ok(buf, size) || (u == NULL) || (u->scr == NULL) || (u->btn == NULL) || (u->ph == NULL)) {
-        return 0u;
-    }
-    if (!adv(snprintf(buf, size, "[ui] scr=%s set=%u bath10=%u", u->scr, (unsigned)u->set, (unsigned)u->bath10),
-             size, &pos)) {
-        return fin(buf, size, 0);
-    }
-    if (!adv(snprintf(buf + pos, size - pos, " fill10=%u flow10=%u tr=%u", (unsigned)u->fill10,
-                      (unsigned)u->flow10, (unsigned)u->tr), size, &pos)) {
-        return fin(buf, size, 0);
-    }
-    if (!adv(snprintf(buf + pos, size - pos, " btn=%s ph=%s\r\n", u->btn, u->ph), size, &pos)) {
-        return fin(buf, size, 0);
-    }
-    return pos;
+    return fin(buf, size, snprintf(buf, size, "[ev] btn=tap src=%s\r\n", (src != NULL) ? src : "?"));
 }
 
 size_t applog_fmt_perf(char *buf, size_t size, uint32_t n, uint32_t copy_us, uint32_t home_us, uint32_t slide_us)
@@ -297,7 +196,7 @@ size_t applog_fmt_help(char *buf, size_t size)
     if (!arg_ok(buf, size)) {
         return 0u;
     }
-    return fin(buf, size, snprintf(buf, size, "[help] n=next p=prev s=state d=demo +=up -=down x=wx ?=help\r\n"));
+    return fin(buf, size, snprintf(buf, size, "[help] s=state x=update ?=help\r\n"));
 }
 
 applog_cmd_t applog_cmd_parse(int ch)
@@ -308,8 +207,6 @@ applog_cmd_t applog_cmd_parse(int ch)
     case 's': return APPLOG_CMD_STATE;
     case '?': return APPLOG_CMD_HELP;
     case 'd': return APPLOG_CMD_DEMO;
-    case '+': return APPLOG_CMD_PLUS;
-    case '-': return APPLOG_CMD_MINUS;
     case 'x': return APPLOG_CMD_WX;
     default:  return APPLOG_CMD_NONE;
     }

@@ -411,17 +411,6 @@ void stk_ui(stk_view_t *out, uint32_t now_ms)
     stk_view_make(out, (uint8_t)wx_sched_net(&s_sched), wx_sched_busy(&s_sched) ? 1u : 0u, wx_sched_failed_mask(&s_sched), s_slot,
                   now_ms, wx_clock_min(&s_clk, now_ms), s_upd_min);
 }
-
-/* 暫定(Phase 4 で app_main が stk_ui に切り替えたら、ui_wx_t と一緒に消す): 旧 UI の枠(Wi-Fi の状態・時計・更新時刻)だけ */
-void wx_ui(ui_wx_t *u, uint32_t now_ms)
-{
-    memset(u, 0, sizeof *u);
-    u->net       = (uint8_t)wx_sched_net(&s_sched);                     /* wx_net_t = UI_NET_*(同じ並び) */
-    u->busy      = wx_sched_busy(&s_sched) ? 1u : 0u;
-    u->clk_ext   = 1u;
-    u->upd_min   = s_upd_min;
-    u->clock_min = wx_clock_min(&s_clk, now_ms);
-}
 #endif /* APP_WX_PRODUCT */
 
 #if APP_WIFI_TEST

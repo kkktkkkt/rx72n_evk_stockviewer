@@ -30,25 +30,14 @@ typedef struct {
     uint8_t  found_count;
 } applog_state_t;
 
-/* [ui] 行(s コマンドの時だけ)の値。文字列はプログラム内の定数だけを渡す */
-typedef struct {
-    const char *scr;            /* home fill reheat usage standby */
-    const char *btn;            /* ボタン名 または none */
-    const char *ph;             /* none press flash */
-    uint16_t    set, bath10, fill10, flow10;
-    uint8_t     tr;
-} applog_ui_t;
-
 typedef enum {
     APPLOG_CMD_NONE = 0,
-    APPLOG_CMD_NEXT,            /* 'n' */
-    APPLOG_CMD_PREV,            /* 'p' */
+    APPLOG_CMD_NEXT,            /* 'n' 専用モード(APP_WIFI_TEST)だけ。製品は無視 */
+    APPLOG_CMD_PREV,            /* 'p' 同上 */
     APPLOG_CMD_STATE,           /* 's' */
     APPLOG_CMD_HELP,            /* '?' */
-    APPLOG_CMD_DEMO,            /* 'd' */
-    APPLOG_CMD_PLUS,            /* '+' */
-    APPLOG_CMD_MINUS,           /* '-' */
-    APPLOG_CMD_WX               /* 'x' = 更新ボタン h_wx の仮想タップ(専用モードでは天気の取得) */
+    APPLOG_CMD_DEMO,            /* 'd' 同上 */
+    APPLOG_CMD_WX               /* 'x' = 更新(製品はタップと同じ。専用モードは取得 1 回) */
 } applog_cmd_t;
 
 /* すべての applog_fmt_*:
@@ -69,18 +58,8 @@ size_t applog_fmt_state(char *buf, size_t size, const char *tag, const applog_st
 /* "[scan] n=<count> a0=0x38 a1=0x..\r\n"  count は 4 を超えたら 4。count > 0 のとき addr が必要 */
 size_t applog_fmt_scan(char *buf, size_t size, uint8_t count, const uint8_t *addr);
 
-/* "[ev] img=<index> src=<src>\r\n"  src は "touch" / "uart"(P2 ギャラリー用) */
-size_t applog_fmt_ev(char *buf, size_t size, uint8_t index, const char *src);
-
-/* 製品デモの [ev](design-uart.md §10.3)。文字列引数はプログラム内の定数。src が NULL なら " src=" を付けない */
-size_t applog_fmt_ev_scr(char *buf, size_t size, const char *to, const char *from, const char *src);  /* [ev] scr=<to> from=<from> src=<src> */
-size_t applog_fmt_ev_btn(char *buf, size_t size, const char *name, const char *st, const char *src);  /* [ev] btn=<name> st=<down|act> src=<src> */
-size_t applog_fmt_ev_set(char *buf, size_t size, uint32_t n, const char *src);                        /* [ev] set=<n> src=<src> */
-size_t applog_fmt_ev_done(char *buf, size_t size, const char *what);                                  /* [ev] done=<fill|reheat> */
-size_t applog_fmt_ev_demo(char *buf, size_t size, const char *what, const char *src);                 /* [ev] demo=<start|end|abort> [src=..] */
-
-/* "[ui] scr=.. set=.. bath10=.. fill10=.. flow10=.. tr=.. btn=.. ph=..\r\n" */
-size_t applog_fmt_ui(char *buf, size_t size, const applog_ui_t *u);
+/* "[ev] btn=tap src=<src>\r\n"(タップ 1 回。src は "touch" / "uart"。プログラム内の定数だけを渡す。NULL は "?"。docs/design.md §7.5) */
+size_t applog_fmt_ev_tap(char *buf, size_t size, const char *src);
 
 /* "[perf] n=<n> copy_us=<..> home_us=<..> slide_us=<..>\r\n" */
 size_t applog_fmt_perf(char *buf, size_t size, uint32_t n, uint32_t copy_us, uint32_t home_us, uint32_t slide_us);
@@ -88,10 +67,10 @@ size_t applog_fmt_perf(char *buf, size_t size, uint32_t n, uint32_t copy_us, uin
 /* "[err] code=<code> detail=<detail>\r\n" */
 size_t applog_fmt_err(char *buf, size_t size, uint32_t code, uint32_t detail);
 
-/* "[help] n=next p=prev s=state d=demo +=up -=down x=wx ?=help\r\n" */
+/* "[help] s=state x=update ?=help\r\n"(製品の UART コマンド。docs/design.md §7.3) */
 size_t applog_fmt_help(char *buf, size_t size);
 
-/* 受信1バイト -> コマンド。'n' 'p' 's' '?' 'd' '+' '-' 'x' 以外(-1、範囲外を含む)は NONE */
+/* 受信1バイト -> コマンド。'n' 'p' 's' '?' 'd' 'x' 以外(-1、範囲外を含む)は NONE */
 applog_cmd_t applog_cmd_parse(int ch);
 
 /* (uint32_t)(now - last) >= period なら 1。32bit一周でも成立 */

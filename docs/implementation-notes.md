@@ -1,6 +1,40 @@
 # 実装メモ(コーディング担当)
 
-最終更新: 2026-11-27。状態: **Phase 0(TLS の実機検証用の最小の変更)・Phase 1(表示)・Phase 2(数値と解析)・Phase 3(取得と予定表)を実装済み。Phase 4 以降は未着手。** 実機ではビルドも実行もしていない(ホスト試験のみ)。
+最終更新: 2026-11-27。状態: **Phase 0(TLS の実機検証用の最小の変更)・Phase 1(表示)・Phase 2(数値と解析)・Phase 3(取得と予定表)・Phase 4(結合)を実装済み。Phase 5(実機の試験)は未着手。** 実機ではビルドも実行もしていない(ホスト試験と、RX 用 GCC での単体のコンパイルだけ)。
+
+## Phase 4(結合): 実装したこと
+
+| ファイル | 内容 |
+|---|---|
+| `src/app/app_main.c` | `stk_ui()` の値を `ui_set_view` → `ui_render` へ(10ms ごと。変わった時だけ裏面に描いて入れ替え)。`view_from_wx`・`ui_wx_t`・`wx_ui` の暫定の経路を削除。`APP_CLUT8_TEST` の分岐を削除。タップ = `[ev] btn=tap src=<touch\|uart>`(`applog_fmt_ev_tap`)+ `wx_request(src)`。`APP_STK_PREVIEW` は今までどおり(取得より優先)。`APP_WX = 0` は `ui_init` の値(起動中・オフライン)のまま |
+| `src/app/wifi_sw.h` | **`APP_WX` の既定を 1**(ただし `APP_STK_PREVIEW = 1` のときの既定は 0 = ネットワークなし。明示すれば上書きできる)。`APP_STK_FAULT`(0〜3。範囲外は `#error`)を追加。`clut8_sw.h` の include と `APP_CLUT8_TEST` の #error を削除。`wifi_secret.h` が無い・SCI1 を開けないときの OFF は `wifi_at.c` のまま(変更なし) |
+| `src/app/wx_core.c` | `APP_STK_FAULT = n`(1〜3): 銘柄 n−1 の要求だけ、銘柄コードの後ろに `ZZ`(存在しない銘柄 → Yahoo の 404 を期待。**実機・Yahoo では未確認**)。0 のとき要求は今までと同じ(144 / 145 / 145)。`wx_fmt_ok` の `snprintf` を 2 回に分けた(下) |
+| `src/app/wifi_at.h/.c` | `wx_ui` を削除(`ui_logic.h` の include も不要に) |
+| `src/app/ui_logic.h` | `ui_wx_t`・`UI_NET_*` を削除(`ui_logic.c` は 104 行。§6.2 のとおり、タップ検出と表示キーだけ) |
+| `src/app/app_logfmt.h/.c` | `applog_fmt_ev_tap`(`[ev] btn=tap src=<src>`)を追加。旧 UI の `applog_fmt_ev` `_ev_scr` `_ev_btn` `_ev_set` `_ev_done` `_ev_demo`・`applog_fmt_ui`・`applog_ui_t` を削除。`APPLOG_CMD_PLUS` `_MINUS`(`+` `-`)を削除(無視する文字になる)。**`[help]` を `s=state x=update ?=help` に変更**(製品では `n p d + -` が効かないため) |
+| `src/app/nav_logic.h` | `nav_sample_t` と `NAV_SAMPLE_MS` だけ。`nav_logic.c` を削除 |
+| `src/app/lcd_panel.c`、`board_pins.h` | `APP_CLUT8_TEST` の分岐・`clut8_sw.h` の include を削除 |
+| 削除 | `src/app/clut8_pat.c/.h`・`clut8_test.c/.h`・`clut8_sw.h`・`nav_logic.c`、`tools/gen_ui_assets.py`・`fb2png.py`・`wx_compare_p2b.py`・`wx_mock.py`・`clut8_ref.c`、`tools/assets/bath/`(旧 UI の生成物・プレビュー)、`tests/host/test_nav.c`・`test_nav_step.c`・`test_clut8_cfg.c`・`test_clut8_pat.c`・`judge_ut1.py` |
+| 試験 | `test_ui_tap.c`(H-12。S2)、`test_app_main.c`(結合。S34。5 通りのビルド)、`test_stk_fault.c`(S35)、S36(変異試験 4 件)、S37(旧 UI の残骸なし)。`test_logfmt.c`・`test_touch_decode.c`・`test_wifi_at.c`・`run.sh` を更新(S18 = CLUT8 を削除、S7 に H-13 のスイッチの組み合わせを追加) |
+
+### スタック警告(`wx_fmt_ok`)
+
+`wx_core.c` の `wx_fmt_ok`(`-Wstack-usage=100` に対して 116 バイト)は、15 個の引数を 1 回の `snprintf` に渡していたため(RX は 5 個目以降の引数をスタックに積む)。**2 回の `snprintf` に分けて 88 バイトにした。** RX 用 GCC 14.2(`HardwareDebug` と同じ `-Og -misa=v3 -mlittle-endian-data -std=gnu99 -Wstack-usage=100`)で `src/app/*.c` の全部を、既定 / `APP_WX=0` / `APP_STK_PREVIEW=1` / `APP_WIFI_TEST=1` / `APP_STK_FAULT=2` の 5 通りで 1 ファイルずつ `-c` でコンパイルして確かめた(警告 0、最大は `wx_fmt_ok` と `gfx_a8` の 88)。ヘッドレスビルド(リンク・ROM / RAM のサイズ)は行っていない。
+
+### 設計から外れた点・判断が要る点
+
+1. **`APP_STK_PREVIEW = 1` のときの `APP_WX` の既定は 0**(設計 §7.4 は `APP_WX` の既定 1、プレビューは「ネットワークなし」。既定 1 のままだとプレビューのビルドが Wi-Fi に接続してしまうため)。`-DAPP_WX=1` で明示すれば両方動く(S7 で確認)。
+2. **`[help]` の文面を変えた**(設計 §7.3 は `x` `s` `?` だけとしているが、`[help]` の文面は規定なし)。
+3. **`n` `p` `d` は `applog_cmd_parse` に残した**(専用モード `APP_WIFI_TEST` の `wifi_at.c` が使うため)。製品の `app_main.c` は `x` `s` `?` だけ処理し、ほかは無視する(試験 S34)。`+` `-` だけを削除した。
+4. **`APP_STK_FAULT` の壊し方**: 銘柄コードの後ろに `ZZ`(`%5EN225ZZ` など)。Yahoo が 404 を返すかは未確認(U-6 の最初に見る)。返さなければ、`wx_build_request_t` の 1 行を直す。
+5. **`tools/img2c.py`・`tools/prepare_slide.py` とその試験(S5)は残した**(旧ギャラリー用だが、設計 §7.1 の削除の一覧に無く、旧 UI 専用とは言い切れない。不要なら削除)。`tools/c8png.py` は `png` `cmp` `cmpface` `sheet` で使うので残した。`tools/gdb/` の旧 UI 用スクリプト(`mi-demo-fb*` `mi-press-fb*` `mi-slide-fb-c8` ほか)は、デバッグ担当の持ち物として触っていない(`fb2png.py` を参照するコメントが残る)。`tests/host/last-run.log` は旧 UI 時代の古い実行ログ(`run.sh` は書かない)。
+6. 製品で押下中の 2 点目(押下確定後に 2 点目が触れた場合)は、`ui_update` が無視せず、そのままタップとして扱う(設計 §6.1 は押下の開始時の 2 点以上だけを無視と読んだ)。変更していない。
+
+### Phase 5 に残したこと
+
+- **`HardwareDebug` のビルド生成物(`subdir.mk` など)が、削除したファイル(`clut8_*.c` `nav_logic.c`)を参照したまま**。ビルドの前に e² studio / ヘッドレスのプロジェクト更新(refresh)で makefile を作り直す(ビルド担当)。`stk_core.c` `wx_core.c` などの追加分も同じ。
+- RX 用 GCC のリンク・ROM / RAM(P-1〜P-4)。実機の U-1〜U-10・G-1・G-2・V-1〜V-4。`APP_STK_FAULT = 2` の U-6(404 になること)。`[help]` の文面変更に合わせた判定スクリプト(あれば)。
+
 
 ## Phase 0: 変更したファイル(`docs/design.md` §5.5.2 の 0-1〜0-6)
 
@@ -14,6 +48,8 @@
 0-7(`tools/job-runner.ps1` の `tx` 許可リストに `t` `y` `g` `z`)は **デバッグ担当の作業**。まだ。
 
 ## 既定のビルドへの影響
+
+(Phase 0 当時の記述。**Phase 4 で `APP_WX` の既定は 1 になった**。「消える」のは `APP_WX = 0` かつ `APP_WIFI_TEST = 0` のとき。)
 
 `APP_WIFI_TEST = 0` かつ `APP_WX = 0`(既定)では、`wifi_core.c` `wx_core.c` `wifi_at.c` は中身が消える。**ROM・RAM・動作の差は 0**(ホスト試験 S22・S23 が「シンボルが残らない」を確認)。`wifi_sw.h`・`app_main.c` は変えていない。
 
@@ -75,9 +111,9 @@
 5. **`wx_ui` と `ui_wx_t` を残した**(`net` `busy` `clock_min` `upd_min` だけ。`app_main.c` が使うため。Phase 4 で `app_main` が `stk_ui` に切り替えたら、`ui_logic.h` の `ui_wx_t` と一緒に消す)。`app_main.c` / `ui_logic.*` / `wifi_sw.h` は変えていない。
 6. `stk_view_make` を `stk_core` に置いた(設計 §7.1)。`row.stale` / `stale_all` は「1,800 秒以上」(以前の `>` ではなく設計の「以上」)。
 
-### Phase 4 に残したこと
+### Phase 4 に残したこと(→ 上の「Phase 4(結合)」で実装済み)
 
-`app_main.c` の `stk_ui` への切り替え(`view_from_wx` の削除)、`[ev] btn=tap src=...` の書式(`app_logfmt`)、`APP_STK_FAULT`(`wifi_sw.h` と要求のパス。U-6 用)、`APP_WX = 1` を既定に、`ui_logic` の縮小、旧 UI のファイルの削除(`tools/fb2png.py` `gen_ui_assets.py` の天気の名前もそこで)。`docs/design-uart.md` §13(`[wx]`)は旧のまま(設計 §7.5 が優先)。
+`app_main.c` の `stk_ui` への切り替え、`[ev] btn=tap src=...`、`APP_STK_FAULT`、`APP_WX = 1` の既定、`ui_logic` の縮小、旧 UI のファイルの削除。`docs/design-uart.md` §13(`[wx]`)は旧のまま(設計 §7.5 が優先)。
 
 ### 確かめていないこと
 
@@ -183,9 +219,8 @@ RX 用 GCC でのビルド(`-Wstack-usage=100` を含む)。S12(ASan / UBSan)は
 
 ## 残作業(Phase 1 で意図して残したもの)
 
-- **Phase 4 で削除する**: 旧 UI の `nav_logic.c`(`nav_t`・`nav_update`・`nav_step`。`app_main.c` が `nav_logic.h` を include するため ELF に残る)、`clut8_*`、`tools/gen_ui_assets.py`(**実行すると `src/app` の生成物を壊す**)、`tests/host/test_nav*.c`、`test_clut8_*.c`、`tools/fb2png.py`・`tools/wx_compare_p2b.py`(旧 UI 用)。
-- Phase 3: `ui_wx_t` と `wx_ui` の廃止、`[ev] btn=tap src=...` の書式(今は `btn=tap st=act`)。Phase 4: `app_main` の結合、`[perf]` の `slide`(今は 0)。
+Phase 4 で全部実施(旧 UI のファイルの削除、`ui_wx_t` と `wx_ui` の廃止、`[ev] btn=tap src=...`、`app_main` の結合)。`[perf]` の `slide` は 0 のまま(書式は変えない)。
 
 ## 未実装(Phase 1 以降)
 
-銘柄ごとの取得と予定表・`[stk]` ログ・結合(Phase 3 以降)。
+Phase 5(実機の試験)だけ。

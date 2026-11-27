@@ -57,7 +57,7 @@ build_ui_objs() {
   return 0
 }
 
-STDC_FILES="nav_logic touch_decode app_logfmt app_logq gfx ui_logic ui_render stk_core"
+STDC_FILES="touch_decode app_logfmt app_logq gfx ui_logic ui_render stk_core"
 
 # ---------------------------------------------------------------- S1
 if sel S1; then
@@ -81,25 +81,23 @@ fi
 
 # ---------------------------------------------------------------- S2
 if sel S2; then
-  echo "### S2 nav_logic 単体テスト(H1〜H7): 左右半分モード + 次へのみモード(v2 では app_main から使わない。P2 用に残す)"
+  echo "### S2 H-12 タップ検出(ui_logic.c): 押下 2 標本・離し 3 標本で UI_EV_TAP 1 回、2 点以上と 3,000ms 超は無視、連続タップ、座標は使わない、標本なしは状態を変えない、32bit の巻き戻り、イベントキュー 8 件"
   rc=0
-  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_nav.c" "$APP/nav_logic.c" -o "$BUILD/test_nav" || rc=1
-  [ $rc -eq 0 ] && { "$BUILD/test_nav" || rc=1; }
-  cc_nowarn $STD $WARN -DNAV_MODE=1 -I"$APP" -I"$HERE" "$HERE/test_nav.c" "$APP/nav_logic.c" -o "$BUILD/test_nav_next" || rc=1
-  [ -x "$BUILD/test_nav_next" ] && { "$BUILD/test_nav_next" || rc=1; }
+  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_ui_tap.c" "$APP/ui_logic.c" -o "$BUILD/test_ui_tap" || rc=1
+  [ $rc -eq 0 ] && { "$BUILD/test_ui_tap" || rc=1; }
   result S2 $rc
 fi
 
 # ---------------------------------------------------------------- S3
 if sel S3; then
-  echo "### S3 touch_decode 単体テスト(H8)"
+  echo "### S3 touch_decode 単体テスト(H8)と、decode の出力が ui_update で画面のどこでもタップ 1 回になること"
   rc=0
-  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_touch_decode.c" "$APP/touch_decode.c" "$APP/nav_logic.c" -o "$BUILD/test_touch_decode" || rc=1
+  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_touch_decode.c" "$APP/touch_decode.c" "$APP/ui_logic.c" -o "$BUILD/test_touch_decode" || rc=1
   [ $rc -eq 0 ] && { "$BUILD/test_touch_decode" || rc=1; }
   result S3 $rc
 fi
 
-# S4: 旧 UI の画面アセット(gen_ui_assets.py)の検査。S28(gen_stock_assets.py)に置き換え
+# S4: 旧 UI の画面アセットの検査(gen_ui_assets.py は Phase 4 で削除)。S28(gen_stock_assets.py)に置き換え
 
 # ---------------------------------------------------------------- S5
 if sel S5; then
@@ -153,6 +151,12 @@ if sel S7; then
   echo " -- A + APP_STK_PREVIEW=1 (8 状態を 3 秒ごとに表示。H-13)"
   check_hw "A preview1" $RXDEF -DAPP_STK_PREVIEW=1 -I"$APP" $FIT_INC
   check_hw "A preview1 wx1" $RXDEF -DAPP_STK_PREVIEW=1 -DAPP_WX=1 -I"$APP" $FIT_INC
+  echo " -- A + APP_WX = 0 / 1(既定)/ APP_WIFI_TEST = 1 / APP_STK_FAULT = 2 (H-13。app_main.c・lcd_panel.c・touch_ft5x.c・app_debug.c)"
+  check_hw "A wx0" $RXDEF -DAPP_WX=0 -I"$APP" $FIT_INC
+  check_hw "A wx1" $RXDEF -DAPP_WX=1 -I"$APP" $FIT_INC
+  check_hw "A wifitest1" $RXDEF -DAPP_WIFI_TEST=1 -I"$APP" $FIT_INC
+  check_hw "A fault2" $RXDEF -DAPP_STK_FAULT=2 -I"$APP" $FIT_INC
+  check_hw "A preview0 wx0" $RXDEF -DAPP_STK_PREVIEW=0 -DAPP_WX=0 -I"$APP" $FIT_INC
   echo " -- A + APP_PERF_BENCH=0 (計測なし)"
   check_hw "A perf0" $RXDEF -DAPP_PERF_BENCH=0 -I"$APP" $FIT_INC
   echo " -- A + -Wconversion(製品コードの警告のみ数える。情報用)"
@@ -170,7 +174,7 @@ fi
 
 # ---------------------------------------------------------------- S8
 if sel S8; then
-  echo "### S8 app_logfmt 単体テスト(U-H1〜U-H6 + design-uart.md §10.6: 各行の文字列・境界値・小バッファ・build・コマンド・周期・新しい [ev] [ui] [perf])"
+  echo "### S8 app_logfmt 単体テスト(U-H1〜U-H6: 各行の文字列・境界値・小バッファ・build・コマンド・周期・[ev] btn=tap src=...・[help]・[perf])"
   rc=0
   cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_logfmt.c" "$APP/app_logfmt.c" -o "$BUILD/test_logfmt" || rc=1
   [ $rc -eq 0 ] && { "$BUILD/test_logfmt" || rc=1; }
@@ -179,12 +183,10 @@ fi
 
 # ---------------------------------------------------------------- S9
 if sel S9; then
-  echo "### S9 app_logq 単体テスト(U-H7)と nav_step 単体テスト(U-H8)"
+  echo "### S9 app_logq 単体テスト(U-H7)"
   rc=0
   cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_logq.c" "$APP/app_logq.c" -o "$BUILD/test_logq" || rc=1
   [ -x "$BUILD/test_logq" ] && { "$BUILD/test_logq" || rc=1; }
-  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_nav_step.c" "$APP/nav_logic.c" -o "$BUILD/test_nav_step" || rc=1
-  [ -x "$BUILD/test_nav_step" ] && { "$BUILD/test_nav_step" || rc=1; }
   result S9 $rc
 fi
 
@@ -208,11 +210,11 @@ if sel S10; then
   result S10 $rc
 fi
 
-# S11: 旧 UI の app_main 結合試験(test_app_main.c)。旧 UI 前提のため Phase 1 で廃止。Phase 4 の結合で新しく書く
+# S11: 旧 UI の app_main 結合試験。Phase 1 で廃止。株価ビューの app_main 結合試験は S34
 
 # ---------------------------------------------------------------- S12
 if sel S12; then
-  echo "### S12 -fsanitize=address,undefined で S8〜S10 と S2/S3/S13/S14/S29/S30 のテストを再実行(1件でも検出したら失敗)"
+  echo "### S12 -fsanitize=address,undefined で S8〜S10 と S2/S3/S13/S14/S29/S30/S34 のテストを再実行(1件でも検出したら失敗)"
   rc=0
   SAN="-O1 -g -fno-omit-frame-pointer -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -D__NO_INLINE__ -fsanitize=address,undefined -fno-sanitize-recover=all"
   # この環境で sanitizer がリンクできるか(MinGW には libasan / libubsan が無いことが多い)
@@ -228,11 +230,9 @@ if sel S12; then
     [ -x "$BUILD/san_logfmt" ] && run_san logfmt "$BUILD/san_logfmt"
     cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_logq.c" "$APP/app_logq.c" -o "$BUILD/san_logq" || rc=1
     [ -x "$BUILD/san_logq" ] && run_san logq "$BUILD/san_logq"
-    cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_nav_step.c" "$APP/nav_logic.c" -o "$BUILD/san_nav_step" || rc=1
-    [ -x "$BUILD/san_nav_step" ] && run_san nav_step "$BUILD/san_nav_step"
-    cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_nav.c" "$APP/nav_logic.c" -o "$BUILD/san_nav" || rc=1
-    [ -x "$BUILD/san_nav" ] && run_san nav "$BUILD/san_nav"
-    cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_touch_decode.c" "$APP/touch_decode.c" "$APP/nav_logic.c" -o "$BUILD/san_touch" || rc=1
+    cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_ui_tap.c" "$APP/ui_logic.c" -o "$BUILD/san_ui_tap" || rc=1
+    [ -x "$BUILD/san_ui_tap" ] && run_san ui_tap "$BUILD/san_ui_tap"
+    cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_touch_decode.c" "$APP/touch_decode.c" "$APP/ui_logic.c" -o "$BUILD/san_touch" || rc=1
     [ -x "$BUILD/san_touch" ] && run_san touch_decode "$BUILD/san_touch"
     cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_gfx.c" "$APP/gfx.c" -o "$BUILD/san_gfx" || rc=1
     [ -x "$BUILD/san_gfx" ] && run_san gfx "$BUILD/san_gfx"
@@ -284,30 +284,7 @@ fi
 
 # S17: 旧 UI の試験。Phase 1(株価ビュー)で廃止(docs/design.md §7.1)
 
-# ---------------------------------------------------------------- S18
-if sel S18; then
-  echo "### S18 CLUT8 実験(docs/design.md §19): clut8_pat(H-C8-1〜4, 7)、標準C条件(H-C8-5)、clut8_test + lcd_panel の cfg と段階 0〜5 の模擬走行(H-C8-6)、APP_CLUT8_TEST = 0 で中身が消えること"
-  rc=0
-  build_ui_objs || rc=1      # test_clut8_cfg が lcd_panel.c(ui_pal を参照)をリンクする
-  for std in "-std=gnu99" "-std=c99 -pedantic-errors" "-std=c11"; do
-    cc_nowarn $std $WARN -DAPP_CLUT8_TEST=1 -I"$APP" -c "$APP/clut8_pat.c" -o "$BUILD/clut8_pat.o" || rc=1
-  done
-  echo "  H-C8-5: clut8_pat.c/.h と clut8_sw.h が platform.h / FIT ヘッダを include していないこと"
-  if grep -nE '#\s*include\s*[<"](platform|board_pins|r_[a-z_0-9]+_if)\.h[>"]' "$APP/clut8_pat.c" "$APP/clut8_pat.h" "$APP/clut8_sw.h"; then rc=1; fi
-  echo "  グローバル/静的データが無いこと(nm。const の c8pat_box_idx は r)"
-  if nm "$BUILD/clut8_pat.o" | grep -E ' [DdBbCc] ' | grep -vE ' [DdBbCc] \.'; then rc=1; else echo "  (データシンボルなし)"; fi
-  echo "  APP_CLUT8_TEST = 0(既定)では clut8_pat.o が空(.text 等のシンボルなし)"
-  cc_nowarn $STD $WARN -I"$APP" -c "$APP/clut8_pat.c" -o "$BUILD/clut8_pat0.o" || rc=1
-  if nm "$BUILD/clut8_pat0.o" | grep -E ' [TtDdRrBbCc] ' | grep -vE ' [TtDdRrBbCc] \.'; then echo "  NG: 0 でシンボルが残る"; rc=1; fi
-  cc_nowarn $STD $WARN -DAPP_CLUT8_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_clut8_pat.c" "$APP/clut8_pat.c" -lm -o "$BUILD/test_clut8_pat" || rc=1
-  [ -x "$BUILD/test_clut8_pat" ] && { "$BUILD/test_clut8_pat" || rc=1; }
-  out="$("$CC" $STD -Wall -Wextra $RXDEF -DAPP_CLUT8_TEST=1 -ffunction-sections -fdata-sections -I"$APP" -I"$HERE" $FIT_INC         "$HERE/test_clut8_cfg.c" "$APP/clut8_pat.c" "$APP/app_logfmt.c" "$SMC/r_glcdc_rx/src/r_glcdc_private.c" "$UIOBJ"/*.o         -Wl,--gc-sections $LDX -o "$BUILD/test_clut8_cfg" 2>&1)"; crc=$?
-  echo "$out" | grep -E "(src/app/|tests/host/)" | head -20
-  [ $crc -eq 0 ] || { echo "$out" | head -30; rc=1; }
-  if echo "$out" | grep -E "(src/app/|tests/host/).*warning" >/dev/null; then echo "  NG: 製品コード・試験コード側に警告"; rc=1; fi
-  [ -x "$BUILD/test_clut8_cfg" ] && { timeout 300 "$BUILD/test_clut8_cfg" || rc=1; }
-  result S18 $rc
-fi
+# S18: CLUT8 の実験(clut8_pat / clut8_test)。Phase 4 でファイルごと削除(実機での確認は済み)
 
 # S19: 旧 UI の試験。Phase 1(株価ビュー)で廃止(docs/design.md §7.1)
 
@@ -329,13 +306,16 @@ if sel S22; then
   if grep -nE '#\s*include\s*[<"](platform|board_pins|r_[a-z_0-9]+_if)\.h[>"]' "$APP/wifi_core.c" "$APP/wifi_core.h" "$APP/wx_core.c" "$APP/wx_core.h" "$APP/wifi_sw.h"; then rc=1; fi
   echo "  グローバル/静的データが無いこと(nm。const の表は r)"
   if nm "$BUILD/wifi_core.o" "$BUILD/wx_core.o" | grep -E ' [DdBbCc] ' | grep -vE ' [DdBbCc] \.'; then rc=1; else echo "  (データシンボルなし)"; fi
-  echo "  APP_WIFI_TEST = 0 かつ APP_WX = 0(既定)では wifi_core.o / wx_core.o が空(.text 等のシンボルなし)。APP_WX = 1 だけでは中身がある"
-  cc_nowarn $STD $WARN -I"$APP" -c "$APP/wifi_core.c" -o "$BUILD/wifi_core0.o" || rc=1
-  cc_nowarn $STD $WARN -I"$APP" -c "$APP/wx_core.c" -o "$BUILD/wx_core0.o" || rc=1
+  echo "  APP_WIFI_TEST = 0 かつ APP_WX = 0(取得なし)では wifi_core.o / wx_core.o が空(.text 等のシンボルなし)。APP_WX = 1(既定)だけでも中身がある"
+  cc_nowarn $STD $WARN -DAPP_WX=0 -I"$APP" -c "$APP/wifi_core.c" -o "$BUILD/wifi_core0.o" || rc=1
+  cc_nowarn $STD $WARN -DAPP_WX=0 -I"$APP" -c "$APP/wx_core.c" -o "$BUILD/wx_core0.o" || rc=1
   if nm "$BUILD/wifi_core0.o" "$BUILD/wx_core0.o" | grep -E ' [TtDdRrBbCc] ' | grep -vE ' [TtDdRrBbCc] \.'; then echo "  NG: 0 でシンボルが残る"; rc=1; fi
   if ! nm "$BUILD/wifi_core_wx.o" "$BUILD/wx_core_wx.o" | grep -qE ' [Tt] (wifi_core_start|wx_parse_http)'; then echo "  NG: APP_WX = 1 で中身が無い"; rc=1; fi
-  echo "  APP_WIFI_TEST と APP_CLUT8_TEST が両方 1 なら #error"
-  if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c -DAPP_WIFI_TEST=1 -DAPP_CLUT8_TEST=1 -I"$APP" - >/dev/null 2>&1; then echo "  NG: #error が出ない"; rc=1; else echo "  ok (#error 発生)"; fi
+  echo "  wifi_sw.h: 既定は APP_WX = 1・APP_WIFI_TEST = 0・APP_STK_PREVIEW = 0・APP_STK_FAULT = 0、プレビュー(APP_STK_PREVIEW = 1)の既定は APP_WX = 0、APP_STK_FAULT が 0〜3 でなければ #error(H-13)"
+  d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_WX == 1 && APP_WIFI_TEST == 0 && APP_STK_PREVIEW == 0 && APP_STK_FAULT == 0 && APP_WX_PRODUCT == 1 && APP_WIFI_ON == 1, "default");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -I"$APP" - 2>&1)" || { echo "  NG: 既定のスイッチ: $d"; rc=1; }
+  d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_WX == 0 && APP_WX_PRODUCT == 0 && APP_WIFI_ON == 0, "preview");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -DAPP_STK_PREVIEW=1 -I"$APP" - 2>&1)" || { echo "  NG: プレビューの既定: $d"; rc=1; }
+  d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_WX == 1 && APP_WX_PRODUCT == 0 && APP_WIFI_ON == 1, "wifitest");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -DAPP_WIFI_TEST=1 -I"$APP" - 2>&1)" || { echo "  NG: 専用モード: $d"; rc=1; }
+  if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c -DAPP_STK_FAULT=4 -I"$APP" - >/dev/null 2>&1; then echo "  NG: APP_STK_FAULT = 4 で #error が出ない"; rc=1; else echo "  ok (APP_STK_FAULT = 4 は #error)"; fi
   cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core" || rc=1
   [ -x "$BUILD/test_wifi_core" ] && { timeout 300 "$BUILD/test_wifi_core" || rc=1; }
   cc_nowarn $STD $WARN -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core_wx" || rc=1     # 製品(接続先は Yahoo の SSL だけ。z の step は範囲に入らない)
@@ -357,10 +337,10 @@ fi
 
 # ---------------------------------------------------------------- S23
 if sel S23; then
-  echo "### S23 Wi-Fi(ESP32 AT)試作のハード側(wifi_at.c。docs/design.md §21.4): APP_WIFI_TEST = 0 で中身が消える・app_main.c の構文・SCI1 と EN と専用ループを偽の r_sci_rx / GPIO / CMT / ESP32 で試験(既定 / 秘密なし / 自動開始の3種)・秘密の置き場所"
+  echo "### S23 Wi-Fi(ESP32 AT)のハード側(wifi_at.c): APP_WX = 0 かつ APP_WIFI_TEST = 0 で中身が消える・app_main.c の構文・SCI1 と EN と専用ループを偽の r_sci_rx / GPIO / CMT / ESP32 で試験(既定 / 秘密なし / 自動開始の3種)・秘密の置き場所"
   rc=0
-  echo "  APP_WIFI_TEST = 0(既定。APP_WX = 0)では wifi_at.o が空(実 platform.h + FIT ヘッダ)"
-  o="$("$CC" $STD -Wall -Wextra $RXDEF -I"$APP" $FIT_INC -c "$APP/wifi_at.c" -o "$BUILD/wifi_at0.o" 2>&1)"; crc=$?
+  echo "  APP_WIFI_TEST = 0 かつ APP_WX = 0(取得なし)では wifi_at.o が空(実 platform.h + FIT ヘッダ。wifi_secret.h は読まない)"
+  o="$("$CC" $STD -Wall -Wextra $RXDEF -DAPP_WX=0 -I"$APP" $FIT_INC -c "$APP/wifi_at.c" -o "$BUILD/wifi_at0.o" 2>&1)"; crc=$?
   echo "$o" | grep -E "src/app/" | head -10
   [ $crc -eq 0 ] || { echo "$o" | head -10; rc=1; }
   if echo "$o" | grep -E "src/app/.*warning" >/dev/null; then rc=1; fi
@@ -416,11 +396,12 @@ if sel S26; then
       if [ $crc -ne 0 ] || echo "$o" | grep -E "src/app/.*(warning|error)" >/dev/null; then echo "  NG $f.c (secret=$sec)"; echo "$o" | head -10; rc=1; else echo "  ok $f.c (secret=$sec)"; fi
     done
   done
-  echo "  APP_WX = 1 だけ(APP_WIFI_TEST = 0)では wifi_at.o に製品の API が入り、専用モード(wifi_test_main)は入らない。APP_WX = 0 かつ APP_WIFI_TEST = 0 では空(S23)"
+  echo "  APP_WX = 1 だけ(APP_WIFI_TEST = 0)では wifi_at.o に製品の API が入り、専用モード(wifi_test_main)は入らない。APP_WX = 0 かつ APP_WIFI_TEST = 0 では空(S23)。APP_WX = 1 が既定"
   o="$("$CC" $STD -Wall -Wextra $RXDEF -DAPP_WX=1 -DWIFI_AT_HOST_TEST -I"$APP" $FIT_INC -c "$APP/wifi_at.c" -o "$BUILD/wifi_at_wx.o" 2>&1)"; crc=$?
   [ $crc -eq 0 ] || { echo "$o" | head; rc=1; }
-  for sym in wx_init wx_poll wx_request stk_ui wx_ui wx_log_state; do nm "$BUILD/wifi_at_wx.o" | grep -qE " [Tt] _?$sym\$" || { echo "  NG: $sym が無い"; rc=1; }; done
+  for sym in wx_init wx_poll wx_request stk_ui wx_log_state; do nm "$BUILD/wifi_at_wx.o" | grep -qE " [Tt] _?$sym\$" || { echo "  NG: $sym が無い"; rc=1; }; done
   if nm "$BUILD/wifi_at_wx.o" | grep -qE " [Tt] _?wifi_test_main\$"; then echo "  NG: APP_WX = 1 だけで wifi_test_main が入っている"; rc=1; fi
+  if nm "$BUILD/wifi_at_wx.o" | grep -qE " [Tt] _?wx_ui\$"; then echo "  NG: 旧 UI の wx_ui が残っている"; rc=1; fi
   echo "  結合試験 test_wifi_at.c の製品版(2種: 秘密あり / -DT_NOSECRET)"
   W23="$APP/wifi_core.c $APP/wx_core.c $APP/stk_core.c $APP/app_logfmt.c"
   EXTRA_CFLAGS="-DAPP_WX=1 -DWIFI_AT_HOST_TEST" build_fit_test "$BUILD/test_wifi_at_wx" "$HERE/test_wifi_at.c" $W23 || rc=1
@@ -433,7 +414,7 @@ fi
 
 # ---------------------------------------------------------------- S27
 if sel S27; then
-  echo "### S27 天気・時刻同期の独立試験(テスト担当の追加): test_wx_indep(ガードページによる範囲外読み出しの検出・全日の暦・ソフト時計・予定表の乱数走行(ms の折り返し)・wifi_core の乱数入力)と、test_ui_geom(当たり判定・要素の配置・スプライトの継ぎ目と区別)"
+  echo "### S27 取得・時刻同期の独立試験(テスト担当の追加): test_wx_indep(ガードページによる範囲外読み出しの検出・全日の暦・ソフト時計・予定表の乱数走行(ms の折り返し)・wifi_core の乱数入力)"
   rc=0
   cc_nowarn $STD -Wall -Wextra -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wx_indep.c" "$APP/wx_core.c" "$APP/wifi_core.c" "$APP/stk_core.c" -o "$BUILD/test_wx_indep" || rc=1
   [ -x "$BUILD/test_wx_indep" ] && { timeout 300 "$BUILD/test_wx_indep" || rc=1; }
@@ -474,7 +455,6 @@ if sel S28; then
   done
   echo "  RAM に入るデータが無い(nm の D/d/B/b/C が無い。const は r)"
   if nm "$BUILD"/gen_ui_layout.o "$BUILD"/gen_ui_gfx_data.o "$BUILD"/gen_ui_strips.o "$BUILD"/gen_ui_preview1.o | grep -E ' [DdBbCc] ' | grep -vE ' [DdBbCc] \.'; then echo "  NG: RAM に入るデータがある"; rc=1; else echo "  (データシンボルなし)"; fi
-  echo "  gen_ui_assets.py(旧)は Phase 4 まで残すが、src/app に書くと生成物を壊すので実行しない"
   result S28 $rc
 fi
 
@@ -540,7 +520,7 @@ if sel S33; then
     local name="$1" file="$2" expr="$3" tsrc="$4" f srcs=""
     shift 4
     rm -rf "$MUT"; mkdir -p "$MUT"
-    cp "$APP/wx_core.h" "$APP/wx_core.c" "$APP/stk_core.h" "$APP/stk_core.c" "$APP/wifi_sw.h" "$APP/clut8_sw.h" "$APP/wifi_core.h" "$APP/wifi_core.c" "$MUT/"
+    cp "$APP/wx_core.h" "$APP/wx_core.c" "$APP/stk_core.h" "$APP/stk_core.c" "$APP/wifi_sw.h" "$APP/wifi_core.h" "$APP/wifi_core.c" "$MUT/"
     cp "$MUT/$file" "$MUT/$file.orig"
     sed -i "$expr" "$MUT/$file"
     if cmp -s "$MUT/$file" "$MUT/$file.orig"; then echo "  NG: 変異が当たっていない: $name"; rc=1; return; fi
@@ -551,7 +531,7 @@ if sel S33; then
   }
   echo "  まず無変更の複製で試験が通ること(変異試験の前提)"
   rm -rf "$MUT"; mkdir -p "$MUT"
-  cp "$APP/wx_core.h" "$APP/wx_core.c" "$APP/stk_core.h" "$APP/stk_core.c" "$APP/wifi_sw.h" "$APP/clut8_sw.h" "$APP/wifi_core.h" "$APP/wifi_core.c" "$MUT/"
+  cp "$APP/wx_core.h" "$APP/wx_core.c" "$APP/stk_core.h" "$APP/stk_core.c" "$APP/wifi_sw.h" "$APP/wifi_core.h" "$APP/wifi_core.c" "$MUT/"
   "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$MUT/wx_core.c" "$MUT/stk_core.c" -o "$MUT/t0" >/dev/null 2>&1 && "$MUT/t0" >/dev/null 2>&1 || { echo "  NG: 無変更の複製で test_wx_core が通らない"; rc=1; }
   "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$MUT/wifi_core.c" "$MUT/wx_core.c" "$MUT/stk_core.c" -o "$MUT/t1" >/dev/null 2>&1 && "$MUT/t1" >/dev/null 2>&1 || { echo "  NG: 無変更の複製で test_wifi_core が通らない"; rc=1; }
   # 予定表(H-6)
@@ -567,6 +547,90 @@ if sel S33; then
   # 書式(H-11)
   mut_run "[stk] res=ok のキー名 http= を変える" wx_core.c 's/ http=%u ms=%lu sync=/ htp=%u ms=%lu sync=/' test_wx_core.c wx_core.c stk_core.c
   result S33 $rc
+fi
+
+# ---------------------------------------------------------------- S34
+if sel S34; then
+  echo "### S34 app_main.c の結合試験(Phase 4。H-12・H-13): 偽の LCD・タッチ・CMT・ログ・wifi_at API で app_main() を 10ms ずつ走らせ、起動の行の順・面 0 を lcd_init の前に描く・stk_ui の値が ui_render で描かれ変わった時だけ入れ替わる・[ev] btn=tap src=touch|uart と wx_request(src)・s ? と n p d + - の扱い・[hb] を、製品 / APP_WX=0 / APP_STK_PREVIEW=1 / LCD 初期化失敗 / タッチ初期化失敗 の 5 通りで確かめる"
+  rc=0
+  build_ui_objs || rc=1
+  A34="$APP/ui_render.c $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/ui_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o"
+  for v in "prod:" "nowx:-DAPP_WX=0" "preview:-DAPP_STK_PREVIEW=1" "lcdfail:-DT_LCD_FAIL" "touchfail:-DT_TOUCH_FAIL"; do
+    name="${v%%:*}"; flags="${v#*:}"
+    echo "  -- $name ${flags}"
+    EXTRA_CFLAGS="$flags" build_fit_test "$BUILD/test_app_main_$name" "$HERE/test_app_main.c" $A34 || rc=1
+    [ -x "$BUILD/test_app_main_$name" ] && { timeout 300 "$BUILD/test_app_main_$name" | tail -3 | grep -E "FAIL|checks" ; [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1; }
+  done
+  result S34 $rc
+fi
+
+# ---------------------------------------------------------------- S35
+if sel S35; then
+  echo "### S35 APP_STK_FAULT(docs/design.md §7.4・受入 U-6): 0〜3 で wx_build_request が、銘柄 n-1 だけ銘柄コードの後ろに ZZ を付け(長さ +2)、ほかの銘柄は固定の要求(144 / 145 / 145 バイト)のまま。4 は #error"
+  rc=0
+  for n in 0 1 2 3; do
+    cc_nowarn $STD $WARN -DAPP_WX=1 -DAPP_STK_FAULT=$n -I"$APP" -I"$HERE" "$HERE/test_stk_fault.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_stk_fault$n" || rc=1
+    [ -x "$BUILD/test_stk_fault$n" ] && { "$BUILD/test_stk_fault$n" | tail -2 | grep -E "FAIL|APP_STK_FAULT|checks"; [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1; }
+  done
+  result S35 $rc
+fi
+
+# ---------------------------------------------------------------- S36
+if sel S36; then
+  echo "### S36 変異試験(Phase 4): 製品コードの複製に 1 か所だけ誤りを入れ、試験が失敗することを確かめる(状態の優先順位 = フッター、更新要求の最小間隔、タップの src、stk_ui → 表示へのつなぎ)。製品のファイルは書き換えない"
+  rc=0
+  MUT2="$BUILD/mut2"
+  mut2_prep() { # $1=名前 $2=APP の中のファイル $3=sed 式。$MUT2 に変異版を作る。当たらなければ失敗
+    rm -rf "$MUT2"; mkdir -p "$MUT2/src/app" "$MUT2/tests/host"
+    find "$APP" -maxdepth 1 -name '*.h' ! -name wifi_secret.h -exec cp {} "$MUT2/src/app/" \;     # wifi_secret.h は複製しない
+    cp "$HERE/test_framework.h" "$HERE/test_app_main.c" "$MUT2/tests/host/"
+    cp "$APP/$2" "$MUT2/src/app/$2"; cp "$MUT2/src/app/$2" "$MUT2/mut.orig"
+    sed -i "$3" "$MUT2/src/app/$2"
+    if cmp -s "$MUT2/src/app/$2" "$MUT2/mut.orig"; then echo "  NG: 変異が当たっていない: $1"; rc=1; return 1; fi
+    return 0
+  }
+  mut2_verdict() { # $1=名前 $2=試験の終了コード
+    if [ "$2" -eq 0 ]; then echo "  NG: 変異 [$1] を試験が検出しなかった(合格してしまった)"; rc=1; else echo "  ok: 変異 [$1] で試験が失敗した"; fi
+  }
+  build_ui_objs || rc=1
+  # (1) フッターの優先順位: 起動中(F1)は取得中(F2)より強い。変異 = 取得中なら起動中にしない
+  if mut2_prep "フッターの優先順位(起動中 > 取得中)を入れ替える" ui_render.c 's/if (v->have_any == 0u) {/if ((v->have_any == 0u) \&\& (v->busy == 0u)) {/'; then
+    "$CC" $STD -DAPP_STK_PREVIEW=1 -I"$MUT2/src/app" -I"$HERE" "$HERE/test_ui_stock.c" "$MUT2/src/app/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$MUT2/t" >"$MUT2/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT2/cc.log"; rc=1; }
+    if [ -x "$MUT2/t" ]; then "$MUT2/t" "$HERE/data/states" >"$MUT2/run.log" 2>&1; mut2_verdict "フッターの優先順位" $?; fi
+  fi
+  # (2) 更新要求の最小間隔(5 秒): 変異 = 間隔を見ない
+  rm -rf "$MUT2"; mkdir -p "$MUT2"
+  cp "$APP/wx_core.h" "$APP/wx_core.c" "$APP/stk_core.h" "$APP/stk_core.c" "$APP/wifi_sw.h" "$APP/wifi_core.h" "$APP/wifi_core.c" "$MUT2/"
+  cp "$MUT2/wx_core.c" "$MUT2/wx_core.c.orig"
+  sed -i 's/< WX_MIN_GAP_MS) {/< 0u) {/' "$MUT2/wx_core.c"
+  if cmp -s "$MUT2/wx_core.c" "$MUT2/wx_core.c.orig"; then echo "  NG: 変異が当たっていない: 更新要求の最小間隔"; rc=1
+  else
+    "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT2" -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$MUT2/wx_core.c" "$MUT2/stk_core.c" -o "$MUT2/t" >"$MUT2/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT2/cc.log"; rc=1; }
+    if [ -x "$MUT2/t" ]; then "$MUT2/t" >"$MUT2/run.log" 2>&1; mut2_verdict "更新要求の最小間隔(5 秒)を外す" $?; fi
+  fi
+  # (3)(4) app_main: タップの src の取り違え、stk_ui の値を表示へ渡さない
+  A36="$APP/ui_render.c $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/ui_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o"
+  run_main_mut() { # $1=名前 $2=sed 式
+    if mut2_prep "$1" app_main.c "$2"; then
+      EXTRA_CFLAGS="" build_fit_test "$MUT2/t" "$MUT2/tests/host/test_app_main.c" $A36 >"$MUT2/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT2/cc.log"; rc=1; return; }
+      "$MUT2/t" >"$MUT2/run.log" 2>&1; mut2_verdict "$1" $?
+    fi
+  }
+  run_main_mut "タップの src(touch / uart)を取り違える" 's/(e->src == (uint8_t)UI_SRC_TOUCH) ? "touch" : "uart"/(e->src == (uint8_t)UI_SRC_TOUCH) ? "uart" : "touch"/'
+  run_main_mut "stk_ui の値を ui_set_view に渡さない" 's/^    ui_set_view(&s_ui, &s_view);$/    (void)s_view;/'
+  result S36 $rc
+fi
+
+# ---------------------------------------------------------------- S37
+if sel S37; then
+  echo "### S37 旧 UI の残骸が無いこと(Phase 4。docs/design.md §7.1): 削除するファイル・シンボル(clut8_* / nav_t / nav_update / wx_ui / ui_wx_t / APP_CLUT8_TEST / applog_fmt_ui)が src/app・tools・tests/host に残っていない"
+  rc=0
+  for f in src/app/nav_logic.c src/app/clut8_test.c src/app/clut8_test.h src/app/clut8_pat.c src/app/clut8_pat.h src/app/clut8_sw.h tools/gen_ui_assets.py tools/fb2png.py tools/wx_compare_p2b.py tools/wx_mock.py tools/clut8_ref.c tests/host/judge_ut1.py tests/host/test_nav.c tests/host/test_nav_step.c tests/host/test_clut8_cfg.c tests/host/test_clut8_pat.c; do
+    [ -e "$ROOT/$f" ] && { echo "  NG: 削除するはずの $f が残っている"; rc=1; }
+  done
+  hits="$(grep -rnE '\b(nav_t|nav_init|nav_update|nav_step|nav_index|ui_wx_t|wx_ui|APP_CLUT8_TEST|clut8_test|clut8_pat|applog_fmt_ui|applog_ui_t|APPLOG_CMD_(PLUS|MINUS))\b' "$APP" "$ROOT/tools" "$HERE" --include='*.c' --include='*.h' --include='*.py' --include='*.sh' --exclude=run.sh 2>/dev/null | grep -vE 'wifi_secret\.h')"
+  if [ -n "$hits" ]; then echo "$hits" | head -10; echo "  NG: 旧 UI のシンボルが残っている"; rc=1; else echo "  (旧 UI のシンボルなし)"; fi
+  result S37 $rc
 fi
 
 echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS SUSPECT(不具合の可能性)=$SUSPECTS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"

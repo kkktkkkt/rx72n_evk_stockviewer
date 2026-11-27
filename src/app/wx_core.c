@@ -73,8 +73,10 @@ size_t wx_build_request_t(char *buf, size_t size, wx_target_t t, uint8_t sym)
     if (sym >= (uint8_t)WX_NSYM) {
         return 0u;
     }
-    return fin(buf, size, snprintf(buf, size, "GET /v8/finance/chart/%s?range=" WX_RANGE_STR "&interval=1d HTTP/1.0\r\nHost: %s\r\n"
-                                   "User-Agent: " WX_UA "\r\nConnection: close\r\n\r\n", k_sym_enc[sym], k_tgt[t].host));
+    /* APP_STK_FAULT = n: 銘柄 n-1 だけ、存在しない銘柄コード(末尾に "ZZ")を要求する(Yahoo は 404 を返す見込み。実機で未確認) */
+    return fin(buf, size, snprintf(buf, size, "GET /v8/finance/chart/%s%s?range=" WX_RANGE_STR "&interval=1d HTTP/1.0\r\nHost: %s\r\n"
+                                   "User-Agent: " WX_UA "\r\nConnection: close\r\n\r\n", k_sym_enc[sym],
+                                   (((unsigned)APP_STK_FAULT == ((unsigned)sym + 1u))) ? "ZZ" : "", k_tgt[t].host));
 }
 
 size_t wx_build_request(char *buf, size_t size, uint8_t sym)
@@ -676,6 +678,8 @@ size_t wx_fmt_ok(char *buf, size_t size, wx_src_t src, const wx_result_t *r, uin
 {
     char       jst[8];
     stk_calc_t c;
+    size_t     n1;
+    size_t     n2;
 
     if (!arg_ok(buf, size) || ((unsigned)src >= (unsigned)WX_SRC_END) || (r == NULL) || (r->sym >= (uint8_t)WX_NSYM) || (mkt > (uint8_t)STK_MKT_CLOSED)
         || (r->http < 100u) || (r->http > 999u) || !stk_calc(r->price_x100, r->prev_x100, &c)) {
@@ -686,10 +690,20 @@ size_t wx_fmt_ok(char *buf, size_t size, wx_src_t src, const wx_result_t *r, uin
     } else {
         (void)snprintf(jst, sizeof jst, "none");
     }
-    return fin(buf, size, snprintf(buf, size, "[stk] res=ok sym=%u src=%s p100=%ld c100=%ld bp=%ld mkt=%c http=%u ms=%lu sync=%u jst=%s len=%u closed=%u\r\n",
-                                   (unsigned)r->sym, k_src_name[src], (long)r->price_x100, (long)r->prev_x100, (long)c.pct_bp, mkt_ch(mkt),
-                                   (unsigned)r->http, (unsigned long)r->ms, (unsigned)((r->have_date != 0u) ? 1u : 0u), jst, (unsigned)r->len,
-                                   (unsigned)((r->closed != 0u) ? 1u : 0u)));
+    /* 2 回に分ける: 1 回の snprintf に 15 個の引数を渡すと RX では引数がスタックに載り、-Wstack-usage=100 を超える(116 バイト) */
+    n1 = fin(buf, size, snprintf(buf, size, "[stk] res=ok sym=%u src=%s p100=%ld c100=%ld bp=%ld mkt=%c",
+                                 (unsigned)r->sym, k_src_name[src], (long)r->price_x100, (long)r->prev_x100, (long)c.pct_bp, mkt_ch(mkt)));
+    if (n1 == 0u) {
+        return 0u;
+    }
+    n2 = fin(buf + n1, size - n1, snprintf(buf + n1, size - n1, " http=%u ms=%lu sync=%u jst=%s len=%u closed=%u\r\n",
+                                           (unsigned)r->http, (unsigned long)r->ms, (unsigned)((r->have_date != 0u) ? 1u : 0u), jst, (unsigned)r->len,
+                                           (unsigned)((r->closed != 0u) ? 1u : 0u)));
+    if (n2 == 0u) {
+        buf[0] = '\0';
+        return 0u;
+    }
+    return n1 + n2;
 }
 
 size_t wx_fmt_fail(char *buf, size_t size, wx_src_t src, const wx_result_t *r)

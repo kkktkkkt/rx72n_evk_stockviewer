@@ -20,22 +20,6 @@ typedef enum { UI_EV_NONE = 0, UI_EV_TAP } ui_ev_type_t;
 /* イベント。TAP: src = ui_src_t */
 typedef struct { uint8_t type, src; } ui_ev_t;
 
-/* Phase 3 まで残す暫定の型(wifi_at.c の wx_ui が使う旧 UI の天気・Wi-Fi の値)。app_main が stk_view_t に写す。Phase 3 で wifi_at と一緒に消す */
-enum { UI_NET_OFF = 0, UI_NET_CONN, UI_NET_ON, UI_NET_ERR };      /* wx_net_t と同じ並び = STK_NET_* */
-typedef struct {
-    uint8_t  net;
-    uint8_t  busy;
-    uint8_t  have;
-    uint8_t  kind;
-    uint8_t  stale;
-    uint8_t  clk_ext;
-    uint8_t  month, day, wday;
-    uint8_t  rsv;
-    int16_t  temp_x10;
-    uint16_t upd_min;
-    uint16_t clock_min;
-} ui_wx_t;
-
 typedef struct {
     uint8_t     ts, tcnt;            /* タップ検出の状態 / 連続標本数 */
     uint32_t    t_down;              /* 押下が確定した時刻 */
