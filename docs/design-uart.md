@@ -875,6 +875,8 @@ R-HELPW       : \[help\] d=run n=boot p=at s=state \?=help
 
 ## 13. 天気・気温の取得と時刻同期(`docs/design.md` §22)での UART(2026-11-25)
 
+**2026-11-27 注(rx72n_stockview)**: この §13 は複製元(給湯器デモ + 天気)の仕様。**株価ビューの製品は `[wx]`(天気)を `[stk]` に置き換える。書式・正規表現・判定は `docs/design.md`(rx72n_stockview)§7.5 が優先**(§10〜§12 の `[hb]` `[init]` `[boot]` `[err]` `[st]` `[perf]` `[wifi]` `[wifiv]` は書式を変えない)。**Phase 0(TLS の実機検証。専用モード `APP_WIFI_TEST = 1`)では、この §13 の `[wx] res=fail` が使われた**(下の `R-WX-FAIL` を 2026-11-27 に `err` 1〜9・末尾 `len=` へ直した)。専用モードの UART コマンドに **`t`(Yahoo 平文)`y`(Yahoo SSL)`g`(Google SSL)`z`(`y` の前に `AT+CIPSSLCCONF=0,0,0`)** が増えた(`tools/job-runner.ps1` の `tx` の許可文字 `[npsd+?xtygz-]`)。
+
 状態: **設計(未実装・未検証)**。**`APP_WX = 1`(製品)と `APP_WIFI_TEST = 1`(専用モード。`x` だけ)に当てはまる**。`APP_WX = 0` かつ `APP_WIFI_TEST = 0` の出力・コマンドは変えない。
 **判定できないこと**: 画面の見た目(アイコンの形・色)は目視(カメラは補助)。表示面の画素の判定は gdb(`design.md` §22.13 の X7)。UART で言えるのは「ソフトが何を取得し、どの状態にしたか」まで。
 **秘密・プライバシー**: **SSID・パスワード・BSSID・応答の本文は、どの行にも出さない**。出すのは数値(気温・コード・時刻・状態の番号)と名前だけ。
@@ -888,7 +890,7 @@ R-HELPW       : \[help\] d=run n=boot p=at s=state \?=help
 | 3 | `[ev]` | ボタン名に **`h_wx`**(更新ボタン)が増える。`btn=h_wx st=down` / `st=act`。**画面は変わらない**(`scr=` は続かない) |
 | 4 | コマンド | **`x` = 更新ボタンの仮想タップ**(ホームで、遷移中・デモ中・押下表示中でない時)。**`job-runner.ps1` の `tx` の許可リスト `[npsd+?x-]` に `x` は既にあるので、変更不要**。`applog_cmd_parse` に `'x'` を足す(今は無視される文字) |
 | 5 | `[wifi]` の行 | 製品(`APP_WX = 1` かつ `APP_WIFI_TEST = 0`)では **`res=start` の行を出さない**・**`[wifiv] key=oth` を出さない**(行キュー 8 行の `drop` を避ける)。専用モードは §12 のまま |
-| 6 | step 名 | §12 の `step=` に **`wx_mux` `wx_close` `wx_tcp` `wx_send` `wx_recv`** が増える(番号 15〜19。`[hb]` の `scr` は専用モードで 0〜19) |
+| 6 | step 名 | §12 の `step=` に **`wx_mux` `wx_close` `wx_tcp` `wx_send` `wx_recv`** が増える(番号 15〜19。**2026-11-27 改訂: Phase 0 で step `wx_sslconf`(17。`AT+CIPSSLCCONF=0,0,0`。専用モードの `z` だけ)が `wx_close`(16)と `wx_tcp` の間に入り、`wx_tcp` = 18、`wx_send` = 19、`wx_recv` = 20、`WIFI_STEP_END` = 21。`[hb]` の `scr` は専用モードで 0〜20**) |
 | 7 | 秒まで見える時刻 | `[wx] ... jst=<hhmmss>`(`Date:` から作った JST)と、状態行の `clk=<hhmmss>`(ソフト時計)。**PC の時刻と ±3 秒で比べる**ための項目 |
 
 ### 13.1 書式
@@ -943,7 +945,7 @@ R-HELPW       : \[help\] d=run n=boot p=at s=state \?=help
 
 ```
 R-WX-OK    : \[wx\] res=ok src=(boot|timer|touch|uart) temp10=(-?\d{1,3}) wmo=(\d{1,2}) kind=(sun|partly|cloud|fog|rain|snow|thunder|unknown) http=(\d{3}) ms=(\d+) sync=([01]) jst=(\d{6}|none) obs=(\d{4}) closed=([01])
-R-WX-FAIL  : \[wx\] res=fail src=(boot|timer|touch|uart) err=([1-8]) http=(\d{1,3}) ms=(\d+)
+R-WX-FAIL  : \[wx\] res=fail src=(boot|timer|touch|uart) err=([1-9]) http=(\d{1,3}) ms=(\d+) len=(\d+)      ← 2026-11-27 改訂(Phase 0): err は 1〜9(9 = 取得中に ESP32 が再起動〔ready〕)、末尾に len(バッファに溜めたバイト数。最大 3072。本文は出さない)
 R-WX-REQ   : \[wx\] req=(ignored|busy|off) src=(touch|uart)
 R-WX-STATE : \[wx\] net=(off|conn|on|err) busy=([01]) have=([01]) temp10=(-?\d{1,3}) kind=(sun|partly|cloud|fog|rain|snow|thunder|unknown|none) age=(-1|\d+) clk=(\d{6}|none) date=(\d{8}|none) wd=([0-69]) sync=([01])
 R-EV-BTN   : (§10.9 の R-EV-BTN のボタン名に h_wx を足す)
