@@ -1,4 +1,4 @@
-/* app_main.c - 製品デモ(浴室リモコン。docs/design.md v2)
+/* app_main.c - 株価ビュー(docs/design.md §7.2。Phase 1 の暫定: 表示は stk_view_t の枠だけ。取得との結合は Phase 4)
  * 起動: app_log_init -> [boot] -> ui_init + 面0に描画 -> lcd_init -> touch_init -> 10msタイマ -> [perf] -> ループ
  * ループ: app_log_poll -> 反映待ちの完了確認 -> (10msごと)[hb]/[err]/UART1文字/touch/ui_update/[ev] -> 天気の取得(APP_WX_PRODUCT) -> 描画(裏面 -> 入れ替え)
  * UART出力の仕様: docs/design-uart.md §10。ログ用の大きいバッファは static(メインループ専用。割り込みから使わない)。 */
@@ -17,6 +17,7 @@
 #include "gfx.h"
 #include "ui_logic.h"
 #include "ui_render.h"
+#include "ui_assets.h"
 #include "app_main.h"
 #if APP_CLUT8_TEST
 #include "clut8_test.h"
@@ -29,13 +30,14 @@
 #define APP_HB_TICKS       (APP_TICK_HZ)              /* [hb] 周期 = 1秒(100tick) */
 #define APP_ERR_A_TICKS    (10u)                      /* [err] (A) は100msに1行まで */
 #define APP_ERR_B_TICKS    (APP_TICK_HZ)              /* [err] (B) は1秒に1行まで */
-#define APP_TOUCH_FLAGS    ((TOUCH_SWAP_XY ? UI_TF_SWAP_XY : 0u) | (TOUCH_FLIP_X ? UI_TF_FLIP_X : 0u) | (TOUCH_FLIP_Y ? UI_TF_FLIP_Y : 0u))
+#define APP_PREVIEW_TICKS  (300u)                     /* APP_STK_PREVIEW: 8 状態を 3 秒ごとに切り替える */
 
 static volatile uint32_t s_tick;                 /* 10ms ごとに +1(CMT割り込み) */
 
 static ui_t    s_ui;                             /* 状態機械(メインループ専用) */
 #if APP_WX_PRODUCT
-static ui_wx_t s_wxv;                            /* 表示用の天気・時計の値(10ms ごとに ui_set_wx へ。gdb で s_ui.wx を書いても次の tick で上書きされる) */
+static stk_view_t s_view;
+static ui_wx_t s_wxv;                            /* 旧 UI の天気・時計の値(wifi_at の wx_ui が作る)。10ms ごとに stk_view_t へ写す(暫定。Phase 3 で置き換え) */
 #endif
 static uint8_t s_back;                           /* 次に描く面(表示中でない方)。表示中 = s_back ^ 1 */
 static bool    s_flip_pending;                   /* lcd_flip を受け付けた。表示面が変わるまで裏面に書かない */
@@ -53,13 +55,14 @@ static uint32_t       s_rxerr_tick;
 static bool           s_rxerr_sent;
 
 #if APP_WX_PRODUCT
-/* ui_init の直後の表示: 旧時計(21:45)ではなく、未同期(--:--)・OFFLINE にする(wx_ui が毎 tick で本当の値に置き換える) */
-static void wx_boot_view(uint32_t now_ms)
+/* 暫定: 旧 UI の値から stk_view_t の枠だけ作る(Wi-Fi の状態・時計・更新時刻。値の行は空 = 起動中)。Phase 4 で wx_sched の結果から作る */
+static void view_from_wx(stk_view_t *v, const ui_wx_t *w)
 {
-    static const ui_wx_t off = { .clk_ext = 1u, .upd_min = 0xFFFFu, .clock_min = 0xFFFFu };
-
-    ui_set_wx(&s_ui, &off);
-    ui_update(&s_ui, NULL, now_ms);
+    memset(v, 0, sizeof(*v));
+    v->net       = w->net;
+    v->busy      = w->busy;
+    v->clock_min = w->clock_min;
+    v->upd_min   = w->upd_min;
 }
 #endif
 
@@ -112,22 +115,6 @@ static void log_scan(void)
     emit(applog_fmt_scan(s_line, sizeof(s_line), n, s_scan));
 }
 
-/* [ui] 行(s コマンドの時だけ) */
-static void log_ui(void)
-{
-    applog_ui_t u;
-
-    u.scr    = ui_scr_name[s_ui.v.scr];
-    u.btn    = (s_ui.fb_phase == UI_PH_NONE) ? "none" : ui_btn_defs[s_ui.fb_btn].name;
-    u.ph     = (s_ui.fb_phase == UI_PH_PRESS) ? "press" : ((s_ui.fb_phase == UI_PH_FLASH) ? "flash" : "none");
-    u.set    = s_ui.v.set;
-    u.bath10 = s_ui.v.bath_x10;
-    u.fill10 = s_ui.v.fill_x10;
-    u.flow10 = s_ui.v.flow_x10;
-    u.tr     = s_ui.tr_on;
-    emit(applog_fmt_ui(s_line, sizeof(s_line), &u));
-}
-
 /* ok=1 のときは err=0 detail=0 固定。ok=0 のときは g_app_dbg の値 */
 static void log_init(const char *stage, bool ok)
 {
@@ -140,47 +127,11 @@ static void log_err(uint32_t code, uint32_t detail)
     emit(applog_fmt_err(s_line, sizeof(s_line), code, detail));
 }
 
-/* ui_logic のイベントを [ev] 行にする(設計 design-uart.md §10.3) */
-static const char *src_name(uint8_t src)
-{
-    return (src == (uint8_t)UI_SRC_TOUCH) ? "touch" : ((src == (uint8_t)UI_SRC_UART) ? "uart" : "demo");
-}
-
-static const char *scr_name(uint8_t scr)
-{
-    return (scr < (uint8_t)UI_SCR_COUNT) ? ui_scr_name[scr] : "?";
-}
-
-static const char *btn_name(uint8_t btn)
-{
-    return (btn < (uint8_t)UI_BTN_COUNT) ? ui_btn_defs[btn].name : "?";
-}
-
+/* タップを [ev] 行にする(暫定: 旧書式 btn=tap st=act。設計 §7.5 の `[ev] btn=tap src=...` は Phase 3 で app_logfmt を直した時に合わせる) */
 static void log_event(const ui_ev_t *e)
 {
-    switch (e->type) {
-    case UI_EV_SCR:
-        emit(applog_fmt_ev_scr(s_line, sizeof(s_line), scr_name(e->a), scr_name(e->b), src_name(e->src)));
-        break;
-    case UI_EV_BTN_DOWN:
-        emit(applog_fmt_ev_btn(s_line, sizeof(s_line), btn_name(e->a), "down", src_name(e->src)));
-        break;
-    case UI_EV_BTN_ACT:
-        emit(applog_fmt_ev_btn(s_line, sizeof(s_line), btn_name(e->a), "act", src_name(e->src)));
-        break;
-    case UI_EV_SET:
-        emit(applog_fmt_ev_set(s_line, sizeof(s_line), e->a, src_name(e->src)));
-        break;
-    case UI_EV_DONE:
-        emit(applog_fmt_ev_done(s_line, sizeof(s_line), (e->a == (uint8_t)UI_DONE_FILL) ? "fill" : "reheat"));
-        break;
-    case UI_EV_DEMO:
-        emit(applog_fmt_ev_demo(s_line, sizeof(s_line),
-                                (e->a == (uint8_t)UI_DEMO_START) ? "start" : ((e->a == (uint8_t)UI_DEMO_END) ? "end" : "abort"),
-                                (e->a == (uint8_t)UI_DEMO_END) ? NULL : src_name(e->src)));
-        break;
-    default:
-        break;
+    if (e->type == (uint8_t)UI_EV_TAP) {
+        emit(applog_fmt_ev_btn(s_line, sizeof(s_line), "tap", "act", (e->src == (uint8_t)UI_SRC_TOUCH) ? "touch" : "uart"));
     }
 }
 
@@ -209,27 +160,22 @@ static void log_errors(uint32_t now)
     }
 }
 
-/* 受信コマンド(1 tick に1文字): n p + - d x は ui_cmd、s ? は応答。それ以外は無視 */
+/* 受信コマンド(1 tick に1文字): x = 更新(タップと同じ)、s ? は応答。それ以外(n p + - d を含む)は無視 */
 static void uart_command(uint32_t now_ms)
 {
     int ch = app_log_getc();
 
+    (void)now_ms;                /* APP_WX_PRODUCT = 0 では使わない */
     if (ch < 0) {
         return;
     }
     switch (applog_cmd_parse(ch)) {
-    case APPLOG_CMD_NEXT:  ui_cmd(&s_ui, UI_CMD_NEXT, now_ms); break;
-    case APPLOG_CMD_PREV:  ui_cmd(&s_ui, UI_CMD_PREV, now_ms); break;
-    case APPLOG_CMD_PLUS:  ui_cmd(&s_ui, UI_CMD_PLUS, now_ms); break;
-    case APPLOG_CMD_MINUS: ui_cmd(&s_ui, UI_CMD_MINUS, now_ms); break;
-    case APPLOG_CMD_DEMO:  ui_cmd(&s_ui, UI_CMD_DEMO, now_ms); break;
-    case APPLOG_CMD_WX:    ui_cmd(&s_ui, UI_CMD_WX, now_ms); break;     /* 更新ボタンの仮想タップ。取得は BTN_ACT を見て tick_step が行う */
+    case APPLOG_CMD_WX:    ui_tap_inject(&s_ui, UI_SRC_UART); break;     /* 更新の仮想タップ。取得は UI_EV_TAP を見て tick_step が行う */
     case APPLOG_CMD_STATE:
         log_state("st", true);
         if (g_app_dbg.found_count > 0u) {
             log_scan();
         }
-        log_ui();
 #if APP_WX_PRODUCT
         wx_log_state(now_ms);
 #endif
@@ -267,19 +213,18 @@ static void tick_step(uint32_t now, uint32_t *last_hb, uint32_t *last_uf, bool t
         }
         real = &smp;
     }
-#if APP_WX_PRODUCT
-    wx_ui(&s_wxv, now_ms);       /* 表示用の値(Wi-Fi・天気・時計・日付)。ui_update の前(時計が clock_min を使う) */
-    ui_set_wx(&s_ui, &s_wxv);
+#if APP_STK_PREVIEW
+    ui_set_view(&s_ui, &ui_preview_view[(now / APP_PREVIEW_TICKS) % UI_PREVIEW_N]);   /* 8 つの決まった状態を 3 秒ごとに */
+#elif APP_WX_PRODUCT
+    wx_ui(&s_wxv, now_ms);       /* 旧 UI の値(Wi-Fi・時計)。暫定で stk_view_t の枠に写す */
+    view_from_wx(&s_view, &s_wxv);
+    ui_set_view(&s_ui, &s_view);
 #endif
     ui_update(&s_ui, real, now_ms);
-    g_app_dbg.scr  = s_ui.v.scr;
-    g_app_dbg.demo = s_ui.demo;
     while (ui_event_pop(&s_ui, &ev)) {
         log_event(&ev);
 #if APP_WX_PRODUCT
-        if ((ev.type == (uint8_t)UI_EV_BTN_ACT) && (ev.a == (uint8_t)UI_BTN_H_WX) && (ev.src != (uint8_t)UI_SRC_DEMO)) {
-            (void)wx_request((ev.src == (uint8_t)UI_SRC_TOUCH) ? WX_SRC_TOUCH : WX_SRC_UART, now_ms);   /* 更新ボタン */
-        }
+        (void)wx_request((ev.src == (uint8_t)UI_SRC_TOUCH) ? WX_SRC_TOUCH : WX_SRC_UART, now_ms);   /* タップ = 更新 */
 #endif
     }
     if (applog_due(now, *last_uf, APP_HB_TICKS) != 0) {
@@ -321,26 +266,16 @@ static uint32_t bench_us(void (*fn)(void))
     return (s_tick - t0) * (NAV_SAMPLE_MS * 1000u) / APP_PERF_N;
 }
 
-static void bench_copy(void)   { gfx_blit8(lcd_fb(s_back), ui_bgi[UI_BG_HOME], UI_W, 0, 0, UI_W, UI_H, 0, 0); }
+static void bench_copy(void)   { gfx_blit8(lcd_fb(s_back), ui_strip[0][0], UI_W, 0, 0, UI_W, UI_ROW_H, 0, ui_row_y0[0]); }
 static void bench_render(void) { ui_render(&s_ui, lcd_fb(s_back)); }
 
 static void log_perf(void)
 {
-    uint32_t copy_us, home_us, slide_us;
+    uint32_t copy_us, home_us;
 
-    copy_us = bench_us(bench_copy);
-    home_us = bench_us(bench_render);
-    s_ui.ov = s_ui.v;                    /* 前へ進むスライドの途中(dx = 240)を作る */
-    s_ui.ov.scr = (uint8_t)UI_SCR_FILL;
-    s_ui.tr_on = 1u;
-    s_ui.tr_fwd = 1u;
-    s_ui.tr_dx = 240u;
-    slide_us = bench_us(bench_render);
-    ui_init(&s_ui, s_tick * NAV_SAMPLE_MS, (uint16_t)TOUCH_X_MAX, (uint16_t)TOUCH_Y_MAX, (uint8_t)APP_TOUCH_FLAGS);
-#if APP_WX_PRODUCT
-    wx_boot_view(s_tick * NAV_SAMPLE_MS);
-#endif
-    emit(applog_fmt_perf(s_line, sizeof(s_line), APP_PERF_N, copy_us, home_us, slide_us));
+    copy_us = bench_us(bench_copy);      /* 行の帯 1 枚(480x74)のコピー */
+    home_us = bench_us(bench_render);    /* 全画面の描き直し */
+    emit(applog_fmt_perf(s_line, sizeof(s_line), APP_PERF_N, copy_us, home_us, 0u));   /* slide は無い(0。書式は変えない) */
 }
 #endif
 
@@ -364,10 +299,10 @@ void app_main(void)
     wifi_test_main();            /* 戻らない。LCD・タッチ・製品 UI は動かさない(docs/design.md §21.4.1) */
 #endif
 
-    /* 面0にホームを描いてから GLCDC を起動する(RAM2 は起動前に書ける) */
-    ui_init(&s_ui, 0u, (uint16_t)TOUCH_X_MAX, (uint16_t)TOUCH_Y_MAX, (uint8_t)APP_TOUCH_FLAGS);
-#if APP_WX_PRODUCT
-    wx_boot_view(0u);
+    /* 面0に起動中の画面を描いてから GLCDC を起動する(RAM2 は起動前に書ける) */
+    ui_init(&s_ui, 0u);
+#if APP_STK_PREVIEW
+    ui_set_view(&s_ui, &ui_preview_view[0]);
 #endif
     ui_render(&s_ui, lcd_fb(0u));
     ui_view_mark(&s_ui);

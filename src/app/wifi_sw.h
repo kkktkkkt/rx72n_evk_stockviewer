@@ -19,6 +19,12 @@
 /* 製品(LCD・タッチ・デモが動く通常の起動)に取得を組み込む = APP_WX = 1 かつ APP_WIFI_TEST = 0(§22.7)。専用モードが優先 */
 #define APP_WX_PRODUCT       ((APP_WX) && !(APP_WIFI_TEST))
 
+/* 1 = ネットワークなしで、8 つの決まった状態(ui_preview.c = docs/design.md §3.12)を 3 秒ごとに LCD へ出す(実機の目視用。docs/design.md §7.4)。
+ * ui_assets.h(生成物)がこのヘッダーを include するので、必ず ui_assets.h より先に定義される。切り替えは下の 1 行か -DAPP_STK_PREVIEW=1。コミットする値は 0 */
+#ifndef APP_STK_PREVIEW
+#define APP_STK_PREVIEW      (0)
+#endif
+
 /* 1 = [init] stage=wifi の 2 秒後に UART コマンド d と同じ(全部)を1回だけ実行する */
 #ifndef APP_WIFI_AUTOSTART
 #define APP_WIFI_AUTOSTART   (0)

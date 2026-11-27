@@ -433,3 +433,69 @@ cd D:\workspace\rx72n\rx72n_gcc
 ### 注意
 - ヘッドレスビルドが `.settings/com.renesas.smc.generationsetting.properties`、`.settings/com.renesas.smc.tools.swcomponent.fit.properties` のタイムスタンプ行を書き換えた(内容の変化なし)。`.settings/language.settings.xml` も `git status` で M になった(ビルドが書いたもの。内容の確認は未実施)。
 - 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。
+
+## 追記: 2026-11-27 10:52 (JST) 表示 Phase 1(株価画面の描画。旧 UI 削除後)のビルド(ビルド担当)
+
+| 時刻(JST) | コマンド | 結果 | 備考 |
+|---|---|---|---|
+| 10:52:02 | 前提確認(e2studio / e2studioc / make / rfp-cli / e2-server-gdb / rx-elf-gdb のプロセス無し)。`jobs\runner.alive` 10:52:13(新しい)。`src\app\wifi_sw.h` `clut8_sw.h` の既定値を確認(変更なし、すべて 0) | OK | `wifi_secret.h` は開いていない |
+| 10:52:22〜10:52:47 | `tools/submit-job.sh build '{"mode":"Headless"}' 400`(ジョブ `105223-build`、exit 0、ジョブ時間 24 秒) | **成功**(`Build Finished. 0 errors, 0 warnings`) | 増分ビルド。再コンパイルは 13 ファイル(`ui_gfx_data.c` `ui_layout.c` `ui_preview.c` `ui_logic.c` `ui_render.c` `ui_strips.c` `lcd_panel.c` `touch_ft5x.c` `app_main.c` `clut8_test.c` `wifi_at.c` `wifi_core.c` `wx_core.c`)。Makefile は再生成され、`No rule to make target` は出ていない。smc_gen は再コンパイルなし |
+
+### 成果物(10:52:43)
+| 項目 | 今回(既定) | 前回の既定(2026-11-27 10:00) |
+|---|---|---|
+| `HardwareDebug\rx72n_stockview.elf` | 1,607,416 バイト(10:52:43) | 2,357,128 |
+| `HardwareDebug\rx72n_stockview.mot` | 1,448,106 バイト(10:52:43) | 3,556,642 |
+| `rx-elf-size` text / data / bss | **479,768 / 2,876 / 18,368** | 1,182,612 / 2,876 / 18,368 |
+| ROM(text + data) | 482,644 | 1,185,488 |
+
+- text は約 703 KB 減。`rx-elf-objdump -h` で `.rodata` が 0x6658c(約 418 KB)。前回は 0x10d9d8 で、旧デモの画像データが消えた分と見込む(内訳の厳密な分解は未実施)。`.data` 2,876、`.bss` 18,368 は前回と同じ。
+- RAM2(`0x00800000` 台)の出力セクションは **0 個**(`rx-elf-objdump -h`)。
+- 警告: 今回の増分ビルドは **0 件**。`-Wstack-usage=100` の警告も出ていない。前回の 10:00 の clean 相当ビルドで出た smc_gen の 2 件(`r_bsp_common.c:105` `delay_wait`、`r_rx_intrinsic_functions.c:347` `R_BSP_ChangeToUserMode`、いずれも "stack usage computation not supported for this target")は、今回は再コンパイルされていないため未確認。
+- 注意: `.settings/...` のタイムスタンプ行をビルドが書き換えた可能性がある(内容の変化なし)。ログ末尾の llvm manifest エラーは従来どおり(影響なし)。
+
+### シンボル確認(`rx-elf-nm`、14.2.0.202607 のもの)
+- `_ui_render`(`T`)、`_ui_init` `_ui_update` `_ui_set_view` などの `ui_*`、`_gfx_*`、`_lcd_*`、`_app_main` は入っている。
+- **旧 UI の関数が残っている**: `_nav_init` `_nav_update` `_nav_step` `_nav_index` `_nav_move` `_nav_act`(計 6 シンボル)。原因は `src/app/nav_logic.c` が `subdir.mk` に載ったままで、`src/app/app_main.c:13` が `nav_logic.h` を include していること(`app_main.c:194` の `nav_sample_t` も使用)。**コーディング担当への差し戻し**: 旧 UI の残り(`nav_logic.c/.h`、`touch_decode.h` `touch_ft5x.h` `ui_logic.h` からの参照、`tests/host/test_nav*.c`)を整理する必要がある。
+- `_wifi_` `_wx_` `_clut8_` のシンボルは 0 件(既定構成どおり)。
+
+### プレビュー構成(`APP_STK_PREVIEW`)のビルド: **未実施**
+- 切り替えの場所: `src/app/ui_assets.h`(生成物。先頭に「手で編集しない」。`#ifndef APP_STK_PREVIEW` で既定 `(0)`)。生成元は `tools/gen_stock_assets.py` の 861 行付近(`t += "#ifndef APP_STK_PREVIEW ..."`)。
+- `wifi_sw.h` のような手書きヘッダーの切り替え口は無い。ヘッドレスビルドは `-D` を渡せないため、手で `ui_assets.h` を書き換える方法は取らなかった(builder の禁止事項)。
+- 必要な作業(設計役またはコーディング担当へ): (a) `tools/gen_stock_assets.py` の既定値を切り替えられる形にする(例: 環境変数や専用の手書き設定ヘッダー)、または (b) プレビュー用のビルド設定を用意する。その後、生成し直してからプレビュー構成でビルドする。
+
+### 退避・後始末
+- 切り替えた値は無し(`wifi_sw.h` `clut8_sw.h` は未変更)。`HardwareDebug\` の中身は既定構成の ELF/MOT。
+- 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。
+
+## 追記: 2026-11-27 12:54〜12:56 (JST) プレビュー構成(`APP_STK_PREVIEW` = 1)のビルド(ビルド担当)
+
+| 時刻(JST) | コマンド | 結果 | 備考 |
+|---|---|---|---|
+| 12:54:45 | 前提確認(e2studio / e2studioc / make / rfp-cli / e2-server-gdb / rx-elf-gdb のプロセス無し)。`jobs\runner.alive` 12:54:45(新しい) | OK | `wifi_secret.h` は開いていない |
+| 12:54:51 | `src\app\wifi_sw.h` の `APP_STK_PREVIEW` を (0) → (1) | OK | この 1 行だけ変更 |
+| 12:54:51〜12:56:07 | `tools/submit-job.sh build '{"mode":"Headless"}' 400`(ジョブ `125451-build`、exit 0、ジョブ時間 74 秒、経過 1 分 17 秒) | **成功**(`Build Finished. 0 errors, 0 warnings`、12:56:04) | Makefile 再生成。再コンパイルは 12 ファイル(`ui_layout.c` `ui_preview.c` `wifi_at.c` `wx_core.c` `wifi_core.c` `ui_gfx_data.c` `ui_render.c` `clut8_test.c` `lcd_panel.c` `touch_ft5x.c` `app_main.c` `ui_strips.c`)。smc_gen は再コンパイルなし。ログ末尾の llvm manifest エラーは従来どおり(影響なし) |
+| 12:56:0x | `src\app\wifi_sw.h` の `APP_STK_PREVIEW` を (1) → (0) に戻す | 確認済み | 値は (0)。下の「注意」を参照 |
+
+### 成果物(プレビュー構成、12:56:04)
+| 項目 | 値 |
+|---|---|
+| `HardwareDebug\rx72n_stockview.elf` | 1,608,788 バイト、更新 2026-11-27 12:56:04 |
+| `HardwareDebug\rx72n_stockview.mot` | 1,449,658 バイト、更新 2026-11-27 12:56:04 |
+| `rx-elf-size` text / data / bss / dec | 480,288 / 2,876 / 18,368 / 501,532 |
+| ROM(text + data) | 483,164 |
+
+- 既定構成の直近記録(10:52、`HardwareDebug` の既定値)と比べ、text は +720 バイト(プレビューの `ui_preview.c` 分)。`.data` `.bss` は同じ。
+- RAM2(`0x00800000` 台)の出力セクションは未確認(この手順では `objdump` を実行していない)。
+
+### プレビュー構成の証拠(`rx-elf-nm`、`D:\Renesas\GNURX\GCC_for_Renesas_RX 8.3.0.202411-GNURX-ELF\rx-elf\rx-elf\bin\`)
+- `_ui_preview_view`(`R`、`ffc14480`)が入っている。既定構成では `ui_preview.c` の中身が消えるため、プレビュー構成の目印として確認。
+
+### 警告・エラー
+- **0 件**(`0 errors, 0 warnings`)。`-Wstack-usage=100` の警告も出ていない。増分ビルドのため、smc_gen の既知 2 件(stack usage 非対応)は今回は未確認。
+
+### 注意
+- `git diff -- src/app/wifi_sw.h` は 0 行になっていない(6 行の追加)。これは `APP_STK_PREVIEW` の定義ブロック(`#ifndef` から `#endif` まで)が、今回の作業前から作業ツリーに未コミットで入っていたため。今回の変更(`(0)` → `(1)` → `(0)`)は差分に残っていない(値は HEAD と同じ `(0)` で、ブロックの内容は変えていない)。コミット前に、コーディング担当か設計担当がこのブロックを含めるか確認すること。
+- 成果物の ELF・MOT はプレビュー構成のまま残した(再ビルドしていない)。`HardwareDebug\` の中身はプレビュー構成。書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。
+- `_nav_init` などの旧 UI のシンボルが ELF に残っている(前回 10:52 の記録と同じ。`nav_logic.c` の整理が未了)。
+- `.settings/...` のタイムスタンプ行をビルドが書き換えた可能性がある(内容の変化なし)。

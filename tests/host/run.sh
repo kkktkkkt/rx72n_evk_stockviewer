@@ -43,9 +43,9 @@ cc_nowarn() {
   return $rc
 }
 
-# 生成データ(ui_bg_*.c, ui_gfx_data.c, ui_layout.c)を1回だけコンパイルしておく($BUILD/ui/*.o)
+# 生成データ(ui_strips.c, ui_gfx_data.c, ui_layout.c)を1回だけコンパイルしておく($BUILD/ui/*.o)
 UIOBJ="$BUILD/ui"
-UIDATA="ui_bg_home ui_bg_fill_run ui_bg_fill_done ui_bg_reheat_run ui_bg_reheat_done ui_bg_usage ui_bg_stby ui_gfx_data ui_layout"
+UIDATA="ui_gfx_data ui_layout ui_strips"
 build_ui_objs() {
   mkdir -p "$UIOBJ"
   local f
@@ -99,40 +99,7 @@ if sel S3; then
   result S3 $rc
 fi
 
-# ---------------------------------------------------------------- S4
-if sel S4; then
-  echo "### S4 画面アセット(H-A1, H-A2, H-D1): gen_ui_assets.py --check(パレット・固定色・P1 との誤差)/ 再実行で同一 / コミット済みと一致(CR は無視)/ 警告なし / const で ROM / サイズ"
-  rc=0
-  "$PY" -I "$ROOT/tools/gen_ui_assets.py" --check || rc=1
-  rm -rf "$BUILD/gen1" "$BUILD/gen2"
-  "$PY" -I "$ROOT/tools/gen_ui_assets.py" --out-dir "$BUILD/gen1" --preview-dir "$BUILD/gen1/prev" >/dev/null || rc=1
-  "$PY" -I "$ROOT/tools/gen_ui_assets.py" --out-dir "$BUILD/gen2" --preview-dir "$BUILD/gen2/prev" >/dev/null || rc=1
-  n=0
-  for f in "$BUILD"/gen1/*.c "$BUILD"/gen1/*.h; do
-    b="$(basename "$f")"; n=$((n+1))
-    cmp -s "$f" "$BUILD/gen2/$b" || { echo "  NG: 再実行で出力が違う: $b"; rc=1; }
-    # 作業ツリーが autocrlf で CRLF になっていることがある(ジェネレータは LF で書く)。改行(CR)だけの違いは無視して比べる
-    tr -d '\r' < "$APP/$b" | cmp -s "$f" - || { echo "  NG: コミット済み src/app/$b がジェネレータの出力と違う(再生成が必要)"; rc=1; }
-  done
-  echo "  比較したファイル数 = $n(背景7 + ui_gfx_data.c + ui_layout.c + ui_assets.h = 10)"
-  [ "$n" -eq 10 ] || rc=1
-  build_ui_objs || rc=1
-  echo "  nm(R/r = 読み取り専用データ。D/d/B/b なら RAM)の ui_ シンボル:"
-  nm -S "$UIOBJ"/*.o | grep -E ' ui_' | awk '{print "   ", $0}' | head -40
-  if nm "$UIOBJ"/*.o | grep -E ' [DdBbCc] ui_'; then echo "  NG: RAM に入るデータがある"; rc=1; fi
-  for n in home fill_run fill_done reheat_run reheat_done usage stby; do
-    # MinGW(COFF)の nm はシンボルサイズを出さないので、オブジェクトの .rdata / .rodata セクションの大きさで見る(背景の配列だけが入っている)
-    sz=$(objdump -h "$UIOBJ/ui_bg_$n.o" | awk '/\.rdata|\.rodata/ {print $3}' | head -1); sz=$((16#${sz:-0}))
-    [ "$sz" = "130560" ] || { echo "  NG: ui_bg_$n の読み取り専用データ = $sz バイト (130560 であるべき。CLUT8 の 8bit)"; rc=1; }
-  done
-  total=0
-  for o in "$UIOBJ"/*.o; do
-    s=$(objdump -h "$o" | awk '/\.rdata|\.rodata/ {print $3}' | head -1); total=$((total + 16#${s:-0}))
-  done
-  echo "  生成データの .rodata 合計 = $total バイト(設計 §20.6 / H-D5 のデータ見積 約 1,098,000。±30% = 768,600〜1,427,400)"
-  { [ "$total" -ge 768600 ] && [ "$total" -le 1427400 ]; } || { echo "  NG: 見積の ±30% を外れた"; rc=1; }
-  result S4 $rc
-fi
+# S4: 旧 UI の画面アセット(gen_ui_assets.py)の検査。S28(gen_stock_assets.py)に置き換え
 
 # ---------------------------------------------------------------- S5
 if sel S5; then
@@ -183,6 +150,9 @@ if sel S7; then
   echo " -- A + APP_LOG_ENABLE=0 (UARTログ無効。app_logq 等が未使用でも警告が出ない: 設計 U-H11)"
   check_hw "A log0" $RXDEF -DAPP_LOG_ENABLE=0 -I"$APP" $FIT_INC
   check_hw "B log0" -DAPP_LOG_ENABLE=0 -I"$ROOT/tests/stubs" -I"$APP" $SMC_NO_BSP_EARLY
+  echo " -- A + APP_STK_PREVIEW=1 (8 状態を 3 秒ごとに表示。H-13)"
+  check_hw "A preview1" $RXDEF -DAPP_STK_PREVIEW=1 -I"$APP" $FIT_INC
+  check_hw "A preview1 wx1" $RXDEF -DAPP_STK_PREVIEW=1 -DAPP_WX=1 -I"$APP" $FIT_INC
   echo " -- A + APP_PERF_BENCH=0 (計測なし)"
   check_hw "A perf0" $RXDEF -DAPP_PERF_BENCH=0 -I"$APP" $FIT_INC
   echo " -- A + -Wconversion(製品コードの警告のみ数える。情報用)"
@@ -238,20 +208,11 @@ if sel S10; then
   result S10 $rc
 fi
 
-# ---------------------------------------------------------------- S11
-if sel S11; then
-  echo "### S11 app_main.c の結合試験(偽の SCI/CMT/LCD/タッチ。起動順・hb・コマンド・[ev]・描画と入れ替え・[err]・連打・各種失敗)"
-  rc=0
-  build_ui_objs || rc=1
-  build_fit_test "$BUILD/test_app_main" "$HERE/test_app_main.c" "$APP/app_logq.c" "$APP/app_logfmt.c" "$APP/gfx.c" "$APP/ui_logic.c" "$APP/ui_render.c" \
-      "$UIOBJ"/*.o || rc=1
-  [ -x "$BUILD/test_app_main" ] && { timeout 120 "$BUILD/test_app_main"; r=$?; [ $r -eq 0 ] || { echo "  (終了コード $r。124 なら 120 秒で打ち切り = 無限ループ)"; rc=1; }; }
-  result S11 $rc
-fi
+# S11: 旧 UI の app_main 結合試験(test_app_main.c)。旧 UI 前提のため Phase 1 で廃止。Phase 4 の結合で新しく書く
 
 # ---------------------------------------------------------------- S12
 if sel S12; then
-  echo "### S12 -fsanitize=address,undefined で S8〜S11 と S2/S3/S13〜S15 のテストを再実行(1件でも検出したら失敗)"
+  echo "### S12 -fsanitize=address,undefined で S8〜S10 と S2/S3/S13/S14 のテストを再実行(1件でも検出したら失敗)"
   rc=0
   SAN="-O1 -g -fno-omit-frame-pointer -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -D__NO_INLINE__ -fsanitize=address,undefined -fno-sanitize-recover=all"
   # この環境で sanitizer がリンクできるか(MinGW には libasan / libubsan が無いことが多い)
@@ -275,15 +236,10 @@ if sel S12; then
     [ -x "$BUILD/san_touch" ] && run_san touch_decode "$BUILD/san_touch"
     cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_gfx.c" "$APP/gfx.c" -o "$BUILD/san_gfx" || rc=1
     [ -x "$BUILD/san_gfx" ] && run_san gfx "$BUILD/san_gfx"
-    cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_ui_logic.c" "$APP/ui_logic.c" "$UIOBJ"/*.o -o "$BUILD/san_ui_logic" || rc=1
-    [ -x "$BUILD/san_ui_logic" ] && run_san ui_logic "$BUILD/san_ui_logic"
-    cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_ui_render.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/san_ui_render" || rc=1
-    [ -x "$BUILD/san_ui_render" ] && run_san ui_render "$BUILD/san_ui_render"
+    cc_nowarn $STD $WARN $SAN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/san_ui_stock" || rc=1
+    [ -x "$BUILD/san_ui_stock" ] && { echo "  [san] ui_stock"; timeout 300 "$BUILD/san_ui_stock" "$HERE/data/states" > "$BUILD/ui_stock.san.log" 2>&1 || { head -30 "$BUILD/ui_stock.san.log"; rc=1; }; tail -1 "$BUILD/ui_stock.san.log"; }
     EXTRA_CFLAGS="$SAN" build_fit_test "$BUILD/san_app_debug" "$HERE/test_app_debug.c" "$APP/app_logq.c" || rc=1
     [ -x "$BUILD/san_app_debug" ] && run_san app_debug "$BUILD/san_app_debug"
-    EXTRA_CFLAGS="$SAN" build_fit_test "$BUILD/san_app_main" "$HERE/test_app_main.c" "$APP/app_logq.c" "$APP/app_logfmt.c" "$APP/gfx.c" "$APP/ui_logic.c" "$APP/ui_render.c" \
-        "$UIOBJ"/*.o || rc=1
-    [ -x "$BUILD/san_app_main" ] && run_san app_main "$BUILD/san_app_main"
     result S12 $rc
   fi
 fi
@@ -299,54 +255,30 @@ fi
 
 # ---------------------------------------------------------------- S14
 if sel S14; then
-  echo "### S14 ui_logic 単体テスト(H-U1〜H-U7: 状態機械・押下表示・タッチ・遷移・式・デモ台本・UARTコマンド)"
+  echo "### S14 株価ビューの描画と ui_logic(docs/design.md H-8、H-12 の一部): test_ui_stock(全画素を書く・面の外に書かない・最悪の幅・24 状態の CRC・現在値の x・表示の決定・色・タップ検出)と、ホストの C 描画(fb_hostrender)と Python のプレビュー(--emit-c8)が x < 480 で 0 バイト差(H-8 ⑥)"
   rc=0
   build_ui_objs || rc=1
-  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_ui_logic.c" "$APP/ui_logic.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_logic" || rc=1
-  [ -x "$BUILD/test_ui_logic" ] && { "$BUILD/test_ui_logic" || rc=1; }
+  cc_nowarn $STD $WARN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_stock" || rc=1
+  [ -x "$BUILD/test_ui_stock" ] && { "$BUILD/test_ui_stock" "$HERE/data/states" || rc=1; }
+  cc_nowarn $STD $WARN -I"$APP" -c "$ROOT/tools/fb_hostrender.c" -o "$BUILD/fb_hostrender.o" || rc=1
+  cc_nowarn $STD -O1 -I"$APP" "$ROOT/tools/fb_hostrender.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/fb_hostrender" || rc=1
+  rm -rf "$BUILD/h8"; mkdir -p "$BUILD/h8/c" "$BUILD/h8/py"
+  "$PY" -I "$ROOT/tools/gen_stock_assets.py" --emit-c8 "$BUILD/h8/py" --preview-dir "$BUILD/h8/prev" >/dev/null || rc=1
+  if [ -x "$BUILD/fb_hostrender" ]; then
+    for n in 0 1 2 3 4 5 6 7; do
+      "$BUILD/fb_hostrender" "$HERE/data/states/S$n.state" "$BUILD/h8/c/S$n.c8" --pal "$BUILD/h8/c/S$n.pal" || rc=1
+      if cmp -s "$BUILD/h8/c/S$n.c8" "$BUILD/h8/py/S$n.c8"; then echo "  H-8 ⑥ S$n: C と Python が 139,264 バイト中 0 バイト差(x < 480 は 130,560 画素)"; else echo "  NG: S$n の C 描画と Python のプレビューが違う"; cmp -l "$BUILD/h8/c/S$n.c8" "$BUILD/h8/py/S$n.c8" | head -3; rc=1; fi
+    done
+    cmp -s "$BUILD/h8/c/S1.pal" "$BUILD/h8/py/stock.pal" || { echo "  NG: ui_pal と Python のパレットが違う"; rc=1; }
+  fi
   result S14 $rc
 fi
 
-# ---------------------------------------------------------------- S15
-if sel S15; then
-  echo "### S15 ui_render 単体テスト(H-G3: 全画素を書く / スライドの平行移動 / 押下表示 / バー)と、画面の PPM 出力(tests/out → 目視用 PNG)"
-  rc=0
-  build_ui_objs || rc=1
-  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_ui_render.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_render" || rc=1
-  mkdir -p "$ROOT/tests/out"
-  [ -x "$BUILD/test_ui_render" ] && { "$BUILD/test_ui_render" "$ROOT/tests/out" || rc=1; }
-  [ -d "$ROOT/tests/out" ] && "$PY" -I "$HERE/ppm2png.py" "$ROOT/tests/out" "$ROOT/tools/assets/bath/preview" 2>&1 | tail -1
-  result S15 $rc
-fi
+# S15: 旧 UI の試験。Phase 1(株価ビュー)で廃止(docs/design.md §7.1)
 
-# ---------------------------------------------------------------- S16
-if sel S16; then
-  echo "### S16 追加試験(test_ui_extra: 当たり判定の幾何・UT10〜UT17 相当の [ev] 列・更新間隔のばらつき・32bit折り返し・デモ再開・不変条件ファズ・gfx/ui_render の極端な値)"
-  echo "    (D1〜D3 は修正済み。以前の KNOWN-DEFECT 表示は無い)"
-  rc=0
-  build_ui_objs || rc=1
-  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_ui_extra.c" "$APP/ui_logic.c" "$APP/ui_render.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_extra" || rc=1
-  [ -x "$BUILD/test_ui_extra" ] && { timeout 300 "$BUILD/test_ui_extra" || rc=1; }
-  result S16 $rc
-fi
+# S16: 旧 UI の試験。Phase 1(株価ビュー)で廃止(docs/design.md §7.1)
 
-# ---------------------------------------------------------------- S17
-if sel S17; then
-  echo "### S17 UART ログの判定スクリプト(judge_ui.py): 本物の app_main が出す UT10〜UT19 相当のログ(trace_ui)と、tests/host/data の固定ログを判定し、壊したログが不合格になることを確認"
-  rc=0
-  build_ui_objs || rc=1
-  build_fit_test "$BUILD/trace_ui" "$HERE/trace_ui.c" "$APP/app_logq.c" "$APP/app_logfmt.c" "$APP/gfx.c" "$APP/ui_logic.c" "$APP/ui_render.c" "$UIOBJ"/*.o || rc=1
-  rm -rf "$BUILD/trace"; mkdir -p "$BUILD/trace"
-  [ -x "$BUILD/trace_ui" ] && { timeout 300 "$BUILD/trace_ui" "$BUILD/trace" || rc=1; }
-  JUDGE_TRACE_DIR="$BUILD/trace" "$PY" -I "$HERE/test_judge_ui.py" -v 2>&1 | tail -40; [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1
-  # 製品(APP_WX = 1。コミットする既定になる)の trace も同じ判定に通す(s の応答の [wx] 行などが judge_ui.py の書式に合うこと)。wifi_sw.h の既定値に依らず -DAPP_WX で固定する
-  echo "  APP_WX = 1 の trace_ui(製品の組み込み。wifi_at は偽物)を同じ judge_ui.py で判定"
-  EXTRA_CFLAGS="-DAPP_WX=1" build_fit_test "$BUILD/trace_ui_wx" "$HERE/trace_ui.c" "$APP/app_logq.c" "$APP/app_logfmt.c" "$APP/gfx.c" "$APP/ui_logic.c" "$APP/ui_render.c" "$UIOBJ"/*.o || rc=1
-  rm -rf "$BUILD/trace_wx"; mkdir -p "$BUILD/trace_wx"
-  [ -x "$BUILD/trace_ui_wx" ] && { timeout 300 "$BUILD/trace_ui_wx" "$BUILD/trace_wx" || rc=1; }
-  JUDGE_TRACE_DIR="$BUILD/trace_wx" "$PY" -I "$HERE/test_judge_ui.py" -v 2>&1 | tail -12; [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1
-  result S17 $rc
-fi
+# S17: 旧 UI の試験。Phase 1(株価ビュー)で廃止(docs/design.md §7.1)
 
 # ---------------------------------------------------------------- S18
 if sel S18; then
@@ -373,36 +305,11 @@ if sel S18; then
   result S18 $rc
 fi
 
-# ---------------------------------------------------------------- S19
-if sel S19; then
-  echo "### S19 P2b(CLUT8)の画素比較(H-D4): tools/fb_hostrender(8bpp の面 + ui_pal)と、P1 の基準描画 tests/host/data/p1_ref.npz(実機で読んだ23状態)"
-  rc=0
-  build_ui_objs || rc=1
-  cc_nowarn $STD $WARN -I"$APP" -c "$ROOT/tools/fb_hostrender.c" -o "$BUILD/fb_hostrender.o" || rc=1
-  cc_nowarn $STD -I"$APP" "$ROOT/tools/fb_hostrender.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/fb_hostrender" || rc=1
-  if [ $rc -eq 0 ]; then
-    "$PY" -I "$HERE/judge_p2b.py" --host "$BUILD/fb_hostrender" --ref "$HERE/data/p1_ref.npz" --workdir "$BUILD/p2b" || rc=1
-  fi
-  result S19 $rc
-fi
+# S19: 旧 UI の試験。Phase 1(株価ビュー)で廃止(docs/design.md §7.1)
 
-# ---------------------------------------------------------------- S20
-if sel S20; then
-  echo "### S20 P2b の追加試験(test_p2b_extra: パレットの形・段階の表の形・押下/白光の画素単位の検証(静的 + スライド中の見える列))"
-  rc=0
-  build_ui_objs || rc=1
-  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_p2b_extra.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/test_p2b_extra" || rc=1
-  [ -x "$BUILD/test_p2b_extra" ] && { "$BUILD/test_p2b_extra" || rc=1; }
-  result S20 $rc
-fi
+# S20: 旧 UI の試験。Phase 1(株価ビュー)で廃止(docs/design.md §7.1)
 
-# ---------------------------------------------------------------- S21
-if sel S21; then
-  echo "### S21 P2b の独立検証(test_p2b_indep.py): コミット 0368fe3(P1)を git archive で取り出し、背景・固定色・remap・自己検査(check_c8)の検出力・描画(P1 の fb_hostrender との比較)を再計測"
-  rc=0
-  "$PY" -I "$HERE/test_p2b_indep.py" "$BUILD/p2b_indep" 2>&1 | tail -60; r=${PIPESTATUS[0]}
-  if [ "$r" -eq 77 ]; then skip S21 "P1 のコミット(0368fe3)または gcc が使えない"; elif [ "$r" -eq 0 ]; then result S21 0; else result S21 1; fi
-fi
+# S21: 旧 UI の試験。Phase 1(株価ビュー)で廃止(docs/design.md §7.1)
 
 # ---------------------------------------------------------------- S22
 if sel S22; then
@@ -487,21 +394,7 @@ if sel S24; then
   result S24 $rc
 fi
 
-# ---------------------------------------------------------------- S25
-if sel S25; then
-  echo "### S25 天気・Wi-Fi の UI(docs/design.md §22.8、§22.12 の H-X8 / H-X9): test_ui_wx(ui_wx_t・表示キー・clk_ext・UI_CMD_WX・当たり判定の境界・spin・スプライトの位置・日付・気温・更新時刻・灰色・待機・スライド・全画素)と、c8png.py gallery(ホストの C 描画で 21 状態)、gen_ui_assets.py のアイコン・パレットの検査"
-  rc=0
-  build_ui_objs || rc=1
-  cc_nowarn $STD $WARN -I"$APP" -I"$HERE" "$HERE/test_ui_wx.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_wx" || rc=1
-  [ -x "$BUILD/test_ui_wx" ] && { timeout 300 "$BUILD/test_ui_wx" || rc=1; }
-  echo "  H-X10: ui_gfx_data.o にスプライト 16 枚(天気 8 x 784 + Wi-Fi 4 x 400 + 更新 4 x 400 = 9,472 バイト)が入っている"
-  for s in ui_spr_wx ui_spr_wifi ui_spr_ref; do nm "$UIOBJ/ui_gfx_data.o" | grep -q "$s" || { echo "  NG: $s が無い"; rc=1; }; done
-  echo "  ホストの C 描画で、天気 8 種・Wi-Fi 4 状態・更新の回転・未取得・古い値・負の気温・旧時計(APP_WX = 0 相当)の 21 状態を描く(目視用の PNG。tests/out/wx_gallery.png)"
-  cc_nowarn $STD -I"$APP" "$ROOT/tools/fb_hostrender.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/fb_hostrender" || rc=1
-  mkdir -p "$ROOT/tests/out"
-  [ -x "$BUILD/fb_hostrender" ] && { "$PY" -I "$ROOT/tools/c8png.py" gallery "$BUILD/fb_hostrender" "$ROOT/tests/out/wx_gallery.png" --workdir "$BUILD/gallery" >/dev/null || { echo "  NG: gallery"; rc=1; }; }
-  result S25 $rc
-fi
+# S25: 旧 UI の試験。Phase 1(株価ビュー)で廃止(docs/design.md §7.1)
 
 # ---------------------------------------------------------------- S26
 if sel S26; then
@@ -526,11 +419,6 @@ if sel S26; then
   [ -x "$BUILD/test_wifi_at_wx" ] && { timeout 300 "$BUILD/test_wifi_at_wx" || rc=1; }
   EXTRA_CFLAGS="-DAPP_WX=1 -DWIFI_AT_HOST_TEST -DT_NOSECRET" build_fit_test "$BUILD/test_wifi_at_wx_ns" "$HERE/test_wifi_at.c" $W23 || rc=1
   [ -x "$BUILD/test_wifi_at_wx_ns" ] && { timeout 300 "$BUILD/test_wifi_at_wx_ns" || rc=1; }
-  echo "  app_main.c の組み込み(test_app_main.c を APP_WX = 1 でビルド。wifi_at の API は偽物。M1〜M21 は APP_WX = 0 と同じ判定、M22・M23 が組み込みの判定)"
-  build_ui_objs || rc=1
-  EXTRA_CFLAGS="-DAPP_WX=1" build_fit_test "$BUILD/test_app_main_wx" "$HERE/test_app_main.c" "$APP/app_logq.c" "$APP/app_logfmt.c" "$APP/gfx.c" "$APP/ui_logic.c" "$APP/ui_render.c" \
-      "$UIOBJ"/*.o || rc=1
-  [ -x "$BUILD/test_app_main_wx" ] && { timeout 120 "$BUILD/test_app_main_wx" || rc=1; }
   echo "  wifi_core の quiet(製品: res=start と key=oth を出さない)は S22(test_wifi_core.c)"
   result S26 $rc
 fi
@@ -541,12 +429,6 @@ if sel S27; then
   rc=0
   cc_nowarn $STD -Wall -Wextra -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wx_indep.c" "$APP/wx_core.c" "$APP/wifi_core.c" -o "$BUILD/test_wx_indep" || rc=1
   [ -x "$BUILD/test_wx_indep" ] && { timeout 300 "$BUILD/test_wx_indep" || rc=1; }
-  build_ui_objs || rc=1
-  cc_nowarn $STD -Wall -Wextra -I"$APP" -I"$HERE" "$HERE/test_ui_geom.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_geom" || rc=1
-  [ -x "$BUILD/test_ui_geom" ] && { timeout 300 "$BUILD/test_ui_geom" || rc=1; }
-  echo "  パレット再生成後の誤差を、コミット済みの C の配列から独立に測り直す(背景 7 枚・スプライト 16 枚・ramp・remap)"
-  "$PY" -I "$HERE/test_wx_palette_indep.py"; prc=$?
-  if [ $prc -eq 77 ]; then echo "  SKIP(フォントが無い)"; elif [ $prc -ne 0 ]; then rc=1; fi
   result S27 $rc
 fi
 
@@ -564,6 +446,27 @@ if sel S28; then
   done
   echo "  比較したプレビュー PNG = $n(sheet + state_S0〜S7 + strips + header_footer + palette = 12)"
   [ "$n" -eq 12 ] || rc=1
+  echo "  C の生成物(--emit-c)が 2 回で同一、コミット済みの src/app と一致(CR は無視)"
+  rm -rf "$BUILD/stock_c1" "$BUILD/stock_c2"
+  "$PY" -I "$ROOT/tools/gen_stock_assets.py" --emit-c --out-dir "$BUILD/stock_c1" --preview-dir "$BUILD/stock_c1/prev" >/dev/null || rc=1
+  "$PY" -I "$ROOT/tools/gen_stock_assets.py" --emit-c --out-dir "$BUILD/stock_c2" --preview-dir "$BUILD/stock_c2/prev" >/dev/null || rc=1
+  n=0
+  for b in ui_assets.h ui_layout.c ui_gfx_data.c ui_strips.c ui_preview.c; do
+    n=$((n+1))
+    cmp -s "$BUILD/stock_c1/$b" "$BUILD/stock_c2/$b" || { echo "  NG: 再実行で出力が違う: $b"; rc=1; }
+    tr -d '\r' < "$APP/$b" | cmp -s "$BUILD/stock_c1/$b" - || { echo "  NG: コミット済み src/app/$b がジェネレータの出力と違う(再生成が必要)"; rc=1; }
+  done
+  echo "  比較した C ファイル = $n(5)"
+  echo "  生成物のコンパイル: gnu99 / c99 -pedantic-errors / c11、-Wall -Wextra -Wpedantic -Wconversion で警告ゼロ(APP_STK_PREVIEW = 0 / 1)"
+  for std in "-std=gnu99" "-std=c99 -pedantic-errors" "-std=c11"; do
+    for f in ui_layout ui_gfx_data ui_strips ui_preview; do
+      cc_nowarn $std $WARN -I"$APP" -c "$APP/$f.c" -o "$BUILD/gen_$f.o" || rc=1
+    done
+    cc_nowarn $std $WARN -DAPP_STK_PREVIEW=1 -I"$APP" -c "$APP/ui_preview.c" -o "$BUILD/gen_ui_preview1.o" || rc=1
+  done
+  echo "  RAM に入るデータが無い(nm の D/d/B/b/C が無い。const は r)"
+  if nm "$BUILD"/gen_ui_layout.o "$BUILD"/gen_ui_gfx_data.o "$BUILD"/gen_ui_strips.o "$BUILD"/gen_ui_preview1.o | grep -E ' [DdBbCc] ' | grep -vE ' [DdBbCc] \.'; then echo "  NG: RAM に入るデータがある"; rc=1; else echo "  (データシンボルなし)"; fi
+  echo "  gen_ui_assets.py(旧)は Phase 4 まで残すが、src/app に書くと生成物を壊すので実行しない"
   result S28 $rc
 fi
 

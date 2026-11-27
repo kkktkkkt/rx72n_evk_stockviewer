@@ -1,6 +1,6 @@
 # 実装メモ(コーディング担当)
 
-最終更新: 2026-11-27。状態: **Phase 0(TLS の実機検証用の最小の変更)だけ実装済み。Phase 1 以降は未着手。** 実機ではビルドも実行もしていない(ホスト試験のみ)。
+最終更新: 2026-11-27。状態: **Phase 0(TLS の実機検証用の最小の変更)と Phase 1(表示)を実装済み。Phase 2 以降は未着手。** 実機ではビルドも実行もしていない(ホスト試験のみ)。
 
 ## Phase 0: 変更したファイル(`docs/design.md` §5.5.2 の 0-1〜0-6)
 
@@ -57,6 +57,36 @@
 5. **設計 §5.5.4 の T-0**: `t` の期待を「`err=5 http=301`」としているが、`wx_parse_http` は 200 以外で `err=4`(設計 §5.2 も `err=4`)。**判定は `http=301`(`err=4`)で行う**ものとして、設計書の直しを依頼。
 6. **`docs/design-uart.md` §13 の `R-WX-FAIL`**(`err=([1-8])`、末尾 `ms=(\d+)`)は、`err` 1〜9 と末尾の `len=(\d+)` に直す必要がある(判定スクリプト用)。
 7. `AT+CIPSSLCCONF=0,0,0` の書式は AT 1.1.3.0 で**未確認**(設計どおりに送る。`ERROR` でも先へ進む)。
+
+## Phase 1(表示): 実装したこと
+
+| ファイル | 内容 |
+|---|---|
+| `tools/gen_stock_assets.py` | 帯・グリフ・shape・ramp・パレット・Wi-Fi アイコンの生成、`--check`(H-9)、プレビュー PNG、`--emit-c8`、`--emit-c`(C の生成物) |
+| `src/app/ui_assets.h` `ui_layout.c` `ui_gfx_data.c` `ui_strips.c` `ui_preview.c` | **生成物。手で編集しない**(`python tools/gen_stock_assets.py --emit-c`)。旧 UI の `ui_bg_*.c` 7 本は削除 |
+| `src/app/stk_core.h` | `stk_view_t` の型と定数だけ(計算は Phase 2) |
+| `src/app/ui_render.c/.h` | 設計 §3.13 の描画。**数値の整形(`fmt_*`)は暫定で `ui_render.c` の中**(Phase 2 で `stk_core` の `stk_fmt_*` へ) |
+| `src/app/ui_logic.c/.h` | タップ検出と表示キーだけに縮小(§6.2)。旧 `ui_wx_t` は Phase 3 まで暫定で残す(`wifi_at.c` の `wx_ui` が使う) |
+| `src/app/app_main.c` | 暫定の最小変更。Wi-Fi・時計だけ `stk_view_t` に写す。タップ = `wx_request` |
+| `tools/fb_hostrender.c`、`tools/c8png.py`(`sheet`) | ホスト描画(§7.7) |
+| `tests/host/test_ui_stock.c`、`run.sh`(S14・S28) | H-8、H-9、H-12 の一部 |
+
+## プレビュー構成(8 状態を 3 秒ごとに LCD へ出す)でビルドする
+
+ヘッドレスビルドに `-D` を渡す口が無いので、**手書きの `src/app/wifi_sw.h` の 1 行を書き換える**(コミットする値は `(0)`)。
+
+```c
+#define APP_STK_PREVIEW      (1)     /* wifi_sw.h。既定は (0) */
+```
+
+`ui_assets.h`(生成物)は先頭で `wifi_sw.h` を include するので、二重定義にならず、必ず先に定義される。ホストでは `-DAPP_STK_PREVIEW=1` でも切り替えられる(`#ifndef`)。
+`APP_STK_PREVIEW = 1` のとき `ui_preview.c` の 8 状態(S0〜S7。元は `tests/host/data/states/`)が `app_main` で 3 秒ごとに切り替わる。ネットワークは使わない(`APP_WX = 0` のままでよい)。
+`APP_STK_PREVIEW = 0` では `ui_preview.c` の中身は消える(型の宣言 1 行だけ)。
+
+## 残作業(Phase 1 で意図して残したもの)
+
+- **Phase 4 で削除する**: 旧 UI の `nav_logic.c`(`nav_t`・`nav_update`・`nav_step`。`app_main.c` が `nav_logic.h` を include するため ELF に残る)、`clut8_*`、`tools/gen_ui_assets.py`(**実行すると `src/app` の生成物を壊す**)、`tests/host/test_nav*.c`、`test_clut8_*.c`、`tools/fb2png.py`・`tools/wx_compare_p2b.py`(旧 UI 用)。
+- Phase 2: `stk_fmt_*` を作って `ui_render.c` の暫定整形と置き換える。Phase 3: `ui_wx_t` と `wx_ui` の廃止、`[ev] btn=tap src=...` の書式(今は `btn=tap st=act`)。Phase 4: `app_main` の結合、`[perf]` の `slide`(今は 0)。
 
 ## 未実装(Phase 1 以降)
 

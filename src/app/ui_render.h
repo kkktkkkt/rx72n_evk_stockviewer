@@ -1,19 +1,19 @@
-/* ui_render.h - ui_t -> 480x272 の 8bpp(CLUT8)の面(標準Cのみ。ホストでテストする。設計 §7.2, §9.1, §20.4)
- * 面の左 480 列の全画素を毎回書く(クリア不要。右の 32 列は書かない)。描く順: 背景 → 数字 → バー → アイコン(天気・更新・Wi-Fi。
- * 下地に焼き込み済みの不透明なスプライト)→ 押下の暗転/白光 → デモ中タグ。ホームに日付・気温・天気・更新時刻・更新アイコン、
- * 待機以外の 4 画面のヘッダーに Wi-Fi アイコン(design §22.8)。
- * 色はすべてパレット(ui_pal)の添字。段階の表(ramp)と置き換え表(remap)は tools/gen_ui_assets.py が作る。 */
+/* ui_render.h - ui_t -> 480x272 の 8bpp(CLUT8)の面(標準Cのみ。ホストでテストする。docs/design.md §3.9・§3.13)
+ * 面の左 480 列の全画素を毎回書く(クリア不要。右の 32 列は書かない)。描く順は §3.13:
+ * ヘッダー帯 → 行の帯 x 3 → フッター帯 → Wi-Fi アイコン → 時計・更新時刻 → 各行の丸と状態の文字 → 現在値・騰落率・金額。
+ * 色はすべてパレット(ui_pal)の添字。帯・グリフ・ramp は tools/gen_stock_assets.py が作る。 */
 #ifndef UI_RENDER_H
 #define UI_RENDER_H
 
 #include <stdint.h>
 #include "ui_logic.h"
 
-/* 押下の暗転 / 離した時の白光: ボタンの形(A8)がこの値以上の画素だけ、添字を ui_remap で置き換える。
- * 暗転 = 黒を 6/32、白光 = 白を 19/32 混ぜた色(P1 の 52/256・154/256 と同じ濃さ。tools/gen_ui_assets.py の DIM_L / FLASH_L) */
-#define UI_REMAP_TH     (128u)
-
 /* fb: 512 x 272 の uint8_t 配列(行の長さ GFX_STRIDE)。左 480 列だけ書く */
 void ui_render(const ui_t *ui, uint8_t *fb);
+
+/* §3.9 の優先順位。表示の決定の試験用に公開 */
+uint8_t ui_foot_index(const stk_view_t *v);   /* 0..5 = F0..F5 */
+uint8_t ui_icon_index(const stk_view_t *v);   /* 0 = ON、1 = CONN、2 = STALE、3 = OFF */
+uint8_t ui_row_dir(const stk_row_t *r);       /* STK_UP / STK_DOWN / STK_FLAT(値なし = FLAT) */
 
 #endif /* UI_RENDER_H */

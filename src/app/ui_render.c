@@ -1,317 +1,253 @@
-/* ui_render.c - 標準Cのみ(FITを include しない) */
-#include <string.h>
+/* ui_render.c - stk_view_t -> 480x272 の 8bpp(CLUT8)の面(標準Cのみ。docs/design.md §3.9・§3.13)
+ * 規則は tools/gen_stock_assets.py の render() と同じ(ホスト試験 H-8 で全画素を突き合わせる)。 */
+#include <stddef.h>
 #include "gfx.h"
+#include "ui_assets.h"
 #include "ui_render.h"
 
-/* 文字 -> 数字フォントの番号(0-9 : . % - ( ) と、単独バイト \x01..\x07 = 月日火水木金土)。無ければ -1。( ) と漢字は F14 だけ(日付) */
-static int glyph_index(char c)
+/* 文字 -> グリフ番号(§3.6)。\x01 = ▲、\x02 = ▼、\x03 = −(U+2212)。表に無い字は -1(飛ばす) */
+static int glyph_index(char ch)
 {
-    unsigned char u = (unsigned char)c;
-
-    if ((c >= '0') && (c <= '9')) {
-        return c - '0';
+    if ((ch >= '0') && (ch <= '9')) {
+        return (int)(ch - '0');
     }
-    if ((u >= 1u) && (u <= 7u)) {
-        return (int)UI_G_MON + (int)u - 1;
-    }
-    switch (c) {
-    case ':': return 10;
-    case '.': return 11;
-    case '%': return 12;
-    case '-': return (int)UI_G_MINUS;
-    case '(': return (int)UI_G_LPAR;
-    case ')': return (int)UI_G_RPAR;
-    default:  return -1;
+    switch (ch) {
+    case ',':    return 10;
+    case '.':    return 11;
+    case '+':    return 12;
+    case '\x03': return 13;
+    case '%':    return 14;
+    case '\x01': return 15;
+    case '\x02': return 16;
+    case ':':    return 17;
+    case '-':    return 18;
+    default:     return -1;
     }
 }
 
-/* sel = 2つ目の表を使う(alt < 0 のスロットだけ。HOME_TEMP の古い値の灰色) */
-static void draw_text(uint8_t *fb, uint8_t slot, const char *s, int32_t xo, uint8_t sel)
+/* 文字列を描く(§3.13): RIGHT は x -= Σadv、CENTER は x -= Σadv / 2。各グリフは gfx_a8_ramp(... ramp, ramp, -1) */
+static void draw_text(uint8_t *fb, uint8_t font, const char *s, int32_t x, int32_t y, uint8_t align, const uint8_t *ramp)
 {
-    const ui_slot_t  *sl = &ui_slots[slot];
-    const ui_glyph_t *g  = ui_glyphs[sl->font];
-    int32_t x = sl->x + xo;
-    int     i, k;
+    const ui_glyph_t *gl = ui_glyphs[font];
+    const char *p;
+    int32_t wd = 0;
+    int g;
 
-    if (sl->align != UI_ALIGN_LEFT) {
-        int32_t w = 0;
-        for (i = 0; s[i] != '\0'; i++) {
-            k = glyph_index(s[i]);
-            w += (k >= 0) ? g[k].adv : 0;
+    for (p = s; *p != '\0'; p++) {
+        g = glyph_index(*p);
+        if (g >= 0) {
+            wd += gl[g].adv;
         }
-        x -= (sl->align == UI_ALIGN_CENTER) ? (w / 2) : w;
     }
-    for (i = 0; s[i] != '\0'; i++) {
-        k = glyph_index(s[i]);
-        if (k < 0) {
+    if (align == (uint8_t)UI_ALIGN_RIGHT) {
+        x -= wd;
+    } else if (align == (uint8_t)UI_ALIGN_CENTER) {
+        x -= wd / 2;
+    } else {
+        /* LEFT */
+    }
+    for (p = s; *p != '\0'; p++) {
+        g = glyph_index(*p);
+        if (g < 0) {
             continue;
         }
-        gfx_a8_ramp(fb, &ui_glyph_pool[g[k].off], g[k].w, g[k].h, x + g[k].bx, sl->y - g[k].by,
-                    ui_slot_ramp[slot][((sel != 0u) && (ui_slot_alt[slot] < 0)) ? 1 : 0], ui_slot_ramp[slot][1], ui_slot_alt[slot]);
-        x += g[k].adv;
-    }
-}
-
-/* ---- 文字列の組み立て(桁数は固定、または可変。\0 終端) ---- */
-static char *put2(char *p, uint32_t n)
-{
-    *p++ = (char)('0' + (n / 10u) % 10u);
-    *p++ = (char)('0' + n % 10u);
-    return p;
-}
-
-static char *putn(char *p, uint32_t n)
-{
-    if (n >= 100u) {
-        *p++ = (char)('0' + (n / 100u) % 10u);
-    }
-    if (n >= 10u) {
-        *p++ = (char)('0' + (n / 10u) % 10u);
-    }
-    *p++ = (char)('0' + n % 10u);
-    return p;
-}
-
-static void num2(uint8_t *fb, uint8_t slot, uint32_t n, int32_t xo)
-{
-    char b[4];
-    *put2(b, n) = '\0';
-    draw_text(fb, slot, b, xo, 0u);
-}
-
-static void numn(uint8_t *fb, uint8_t slot, uint32_t n, const char *suffix, int32_t xo)
-{
-    char b[8];
-    char *p = putn(b, n);
-    while (*suffix != '\0') {
-        *p++ = *suffix++;
-    }
-    *p = '\0';
-    draw_text(fb, slot, b, xo, 0u);
-}
-
-/* 時刻(分)。1440 以上(0xFFFF = 未同期・未取得)は --:-- */
-static void clock_text(uint8_t *fb, uint8_t slot, uint32_t min, int32_t xo)
-{
-    char b[8];
-    char *p;
-
-    if (min >= 1440u) {
-        b[0] = '-'; b[1] = '-'; b[2] = ':'; b[3] = '-'; b[4] = '-'; b[5] = '\0';
-    } else {
-        p = put2(b, min / 60u);
-        *p++ = ':';
-        *put2(p, min % 60u) = '\0';
-    }
-    draw_text(fb, slot, b, xo, 0u);
-}
-
-static void tenths(uint8_t *fb, uint8_t slot, uint32_t x10, int32_t xo)
-{
-    char b[8];
-    char *p = putn(b, x10 / 10u);
-    *p++ = '.';
-    *p++ = (char)('0' + x10 % 10u);
-    *p = '\0';
-    draw_text(fb, slot, b, xo, 0u);
-}
-
-/* ---- ホームの天気の行と Wi-Fi アイコン(design §22.8) ---- */
-static void put_spr(uint8_t *fb, const uint8_t *spr, int32_t w, int32_t h, int32_t x, int32_t y, int32_t xo)
-{
-    gfx_blit8(fb, spr, w, 0, 0, w, h, x + xo, y);
-}
-
-/* 日付「M月D日(曜)」。clk_ext = 0 は旧デモの 11月21日(土)。未同期(month = 0)や範囲外は描かない */
-static void date_text(uint8_t *fb, const ui_wx_t *w, int32_t xo)
-{
-    static const char WD[7] = { 2, 1, 3, 4, 5, 6, 7 };     /* 日 月 火 水 木 金 土 の文字コード */
-    char    b[16];
-    char   *p;
-    uint8_t m = 11u, d = 21u, wd = 6u;
-
-    if (w->clk_ext != 0u) {
-        m = w->month; d = w->day; wd = w->wday;
-        if ((m < 1u) || (m > 12u) || (d < 1u) || (d > 31u) || (wd > 6u)) {
-            return;
+        if (gl[g].w != 0u) {
+            gfx_a8_ramp(fb, &ui_glyph_pool[gl[g].off], gl[g].w, gl[g].h, x + gl[g].bx, y - gl[g].by, ramp, ramp, -1);
         }
+        x += gl[g].adv;
     }
-    p = putn(b, m);
-    *p++ = 1;                                                /* 月 */
-    p = putn(p, d);
-    *p++ = 2;                                                /* 日 */
-    *p++ = '(';
-    *p++ = WD[wd];
-    *p++ = ')';
-    *p = '\0';
-    draw_text(fb, UI_SL_HOME_DATE, b, xo, 0u);
 }
 
-/* 気温。未取得は --.-、負は -、絶対値は 99.9 まで */
-static void temp_text(uint8_t *fb, const ui_wx_t *w, int32_t xo)
+/* ---- 数値の整形(§4.2)。Phase 2 で stk_core の stk_fmt_* に置き換える暫定。float を使わない ---- */
+static size_t put_commas(char *out, uint32_t n)
 {
-    char     b[8];
-    char    *p = b;
-    int32_t  t = w->temp_x10;
-    uint32_t m;
+    char tmp[12];
+    size_t len = 0u, i, o = 0u;
 
-    if (w->have == 0u) {
-        b[0] = '-'; b[1] = '-'; b[2] = '.'; b[3] = '-'; b[4] = '\0';
-    } else {
-        if (t < 0) {
-            *p++ = '-';
-            t = -t;
+    do {
+        tmp[len++] = (char)('0' + (n % 10u));
+        n /= 10u;
+    } while (n != 0u);
+    for (i = 0u; i < len; i++) {
+        if ((i != 0u) && (((len - i) % 3u) == 0u)) {
+            out[o++] = ',';
         }
-        m = (uint32_t)((t > 999) ? 999 : t);
-        p = putn(p, m / 10u);
-        *p++ = '.';
-        *p++ = (char)('0' + m % 10u);
-        *p = '\0';
+        out[o++] = tmp[len - 1u - i];
     }
-    draw_text(fb, UI_SL_HOME_TEMP, b, xo, (w->stale != 0u) ? 1u : 0u);
+    return o;
 }
 
-static void draw_home_wx(uint8_t *fb, const ui_wx_t *w, uint8_t spin, int32_t xo)
+static size_t put_x100(char *out, uint32_t v)       /* 2 桁の小数つき(カンマ区切り) */
 {
-    uint32_t kind = ((w->have != 0u) && (w->kind < UI_SPR_WX_N)) ? w->kind : (UI_SPR_WX_N - 1u);   /* 未取得・範囲外 = 不明 */
+    size_t o = put_commas(out, v / 100u);
 
-    date_text(fb, w, xo);
-    temp_text(fb, w, xo);
-    clock_text(fb, UI_SL_HOME_UPD, (w->have != 0u) ? w->upd_min : 0xFFFFu, xo);
-    put_spr(fb, ui_spr_wx[kind], UI_WX_W, UI_WX_H, UI_WX_X, UI_WX_Y, xo);
-    put_spr(fb, ui_spr_ref[spin & 3u], UI_REF_W, UI_REF_H, UI_REF_X, UI_REF_Y, xo);
+    out[o++] = '.';
+    out[o++] = (char)('0' + ((v % 100u) / 10u));
+    out[o++] = (char)('0' + (v % 10u));
+    return o;
 }
 
-/* 進捗バー(§2.4): 満タン画像の左から (w - r) 列をコピーし、右端の角丸(A8)を段階の表で重ねる */
-static void draw_bar(uint8_t *fb, uint8_t bar, int32_t w, int32_t xo)
+static void fmt_price(char *out, int32_t p, uint8_t yen)     /* out: 16 バイト以上 */
 {
-    const ui_bar_t *b = &ui_bars[bar];
+    size_t o = (yen != 0u) ? put_commas(out, ((uint32_t)p + 50u) / 100u) : put_x100(out, (uint32_t)p);
 
-    if (w < b->min_w) {
-        w = b->min_w;
-    }
-    if (w > b->w) {
-        w = b->w;
-    }
-    gfx_blit8(fb, b->full, b->w, 0, 0, w - b->r, b->h, b->x + xo, b->y);
-    gfx_a8_ramp(fb, b->cap, b->r, b->h, b->x + xo + w - b->r, b->y, ui_bar_ramp[bar], NULL, -1);
+    out[o] = '\0';
 }
 
-/* 使用量の棒(§2.5): 上の2角を簡易に丸める */
-static void draw_usage_bars(uint8_t *fb, uint32_t e_ms, int32_t xo)
+static void fmt_pct(char *out, int32_t bp, uint8_t dir)
 {
-    uint8_t  i;
-    int32_t  x, h, y;
-    uint8_t  c;
+    uint32_t a = (bp < 0) ? (uint32_t)(-bp) : (uint32_t)bp;
+    size_t o = 0u;
 
-    for (i = 0u; i < (uint8_t)UI_USAGE_N; i++) {
-        h = ui_bar_h(i, e_ms);
-        if (h <= 0) {
-            continue;
-        }
-        x = UI_USAGE_X0 + UI_USAGE_PITCH * (int32_t)i + xo;
-        y = UI_USAGE_BASE - h;
-        c = (i == (uint8_t)(UI_USAGE_N - 1u)) ? (uint8_t)UI_I_BAR_U_TODAY : (uint8_t)UI_I_BAR_U;
-        if (h >= 3) {
-            gfx_fill8(fb, x + 2, y, UI_USAGE_W - 4, 1, c);
-            gfx_fill8(fb, x + 1, y + 1, UI_USAGE_W - 2, 1, c);
-            gfx_fill8(fb, x, y + 2, UI_USAGE_W, h - 2, c);
-        } else {
-            gfx_fill8(fb, x, y, UI_USAGE_W, h, c);
-        }
-    }
-}
-
-static void draw_screen(uint8_t *fb, const ui_vals_t *v, const ui_wx_t *w, uint8_t spin, int32_t xo)
-{
-    bool done;
-
-    switch (v->scr) {
-    case UI_SCR_HOME:
-        gfx_blit8(fb, ui_bgi[UI_BG_HOME], UI_W, 0, 0, UI_W, UI_H, xo, 0);
-        clock_text(fb, UI_SL_HOME_CLOCK, v->clock_min, xo);
-        num2(fb, UI_SL_HOME_SET, v->set, xo);
-        num2(fb, UI_SL_HOME_BATH, v->bath_x10 / 10u, xo);
-        draw_home_wx(fb, w, spin, xo);
-        break;
-    case UI_SCR_FILL:
-        done = (v->fill_x10 >= 1000u);
-        gfx_blit8(fb, ui_bgi[done ? UI_BG_FILL_DONE : UI_BG_FILL_RUN], UI_W, 0, 0, UI_W, UI_H, xo, 0);
-        num2(fb, UI_SL_FILL_BATH, v->bath_x10 / 10u, xo);
-        draw_bar(fb, UI_BAR_FILL, ui_fill_w(v->fill_x10), xo);
-        numn(fb, UI_SL_FILL_PCT, v->fill_x10 / 10u, "%", xo);
-        if (!done) {
-            numn(fb, UI_SL_FILL_REMAIN, ui_fill_remain_min(v->fill_x10), "", xo);
-        }
-        break;
-    case UI_SCR_REHEAT:
-        done = (v->bath_x10 >= ((uint32_t)v->set * 10u));
-        gfx_blit8(fb, ui_bgi[done ? UI_BG_REHEAT_DONE : UI_BG_REHEAT_RUN], UI_W, 0, 0, UI_W, UI_H, xo, 0);
-        num2(fb, UI_SL_REHEAT_SETHDR, v->set, xo);
-        tenths(fb, UI_SL_REHEAT_BATH, v->bath_x10, xo);
-        num2(fb, UI_SL_REHEAT_SET, v->set, xo);
-        draw_bar(fb, UI_BAR_REHEAT, ui_reheat_w(v->bath_x10, v->set), xo);
-        if (!done) {
-            numn(fb, UI_SL_REHEAT_REMAIN, ui_reheat_remain_min(v->bath_x10, v->set), "", xo);
-        }
-        break;
-    case UI_SCR_USAGE:
-        gfx_blit8(fb, ui_bgi[UI_BG_USAGE], UI_W, 0, 0, UI_W, UI_H, xo, 0);
-        tenths(fb, UI_SL_USAGE_FLOW, v->flow_x10, xo);
-        draw_usage_bars(fb, v->bar_ms, xo);
-        break;
-    default:
-        gfx_blit8(fb, ui_bgi[UI_BG_STBY], UI_W, 0, 0, UI_W, UI_H, xo, 0);
-        clock_text(fb, UI_SL_STBY_CLOCK, v->clock_min, xo);
-        return;                          /* 待機には Wi-Fi アイコンを出さない */
-    }
-    put_spr(fb, ui_spr_wifi[(w->net < UI_SPR_WIFI_N) ? w->net : UI_NET_OFF], UI_WIFI_W, UI_WIFI_H, UI_WIFI_X, UI_WIFI_Y, xo);
-}
-
-/* 押下の暗転(黒)/ 離した時の白光。ボタンの角丸の形(A8)が UI_REMAP_TH 以上の画素の添字を置き換える */
-static void draw_feedback(uint8_t *fb, const ui_t *u, uint8_t scr, int32_t xo)
-{
-    const ui_btn_def_t *d;
-    const ui_shape_t   *sh;
-
-    if (u->fb_phase == UI_PH_NONE) {
+    if (dir == (uint8_t)STK_FLAT) {
+        out[o++] = '0'; out[o++] = '.'; out[o++] = '0'; out[o++] = '0'; out[o++] = '%'; out[o] = '\0';
         return;
     }
-    d = &ui_btn_defs[u->fb_btn];
-    if ((d->scr != scr) || (d->shape < 0)) {
-        return;
-    }
-    sh = &ui_shapes[d->shape];
-    if (u->fb_phase == UI_PH_PRESS) {
-        gfx_remap8(fb, sh->a8, sh->w, sh->h, d->vis.x + xo, d->vis.y, ui_remap[0], UI_REMAP_TH);
-    } else {
-        gfx_remap8(fb, sh->a8, sh->w, sh->h, d->vis.x + xo, d->vis.y, ui_remap[1], UI_REMAP_TH);
-    }
+    out[o++] = (dir == (uint8_t)STK_UP) ? '+' : '\x03';
+    o += put_commas(&out[o], a / 100u);
+    out[o++] = '.';
+    out[o++] = (char)('0' + ((a % 100u) / 10u));
+    out[o++] = (char)('0' + (a % 10u));
+    out[o++] = '%';
+    out[o] = '\0';
 }
 
-static void draw_one(uint8_t *fb, const ui_t *u, const ui_vals_t *v, int32_t xo)
+static void fmt_amt(char *out, int32_t diff, uint8_t dir, uint8_t yen)
 {
-    draw_screen(fb, v, &u->wx, u->spin, xo);
-    draw_feedback(fb, u, v->scr, xo);
-    if ((u->demo != 0u) && (v->scr != UI_SCR_STANDBY)) {
-        gfx_blit8(fb, ui_tag_pix, UI_TAG_W, 0, 0, UI_TAG_W, UI_TAG_H, UI_TAG_X + xo, UI_TAG_Y);
-    }
-}
+    uint32_t a = (diff < 0) ? (uint32_t)(-diff) : (uint32_t)diff;
+    size_t o = 0u;
 
-void ui_render(const ui_t *u, uint8_t *fb)
-{
-    int32_t dx;
-
-    if (u->tr_on == 0u) {
-        draw_one(fb, u, &u->v, 0);
+    if (dir == (uint8_t)STK_FLAT) {
+        out[o++] = '0';
+        if (yen == 0u) {
+            out[o++] = '.'; out[o++] = '0'; out[o++] = '0';
+        }
+        out[o] = '\0';
         return;
     }
-    dx = u->tr_dx;                       /* 0..480。前へ: 古い -dx / 新しい 480-dx。戻る: 古い +dx / 新しい dx-480 */
-    if (u->tr_fwd != 0u) {
-        draw_one(fb, u, &u->ov, -dx);
-        draw_one(fb, u, &u->v, UI_W - dx);
+    out[o++] = (dir == (uint8_t)STK_UP) ? '\x01' : '\x02';
+    o += (yen != 0u) ? put_commas(&out[o], (a + 50u) / 100u) : put_x100(&out[o], a);
+    out[o] = '\0';
+}
+
+static void fmt_hhmm(char *out, uint16_t m)
+{
+    if (m == (uint16_t)STK_NONE16) {
+        out[0] = '-'; out[1] = '-'; out[2] = ':'; out[3] = '-'; out[4] = '-'; out[5] = '\0';
+        return;
+    }
+    out[0] = (char)('0' + ((m / 60u) / 10u));
+    out[1] = (char)('0' + ((m / 60u) % 10u));
+    out[2] = ':';
+    out[3] = (char)('0' + ((m % 60u) / 10u));
+    out[4] = (char)('0' + ((m % 60u) % 10u));
+    out[5] = '\0';
+}
+
+/* ---- 表示の決定(§3.9) ---- */
+uint8_t ui_row_dir(const stk_row_t *r)
+{
+    if (r->have == 0u) {
+        return (uint8_t)STK_FLAT;
+    }
+    return (r->diff_x100 > 0) ? (uint8_t)STK_UP : ((r->diff_x100 < 0) ? (uint8_t)STK_DOWN : (uint8_t)STK_FLAT);
+}
+
+uint8_t ui_foot_index(const stk_view_t *v)
+{
+    if ((v->net == (uint8_t)STK_NET_OFF) || (v->net == (uint8_t)STK_NET_ERR)) {
+        return 4u;
+    }
+    if (v->have_any == 0u) {
+        return 1u;
+    }
+    if (v->busy != 0u) {
+        return 2u;
+    }
+    if (v->stale_all != 0u) {
+        return 3u;
+    }
+    return (v->partial != 0u) ? 5u : 0u;
+}
+
+uint8_t ui_icon_index(const stk_view_t *v)
+{
+    if ((v->net == (uint8_t)STK_NET_OFF) || (v->net == (uint8_t)STK_NET_ERR)) {
+        return 3u;
+    }
+    if (v->net == (uint8_t)STK_NET_CONN) {
+        return 1u;
+    }
+    return (v->stale_all != 0u) ? 2u : 0u;
+}
+
+static void draw_shape(uint8_t *fb, uint8_t shape, int32_t y0, const uint8_t *ramp)
+{
+    const ui_shape_t *s = &ui_shapes[shape];
+
+    gfx_a8_ramp(fb, s->a8, s->w, s->h, s->x, y0 + s->y, ramp, ramp, -1);
+}
+
+static void draw_row(uint8_t *fb, const stk_row_t *r, uint8_t row, uint8_t dir)
+{
+    int32_t y0 = ui_row_y0[row];
+    uint8_t yen = (row == 0u) ? 1u : 0u;
+    char buf[16];
+    const ui_slot_t *sp = &ui_slots[(uint8_t)UI_SL_PRICE0 + row];
+    const ui_slot_t *sc = &ui_slots[(uint8_t)UI_SL_PCT0 + row];
+    const ui_slot_t *sa = &ui_slots[(uint8_t)UI_SL_AMT0 + row];
+    uint8_t k_main, k_acc;
+
+    /* 6: 丸と状態の文字(ramp は行の下地の色 = dir) */
+    if (r->mkt == (uint8_t)STK_MKT_TRADING) {
+        draw_shape(fb, (uint8_t)UI_SH_DOT, y0, ui_ramp[UI_R_DOTG][dir]);
+        draw_shape(fb, (uint8_t)UI_SH_TRADING, y0, ui_ramp[UI_R_SUB][dir]);
+    } else if (r->mkt == (uint8_t)STK_MKT_CLOSED) {
+        draw_shape(fb, (uint8_t)UI_SH_DOT, y0, ui_ramp[UI_R_STALE][dir]);
+        draw_shape(fb, (uint8_t)UI_SH_CLOSED, y0, ui_ramp[UI_R_SUB][dir]);
+    } else if (r->fail != 0u) {
+        draw_shape(fb, (uint8_t)UI_SH_DOT, y0, ui_ramp[UI_R_STALE][dir]);
+        draw_shape(fb, (uint8_t)UI_SH_FAIL, y0, ui_ramp[UI_R_SUB][dir]);
     } else {
-        draw_one(fb, u, &u->ov, dx);
-        draw_one(fb, u, &u->v, dx - UI_W);
+        /* 何も描かない */
+    }
+    /* 7: 現在値・騰落率・金額 */
+    if (r->have == 0u) {
+        draw_text(fb, sp->font, "---", sp->x, sp->y, sp->align, ui_ramp[UI_R_STALE][dir]);
+        draw_text(fb, sc->font, "---", sc->x, sc->y, sc->align, ui_ramp[UI_R_STALE][dir]);
+        return;
+    }
+    k_main = (r->stale != 0u) ? (uint8_t)UI_R_STALE : (uint8_t)UI_R_PRICE;
+    k_acc  = (r->stale != 0u) ? (uint8_t)UI_R_STALE : (uint8_t)UI_R_ACC;
+    fmt_price(buf, r->price_x100, yen);
+    draw_text(fb, sp->font, buf, sp->x, sp->y, sp->align, ui_ramp[k_main][dir]);
+    fmt_pct(buf, r->pct_bp, dir);
+    draw_text(fb, sc->font, buf, sc->x, sc->y, sc->align, ui_ramp[k_acc][dir]);
+    fmt_amt(buf, r->diff_x100, dir, yen);
+    draw_text(fb, sa->font, buf, sa->x, sa->y, sa->align, ui_ramp[k_acc][dir]);
+}
+
+void ui_render(const ui_t *ui, uint8_t *fb)
+{
+    const stk_view_t *v = &ui->view;
+    uint8_t dir[STK_ROWS];
+    char buf[8];
+    uint8_t i;
+
+    gfx_blit8(fb, ui_hdr, UI_W, 0, 0, UI_W, UI_HDR_H, 0, 0);                                   /* 1 */
+    for (i = 0u; i < (uint8_t)STK_ROWS; i++) {                                                   /* 2 */
+        dir[i] = ui_row_dir(&v->row[i]);
+        gfx_blit8(fb, ui_strip[i][dir[i]], UI_W, 0, 0, UI_W, UI_ROW_H, 0, ui_row_y0[i]);
+    }
+    gfx_blit8(fb, ui_foot[ui_foot_index(v)], UI_W, 0, 0, UI_W, UI_FOOT_H, 0, UI_FOOT_Y);        /* 3 */
+    gfx_blit8(fb, ui_spr_wifi[ui_icon_index(v)], UI_WIFI_W, 0, 0, UI_WIFI_W, UI_WIFI_H, UI_WIFI_X, UI_WIFI_Y);   /* 4 */
+    fmt_hhmm(buf, v->clock_min);                                                                 /* 5 */
+    draw_text(fb, ui_slots[UI_SL_CLOCK].font, buf, ui_slots[UI_SL_CLOCK].x, ui_slots[UI_SL_CLOCK].y,
+              ui_slots[UI_SL_CLOCK].align, ui_ramp_hdr[UI_RH_CLOCK]);
+    fmt_hhmm(buf, v->upd_min);
+    draw_text(fb, ui_slots[UI_SL_UPD].font, buf, ui_slots[UI_SL_UPD].x, ui_slots[UI_SL_UPD].y,
+              ui_slots[UI_SL_UPD].align, ui_ramp_hdr[UI_RH_UPD]);
+    for (i = 0u; i < (uint8_t)STK_ROWS; i++) {                                                   /* 6, 7 */
+        draw_row(fb, &v->row[i], i, dir[i]);
     }
 }
