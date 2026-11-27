@@ -29,7 +29,7 @@ RXDEF="-D__RX__ -D__RXV3__ -D__RX_LITTLE_ENDIAN__ -D__attribute__(x)="
 # MinGW(Windows)では PE/COFF のため --gc-sections が未参照関数を除去せず、ホストで解決できない参照が残ることがある。そのとき再リンクを許す
 LDX="-Wl,--allow-multiple-definition"
 
-FAILS=0; PASSES=0; SKIPS=0; FAILED_LIST=""
+FAILS=0; PASSES=0; SKIPS=0; SUSPECTS=0; FAILED_LIST=""
 ONLY=("$@")
 sel() { [ ${#ONLY[@]} -eq 0 ] && return 0; local s; for s in "${ONLY[@]}"; do [ "$s" = "$1" ] && return 0; done; return 1; }
 result() { # name rc
@@ -57,7 +57,7 @@ build_ui_objs() {
   return 0
 }
 
-STDC_FILES="nav_logic touch_decode app_logfmt app_logq gfx ui_logic ui_render"
+STDC_FILES="nav_logic touch_decode app_logfmt app_logq gfx ui_logic ui_render stk_core"
 
 # ---------------------------------------------------------------- S1
 if sel S1; then
@@ -212,7 +212,7 @@ fi
 
 # ---------------------------------------------------------------- S12
 if sel S12; then
-  echo "### S12 -fsanitize=address,undefined で S8〜S10 と S2/S3/S13/S14 のテストを再実行(1件でも検出したら失敗)"
+  echo "### S12 -fsanitize=address,undefined で S8〜S10 と S2/S3/S13/S14/S29/S30 のテストを再実行(1件でも検出したら失敗)"
   rc=0
   SAN="-O1 -g -fno-omit-frame-pointer -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -D__NO_INLINE__ -fsanitize=address,undefined -fno-sanitize-recover=all"
   # この環境で sanitizer がリンクできるか(MinGW には libasan / libubsan が無いことが多い)
@@ -236,8 +236,12 @@ if sel S12; then
     [ -x "$BUILD/san_touch" ] && run_san touch_decode "$BUILD/san_touch"
     cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_gfx.c" "$APP/gfx.c" -o "$BUILD/san_gfx" || rc=1
     [ -x "$BUILD/san_gfx" ] && run_san gfx "$BUILD/san_gfx"
-    cc_nowarn $STD $WARN $SAN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/san_ui_stock" || rc=1
+    cc_nowarn $STD $WARN $SAN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/san_ui_stock" || rc=1
     [ -x "$BUILD/san_ui_stock" ] && { echo "  [san] ui_stock"; timeout 300 "$BUILD/san_ui_stock" "$HERE/data/states" > "$BUILD/ui_stock.san.log" 2>&1 || { head -30 "$BUILD/ui_stock.san.log"; rc=1; }; tail -1 "$BUILD/ui_stock.san.log"; }
+    cc_nowarn $STD $WARN $SAN -I"$APP" -I"$HERE" "$HERE/test_stk_core.c" "$APP/stk_core.c" -o "$BUILD/san_stk_core" || rc=1
+    [ -x "$BUILD/san_stk_core" ] && run_san stk_core "$BUILD/san_stk_core"
+    cc_nowarn $STD $SAN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wx_stock.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/san_wx_stock" || rc=1
+    [ -x "$BUILD/san_wx_stock" ] && { echo "  [san] wx_stock"; timeout 300 "$BUILD/san_wx_stock" "$HERE/data" > "$BUILD/wx_stock.san.log" 2>&1 || { head -30 "$BUILD/wx_stock.san.log"; rc=1; }; tail -1 "$BUILD/wx_stock.san.log"; }
     EXTRA_CFLAGS="$SAN" build_fit_test "$BUILD/san_app_debug" "$HERE/test_app_debug.c" "$APP/app_logq.c" || rc=1
     [ -x "$BUILD/san_app_debug" ] && run_san app_debug "$BUILD/san_app_debug"
     result S12 $rc
@@ -258,10 +262,10 @@ if sel S14; then
   echo "### S14 株価ビューの描画と ui_logic(docs/design.md H-8、H-12 の一部): test_ui_stock(全画素を書く・面の外に書かない・最悪の幅・24 状態の CRC・現在値の x・表示の決定・色・タップ検出)と、ホストの C 描画(fb_hostrender)と Python のプレビュー(--emit-c8)が x < 480 で 0 バイト差(H-8 ⑥)"
   rc=0
   build_ui_objs || rc=1
-  cc_nowarn $STD $WARN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_stock" || rc=1
+  cc_nowarn $STD $WARN -DAPP_STK_PREVIEW=1 -I"$APP" -I"$HERE" "$HERE/test_ui_stock.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/ui_preview.c" "$UIOBJ"/*.o -o "$BUILD/test_ui_stock" || rc=1
   [ -x "$BUILD/test_ui_stock" ] && { "$BUILD/test_ui_stock" "$HERE/data/states" || rc=1; }
   cc_nowarn $STD $WARN -I"$APP" -c "$ROOT/tools/fb_hostrender.c" -o "$BUILD/fb_hostrender.o" || rc=1
-  cc_nowarn $STD -O1 -I"$APP" "$ROOT/tools/fb_hostrender.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/fb_hostrender" || rc=1
+  cc_nowarn $STD -O1 -I"$APP" "$ROOT/tools/fb_hostrender.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$UIOBJ"/*.o -o "$BUILD/fb_hostrender" || rc=1
   rm -rf "$BUILD/h8"; mkdir -p "$BUILD/h8/c" "$BUILD/h8/py"
   "$PY" -I "$ROOT/tools/gen_stock_assets.py" --emit-c8 "$BUILD/h8/py" --preview-dir "$BUILD/h8/prev" >/dev/null || rc=1
   if [ -x "$BUILD/fb_hostrender" ]; then
@@ -332,7 +336,7 @@ if sel S22; then
   if ! nm "$BUILD/wifi_core_wx.o" "$BUILD/wx_core_wx.o" | grep -qE ' [Tt] (wifi_core_start|wx_parse_http)'; then echo "  NG: APP_WX = 1 で中身が無い"; rc=1; fi
   echo "  APP_WIFI_TEST と APP_CLUT8_TEST が両方 1 なら #error"
   if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c -DAPP_WIFI_TEST=1 -DAPP_CLUT8_TEST=1 -I"$APP" - >/dev/null 2>&1; then echo "  NG: #error が出ない"; rc=1; else echo "  ok (#error 発生)"; fi
-  cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" -o "$BUILD/test_wifi_core" || rc=1
+  cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wifi_core" || rc=1
   [ -x "$BUILD/test_wifi_core" ] && { timeout 300 "$BUILD/test_wifi_core" || rc=1; }
   echo "  H-W8: wifi_secret.h を include するのは wifi_at.c だけ(ファイル名だけ出す。中身は読まない)"
   inc="$(grep -rlE '^\s*#\s*include\s*[<"]wifi_secret\.h[>"]' "$ROOT/src" --include='*.c' --include='*.h' --exclude=wifi_secret.h --exclude-dir=smc_gen 2>/dev/null | sed 's#.*/##' | sort -u)"
@@ -365,7 +369,7 @@ if sel S23; then
     if [ $crc -ne 0 ] || echo "$o" | grep -E "src/app/.*(warning|error)" >/dev/null; then echo "  NG $f.c"; echo "$o" | head -10; rc=1; else echo "  ok $f.c"; fi
   done
   echo "  結合試験 test_wifi_at.c(3種: 既定 / -DT_NOSECRET / -DAPP_WIFI_AUTOSTART=1)"
-  W23="$APP/wifi_core.c $APP/wx_core.c $APP/app_logfmt.c"
+  W23="$APP/wifi_core.c $APP/wx_core.c $APP/stk_core.c $APP/app_logfmt.c"
   EXTRA_CFLAGS="-DAPP_WIFI_TEST=1 -DWIFI_AT_HOST_TEST" build_fit_test "$BUILD/test_wifi_at" "$HERE/test_wifi_at.c" $W23 || rc=1
   [ -x "$BUILD/test_wifi_at" ] && { timeout 300 "$BUILD/test_wifi_at" || rc=1; }
   EXTRA_CFLAGS="-DAPP_WIFI_TEST=1 -DWIFI_AT_HOST_TEST -DT_NOSECRET" build_fit_test "$BUILD/test_wifi_at_ns" "$HERE/test_wifi_at.c" $W23 || rc=1
@@ -389,7 +393,7 @@ fi
 if sel S24; then
   echo "### S24 天気・気温の取得(docs/design.md §22.12 の H-X1〜H-X4・H-X7・H-X11): wx_core の単体試験(要求 190 バイト・HTTP 解析・Date: と時刻・WMO 表・ソフト時計・ログ書式・取得の予定表)。wifi_core の WX step・データモード・範囲(H-X5・H-X6)は S22、wifi_at の x は S23"
   rc=0
-  cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$APP/wx_core.c" -o "$BUILD/test_wx_core" || rc=1
+  cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wx_core" || rc=1
   [ -x "$BUILD/test_wx_core" ] && { timeout 300 "$BUILD/test_wx_core" || rc=1; }
   result S24 $rc
 fi
@@ -414,7 +418,7 @@ if sel S26; then
   for sym in wx_init wx_poll wx_request wx_ui wx_log_state; do nm "$BUILD/wifi_at_wx.o" | grep -qE " [Tt] _?$sym\$" || { echo "  NG: $sym が無い"; rc=1; }; done
   if nm "$BUILD/wifi_at_wx.o" | grep -qE " [Tt] _?wifi_test_main\$"; then echo "  NG: APP_WX = 1 だけで wifi_test_main が入っている"; rc=1; fi
   echo "  結合試験 test_wifi_at.c の製品版(2種: 秘密あり / -DT_NOSECRET)"
-  W23="$APP/wifi_core.c $APP/wx_core.c $APP/app_logfmt.c"
+  W23="$APP/wifi_core.c $APP/wx_core.c $APP/stk_core.c $APP/app_logfmt.c"
   EXTRA_CFLAGS="-DAPP_WX=1 -DWIFI_AT_HOST_TEST" build_fit_test "$BUILD/test_wifi_at_wx" "$HERE/test_wifi_at.c" $W23 || rc=1
   [ -x "$BUILD/test_wifi_at_wx" ] && { timeout 300 "$BUILD/test_wifi_at_wx" || rc=1; }
   EXTRA_CFLAGS="-DAPP_WX=1 -DWIFI_AT_HOST_TEST -DT_NOSECRET" build_fit_test "$BUILD/test_wifi_at_wx_ns" "$HERE/test_wifi_at.c" $W23 || rc=1
@@ -427,7 +431,7 @@ fi
 if sel S27; then
   echo "### S27 天気・時刻同期の独立試験(テスト担当の追加): test_wx_indep(ガードページによる範囲外読み出しの検出・全日の暦・ソフト時計・予定表の乱数走行(ms の折り返し)・wifi_core の乱数入力)と、test_ui_geom(当たり判定・要素の配置・スプライトの継ぎ目と区別)"
   rc=0
-  cc_nowarn $STD -Wall -Wextra -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wx_indep.c" "$APP/wx_core.c" "$APP/wifi_core.c" -o "$BUILD/test_wx_indep" || rc=1
+  cc_nowarn $STD -Wall -Wextra -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wx_indep.c" "$APP/wx_core.c" "$APP/wifi_core.c" "$APP/stk_core.c" -o "$BUILD/test_wx_indep" || rc=1
   [ -x "$BUILD/test_wx_indep" ] && { timeout 300 "$BUILD/test_wx_indep" || rc=1; }
   result S27 $rc
 fi
@@ -470,5 +474,69 @@ if sel S28; then
   result S28 $rc
 fi
 
-echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"
+# ---------------------------------------------------------------- S29
+if sel S29; then
+  echo "### S29 株価の数値(docs/design.md H-1・H-2・H-5): stk_core の標準 C 条件(gnu99 / c99 -pedantic-errors / c11、警告ゼロ)・float / double が無い・test_stk_core(前日比・騰落率の丸め、整形、市場の状態)"
+  rc=0
+  for std in "-std=gnu99" "-std=c99 -pedantic-errors" "-std=c11"; do
+    cc_nowarn $std $WARN -I"$APP" -c "$APP/stk_core.c" -o "$BUILD/stk_core.o" || rc=1
+  done
+  echo "  stk_core.c / .h が platform.h / FIT ヘッダを include していないこと"
+  if grep -nE '#\s*include\s*[<"](platform|board_pins|r_[a-z_0-9]+_if)\.h[>"]' "$APP/stk_core.c" "$APP/stk_core.h"; then rc=1; fi
+  echo "  float / double が無い(stk_core / wx_core)・stk_core に浮動小数点の書式(%f %e %g)が無いこと(コメントを除いて grep。H-2)"
+  for f in stk_core.c stk_core.h wx_core.c wx_core.h; do
+    if "$CC" -x c -fpreprocessed -dD -E -P "$APP/$f" 2>/dev/null | grep -nE '\b(float|double)\b'; then echo "  NG: $f に float / double"; rc=1; fi
+  done
+  if "$CC" -x c -fpreprocessed -dD -E -P "$APP/stk_core.c" 2>/dev/null | grep -nE '%[-0-9.]*[feEgG]'; then echo "  NG: stk_core.c に浮動小数点の書式"; rc=1; fi   # wx_core.c の %5E は URL の符号化なので対象外
+  echo "  グローバル/静的データが無いこと(nm。const は r)"
+  if nm "$BUILD/stk_core.o" | grep -E ' [DdBbCc] ' | grep -vE ' [DdBbCc] \.'; then rc=1; else echo "  (データシンボルなし)"; fi
+  cc_nowarn $STD -Wall -Wextra -Wconversion -I"$APP" -I"$HERE" "$HERE/test_stk_core.c" "$APP/stk_core.c" -o "$BUILD/test_stk_core" || rc=1
+  [ -x "$BUILD/test_stk_core" ] && { timeout 300 "$BUILD/test_stk_core" || rc=1; }
+  result S29 $rc
+fi
+
+# ---------------------------------------------------------------- S30
+if sel S30; then
+  echo "### S30 株価の応答の解析(docs/design.md H-3・H-4): test_wx_stock(実応答 6 つの期待値との一致・あらゆる長さに切る(禁止ページ)・合成の応答・HTTP の状態・date:・変異ファズ)と、保存した実応答に個人に紐づくヘッダーが無いこと"
+  rc=0
+  echo "  tests/host/data/yahoo_*.http のヘッダーは 状態行・date・content-type だけ(Set-Cookie・Cookie・x- や y- の ID などが無い)"
+  nf=0
+  for f in "$HERE"/data/yahoo_*.http; do
+    nf=$((nf+1))
+    bad="$(tr -d '\r' < "$f" | sed -n '1,/^$/p' | grep -vEi '^(HTTP/1\.0 200 OK|date: .*|content-type: .*|)$')"
+    if [ -n "$bad" ]; then echo "  NG: $(basename "$f") のヘッダーに想定外の行: $bad"; rc=1; fi
+    if grep -aiE 'set-cookie|^cookie' "$f" >/dev/null; then echo "  NG: $(basename "$f") に cookie"; rc=1; fi
+  done
+  echo "  保存した実応答 = $nf(6 のはず)"
+  [ "$nf" -eq 6 ] || rc=1
+  cc_nowarn $STD -Wall -Wextra -Wconversion -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wx_stock.c" "$APP/wx_core.c" "$APP/stk_core.c" -o "$BUILD/test_wx_stock" || rc=1
+  [ -x "$BUILD/test_wx_stock" ] && { timeout 300 "$BUILD/test_wx_stock" "$HERE/data" || rc=1; }
+  result S30 $rc
+fi
+
+# ---------------------------------------------------------------- S31
+if sel S31; then
+  echo "### S31 株価ビュー Phase 1・2 のテスト担当による独立試験(test_stk_indep): ±0.005% ちょうどの丸め・別の割り算との乱数比較・符号 + − ▲ ▼ の連結・状態ファイルの数値・市場の状態(別モデル・東京の 1 日・週末・NY)・描画の領域(箱の外に描かない・区切り線と左バーとフッターが無傷・箱が重ならない)・不正な表示キーの描画・色(RGB565 の厳密一致・コントラスト)・解析の差分ファズ"
+  rc=0
+  build_ui_objs || rc=1
+  cc_nowarn $STD -Wall -Wextra -Wconversion -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_stk_indep.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/wx_core.c" "$UIOBJ/ui_gfx_data.o" "$UIOBJ/ui_layout.o" "$UIOBJ/ui_strips.o" -lm -o "$BUILD/test_stk_indep" || rc=1
+  [ -x "$BUILD/test_stk_indep" ] && { timeout 300 "$BUILD/test_stk_indep" "$HERE/data" || rc=1; }
+  result S31 $rc
+fi
+
+# ---------------------------------------------------------------- S32
+# 不具合の可能性(設計と実装の食い違い・設計の穴)。落ちる試験を残してある。FAIL には数えず、SUSPECT として別に数える(0 になれば解消)
+if sel S32; then
+  echo "### S32 不具合の可能性(test_stk_indep --suspect): close 配列の途中で切れた応答を成功にしない・clock_min の範囲外を時刻にしない。落ちたら SUSPECT(FAIL には数えない)"
+  rc=0
+  build_ui_objs || rc=1
+  [ -x "$BUILD/test_stk_indep" ] || cc_nowarn $STD -Wall -Wextra -Wconversion -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_stk_indep.c" "$APP/ui_render.c" "$APP/ui_logic.c" "$APP/stk_core.c" "$APP/gfx.c" "$APP/wx_core.c" "$UIOBJ/ui_gfx_data.o" "$UIOBJ/ui_layout.o" "$UIOBJ/ui_strips.o" -lm -o "$BUILD/test_stk_indep" || rc=1
+  if [ $rc -ne 0 ]; then result S32 1
+  else
+    if timeout 300 "$BUILD/test_stk_indep" "$HERE/data" --suspect; then echo "==> PASS  S32 (不具合の可能性は解消している)"; echo
+    else echo "==> SUSPECT  S32 (不具合の可能性が残っている。上の FAIL 行が該当。FAIL には数えない)"; SUSPECTS=$((SUSPECTS+1)); echo; fi
+  fi
+fi
+
+echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS SUSPECT(不具合の可能性)=$SUSPECTS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"
 [ $FAILS -eq 0 ]

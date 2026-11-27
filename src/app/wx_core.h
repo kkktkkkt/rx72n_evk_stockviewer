@@ -1,5 +1,5 @@
-/* wx_core.h - 天気・気温の取得と時刻同期の論理部(標準Cのみ。FIT・platform.h を include しない。ホストで試験する)
- * 仕様: docs/design.md §22.2〜§22.7、docs/design-uart.md §13。wx_core.c は APP_WIFI_ON = 0 の時は中身が消える(wifi_sw.h)。
+/* wx_core.h - 株価(Yahoo chart API)・天気の取得と時刻同期の論理部(標準Cのみ。FIT・platform.h を include しない。ホストで試験する)
+ * 仕様: 株価 = docs/design.md §4・§5。天気(旧)= docs/base/design.md §22、docs/design-uart.md §13。wx_core.c は APP_WIFI_ON = 0 の時は中身が消える(wifi_sw.h)。
  * 応答の本文は、ここから外へ出さない(出すのは数値と名前だけ)。 */
 #ifndef WX_CORE_H
 #define WX_CORE_H
@@ -26,7 +26,7 @@ typedef enum { WX_SRC_BOOT = 0, WX_SRC_TIMER, WX_SRC_TOUCH, WX_SRC_UART, WX_SRC_
 
 /* 取得の結果。err: 0 = なし、1 TCP/SSL 接続 / 2 送信 / 3 応答なし・途切れ / 4 HTTP の状態が 200 でない / 5 キー・値が無い・読めない / 6 範囲外 / 7 バッファ超過 / 8 join 失敗 / 9 ESP32 が再起動(取得中に ready) */
 typedef struct {
-    uint8_t  ok;             /* 1 = 気温・天気が取れた(err = 0) */
+    uint8_t  ok;             /* 1 = 取れた(err = 0)。wx_parse_http = 株価、wx_parse_weather = 気温・天気 */
     uint8_t  err;
     uint8_t  have_date;      /* 1 = Date: が読めた(jst_s が有効。天気が失敗でも 1 になりうる) */
     uint8_t  closed;         /* 1 = CLOSED を受けて終わった */
@@ -39,7 +39,18 @@ typedef struct {
     uint32_t jst_s;          /* Date: + 9 時間。1970-01-01 00:00:00 からの通算秒(JST の壁時計) */
     uint32_t ms;             /* 取得の開始から結果まで(wifi_core が入れる) */
     uint32_t first_ms;       /* 最初のデータ(+IPD の最初のバイト)を受けた時刻(wifi_core が入れる。時刻同期用) */
+    /* ---- 株価(wx_parse_http が入れる。wx_parse_weather は 0 にする。design.md §5.2・§5.9)---- */
+    uint8_t  sym;            /* 銘柄 0〜2(wifi_core / wifi_at が入れる。解析は触らない) */
+    uint8_t  has_bar_prev;   /* 1 = close 配列の「直前の足」から prev_x100 を決めた(0 = meta.chartPreviousClose) */
+    uint8_t  cur;            /* wx_cur_t(currency)。キーが無くても失敗にしない */
+    int32_t  price_x100;     /* regularMarketPrice(×100。1〜99,999,999) */
+    int32_t  prev_x100;      /* 前日の終値(決定後。×100。1〜99,999,999) */
+    uint32_t mtime;          /* regularMarketTime(UTC 秒) */
+    uint32_t rs;             /* currentTradingPeriod.regular.start(UTC 秒) */
+    uint32_t re;             /* 同 end */
 } wx_result_t;
+
+typedef enum { WX_CUR_NONE = 0, WX_CUR_JPY, WX_CUR_USD, WX_CUR_OTHER } wx_cur_t;
 
 typedef struct { uint16_t year; uint8_t month, day, wday, hour, min, sec; } wx_date_t;   /* wday: 0 = 日曜 */
 
@@ -57,9 +68,16 @@ bool   wx_target_ssl(wx_target_t t);              /* SSL の接続先か(範囲�
 size_t wx_build_request(char *buf, size_t size, wx_target_t t, uint8_t sym);
 
 /* ---- 応答の解析 ----
- * buf は NUL 終端でなくてよい(len で止まる)。成功 = 状態 200 かつ気温と天気コードが範囲内で読めた。
- * 失敗しても http / have_date / jst_s は分かった範囲で入る。out の ms / first_ms / closed は触らない */
+ * buf は NUL 終端でなくてよい(len で止まる)。失敗しても http / have_date / jst_s は分かった範囲で入る。
+ * out の ms / first_ms / closed / len / sym は触らない。数値だけを取り出す(本文は out に残さない) */
+
+/* 株価(Yahoo chart API の range=2d。design.md §5.2)。成功 = 状態 200 かつ meta の regularMarketPrice・chartPreviousClose・regularMarketTime・
+ * currentTradingPeriod.regular の start / end が読め、前日の終値(close 配列の直前の足があればそれ、無ければ chartPreviousClose)と価格が
+ * 範囲内(stk_calc が通る)。err: 3 = 状態行まで届かない / 4 = 状態が 200 でない(429 を含む)/ 5 = キー・値が無い・読めない・途切れ / 6 = 範囲外 */
 bool wx_parse_http(const char *buf, size_t len, wx_result_t *out);
+
+/* 天気(旧。open-meteo)。成功 = 状態 200 かつ気温と天気コードが範囲内で読めた。Phase 3 で wifi_core が wx_parse_http へ切り替えたら削除する */
+bool wx_parse_weather(const char *buf, size_t len, wx_result_t *out);
 const char *wx_kind_name(uint8_t kind);          /* "sun" ... "unknown"。範囲外は NULL */
 uint8_t wx_kind_of(uint32_t wmo);                /* WMO コード → wx_kind_t(範囲外は UNKNOWN) */
 

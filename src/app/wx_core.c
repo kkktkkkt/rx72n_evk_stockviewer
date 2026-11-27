@@ -1,9 +1,10 @@
-/* wx_core.c - 天気・気温の取得と時刻同期の論理部。標準Cのみ。FITのヘッダを include しない。
- * 仕様: docs/design.md §22.2〜§22.7、docs/design-uart.md §13。
+/* wx_core.c - 株価(Yahoo chart API)・天気の取得と時刻同期の論理部。標準Cのみ。FITのヘッダを include しない。
+ * 仕様: 株価 = docs/design.md §4・§5。天気(旧)= docs/base/design.md §22、docs/design-uart.md §13。
  * 応答の本文は解析して数値だけを取り出す。ログ関数(wx_fmt_*)は本文・SSID・パスワードを引数に取らない。 */
 #include <stdio.h>
 #include <string.h>
 #include "wx_core.h"
+#include "stk_core.h"
 #include "wifi_sw.h"
 
 #if APP_WIFI_ON   /* 0 の時は中身を消す(wifi_sw.h) */
@@ -405,30 +406,35 @@ static uint8_t read_code(const char *p, const char *end, uint8_t *out)
     return 0u;
 }
 
-bool wx_parse_http(const char *buf, size_t len, wx_result_t *out)
+/* 状態行・Date:・本文の位置を調べる。out の結果の項目(天気・株価とも)を初期値にする(ms / first_ms / closed / len / sym は触らない)。
+ * 戻り値 = 状態が 200 で、本文の解析へ進める。失敗は out->err(3 = 状態行まで届かない / 4 = 状態が 200 でない・状態行の形が違う) */
+static bool parse_head(const char *buf, size_t len, wx_result_t *out, const char **bodyp)
 {
-    const char *end;
     const char *body;
-    const char *cur;
-    const char *v;
     size_t      hn;
     uint32_t    utc;
     uint32_t    http;
 
-    out->ok        = 0u;
-    out->err       = 0u;
-    out->have_date = 0u;
-    out->wmo       = 0u;
-    out->kind      = (uint8_t)WX_KIND_UNKNOWN;
-    out->temp_x10  = 0;
-    out->http      = 0u;
-    out->obs       = 0u;
-    out->jst_s     = 0u;
+    out->ok            = 0u;
+    out->err           = 0u;
+    out->have_date     = 0u;
+    out->wmo           = 0u;
+    out->kind          = (uint8_t)WX_KIND_UNKNOWN;
+    out->temp_x10      = 0;
+    out->http          = 0u;
+    out->obs           = 0u;
+    out->jst_s         = 0u;
+    out->has_bar_prev  = 0u;
+    out->cur           = (uint8_t)WX_CUR_NONE;
+    out->price_x100    = 0;
+    out->prev_x100     = 0;
+    out->mtime         = 0u;
+    out->rs            = 0u;
+    out->re            = 0u;
     if (buf == NULL) {
         out->err = 3u;
         return false;
     }
-    end = buf + len;
     if (len < 12u) {
         out->err = 3u;                                      /* 状態行まで届かない */
         return false;
@@ -447,13 +453,25 @@ bool wx_parse_http(const char *buf, size_t len, wx_result_t *out)
         out->have_date = 1u;
         out->jst_s     = utc + JST_OFFSET_S;
     }
-    if (body == NULL) {
-        body = buf;
-    }
+    *bodyp = (body != NULL) ? body : buf;
     if (http != 200u) {
         out->err = 4u;
         return false;
     }
+    return true;
+}
+
+bool wx_parse_weather(const char *buf, size_t len, wx_result_t *out)
+{
+    const char *end;
+    const char *body;
+    const char *cur;
+    const char *v;
+
+    if (!parse_head(buf, len, out, &body)) {
+        return false;
+    }
+    end = buf + len;
     cur = find_after(body, (size_t)(end - body), "\"current\":");          /* "current_units": は一致しない */
     if (cur == NULL) {
         out->err = 5u;
@@ -484,6 +502,224 @@ bool wx_parse_http(const char *buf, size_t len, wx_result_t *out)
         out->obs = (uint16_t)((((v[11] - '0') * 10) + (v[12] - '0')) * 100 + ((v[14] - '0') * 10) + (v[15] - '0'));
     }
     out->ok = 1u;
+    return true;
+}
+
+/* ---- 株価(Yahoo chart API。design.md §4.2・§5.2)---- */
+
+static bool is_vend(char c)                                    /* JSON の値の終わり(配列の ] を含む) */
+{
+    return (c == ',') || (c == '}') || (c == ']') || (c == ' ') || (c == '\t') || (c == '\r') || (c == '\n');
+}
+
+/* ×100 の整数。符号(- 任意)、整数部 1〜7 桁、. と小数部(1 桁以上)は任意。小数 3 桁目を四捨五入(絶対値。符号は後)、4 桁目以降は無視。
+ * null・文字列・指数(e E)・数字なし・8 桁以上の整数部・小数点だけ・途切れ(値の後ろの区切りが無い)は false。endp(NULL 可)= 値の次(区切り)の位置 */
+static bool read_x100(const char *p, const char *end, int32_t *out, const char **endp)
+{
+    bool     neg = false;
+    unsigned id  = 0u;
+    unsigned fd  = 0u;
+    uint32_t iv  = 0u;
+    uint32_t fv  = 0u;                                         /* 小数の上位 2 桁(0〜99) */
+    uint32_t r3  = 0u;                                         /* 小数 3 桁目 */
+
+    if ((p < end) && (*p == '-')) {
+        neg = true;
+        p++;
+    }
+    while ((p < end) && is_dig(*p)) {
+        if (id >= 7u) {
+            return false;                                      /* 8 桁以上 */
+        }
+        iv = (iv * 10u) + (uint32_t)(*p - '0');
+        id++;
+        p++;
+    }
+    if (id == 0u) {
+        return false;
+    }
+    if ((p < end) && (*p == '.')) {
+        p++;
+        while ((p < end) && is_dig(*p)) {
+            if (fd < 2u) {
+                fv = (fv * 10u) + (uint32_t)(*p - '0');
+            } else if (fd == 2u) {
+                r3 = (uint32_t)(*p - '0');
+            } else {
+                /* 4 桁目以降は無視 */
+            }
+            fd++;
+            p++;
+        }
+        if (fd == 0u) {
+            return false;                                      /* "5." */
+        }
+        if (fd == 1u) {
+            fv *= 10u;                                         /* 12.5 → 50 */
+        }
+    }
+    if ((p >= end) || !is_vend(*p)) {
+        return false;
+    }
+    iv = (iv * 100u) + fv + ((r3 >= 5u) ? 1u : 0u);            /* 最大 9,999,999 x 100 + 100 = 1,000,000,000 < 2^31 */
+    *out  = neg ? -(int32_t)iv : (int32_t)iv;
+    if (endp != NULL) {
+        *endp = p;
+    }
+    return true;
+}
+
+/* UTC 秒(符号・小数なしの 1〜10 桁。uint32 に収まる)。値の後ろに区切りが要る */
+static bool read_u32(const char *p, const char *end, uint32_t *out)
+{
+    uint64_t v = 0u;
+    unsigned n = 0u;
+
+    while ((p < end) && is_dig(*p) && (n < 11u)) {
+        v = (v * 10u) + (uint64_t)(*p - '0');
+        n++;
+        p++;
+    }
+    if ((n == 0u) || (n > 10u) || (p >= end) || !is_vend(*p) || (v > 0xFFFFFFFFu)) {
+        return false;
+    }
+    *out = (uint32_t)v;
+    return true;
+}
+
+/* close 配列("close":[ の次から ] まで)の「直前の足」(最後から 2 番目)。要素は数値か null。] まで読めて 2 要素以上で、
+ * 最後から 2 番目が数値なら true。読めない要素・] が無い(途切れ)は false(= 直前の足なし) */
+static bool read_close_prev(const char *p, const char *end, int32_t *prev)
+{
+    int32_t  a  = 0;                                           /* 最後から 2 番目 */
+    int32_t  b  = 0;                                           /* 最後 */
+    bool     va = false;
+    bool     vb = false;
+    bool     need = false;                                     /* , の直後(次の要素が要る) */
+    unsigned n  = 0u;
+
+    for (;;) {
+        int32_t     v  = 0;
+        bool        ok = false;
+        const char *q  = p;
+
+        if (p >= end) {
+            return false;                                      /* ] が無い */
+        }
+        if (*p == ']') {
+            if (need) {
+                return false;                                  /* [1,2,] */
+            }
+            break;
+        }
+        if (((end - p) >= 5) && (memcmp(p, "null", 4u) == 0) && is_vend(p[4])) {
+            q = p + 4;
+        } else if (read_x100(p, end, &v, &q)) {
+            ok = true;
+        } else {
+            return false;
+        }
+        a  = b;
+        va = vb;
+        b  = v;
+        vb = ok;
+        if (n < 255u) {
+            n++;
+        }
+        p = q;
+        need = false;
+        if (*p == ',') {
+            p++;
+            need = true;
+        } else if (*p != ']') {
+            return false;                                      /* 空白など(Yahoo の出力にはない) */
+        } else {
+            /* ] へ(次の周回で抜ける) */
+        }
+    }
+    if ((n < 2u) || !va) {
+        return false;
+    }
+    *prev = a;
+    return true;
+}
+
+/* currency(3 文字)。"currency":"JPY" の形。無い・形が違うなら NONE */
+static uint8_t read_cur(const char *body, const char *end)
+{
+    const char *v = find_after(body, (size_t)(end - body), "\"currency\":\"");
+
+    if ((v == NULL) || ((end - v) < 4) || (v[3] != '"')) {
+        return (uint8_t)WX_CUR_NONE;
+    }
+    if (memcmp(v, "JPY", 3u) == 0) {
+        return (uint8_t)WX_CUR_JPY;
+    }
+    if (memcmp(v, "USD", 3u) == 0) {
+        return (uint8_t)WX_CUR_USD;
+    }
+    return (uint8_t)WX_CUR_OTHER;
+}
+
+bool wx_parse_http(const char *buf, size_t len, wx_result_t *out)
+{
+    const char *end;
+    const char *body;
+    const char *v;
+    const char *rg;
+    const char *rg_end;
+    int32_t     meta_prev = 0;
+    int32_t     bar_prev  = 0;
+    stk_calc_t  c;
+
+    if (!parse_head(buf, len, out, &body)) {
+        return false;
+    }
+    end      = buf + len;
+    out->err = 5u;                                             /* 以降の失敗は、範囲外(6)を除いて、キー・値が読めない */
+    v = find_after(body, (size_t)(end - body), "\"regularMarketPrice\":");
+    if ((v == NULL) || !read_x100(v, end, &out->price_x100, NULL)) {
+        return false;
+    }
+    v = find_after(body, (size_t)(end - body), "\"chartPreviousClose\":");
+    if ((v == NULL) || !read_x100(v, end, &meta_prev, NULL)) {
+        return false;
+    }
+    v = find_after(body, (size_t)(end - body), "\"regularMarketTime\":");
+    if ((v == NULL) || !read_u32(v, end, &out->mtime)) {
+        return false;
+    }
+    rg = find_after(body, (size_t)(end - body), "\"regular\":{");     /* start と end の順序は銘柄で違う(F4)。この { } の中だけを見る */
+    if (rg == NULL) {
+        return false;
+    }
+    rg_end = (const char *)memchr(rg, '}', (size_t)(end - rg));
+    rg_end = (rg_end != NULL) ? (rg_end + 1) : end;            /* } を値の区切りに使えるよう、} の次まで */
+    v = find_after(rg, (size_t)(rg_end - rg), "\"start\":");
+    if ((v == NULL) || !read_u32(v, rg_end, &out->rs)) {
+        return false;
+    }
+    v = find_after(rg, (size_t)(rg_end - rg), "\"end\":");
+    if ((v == NULL) || !read_u32(v, rg_end, &out->re)) {
+        return false;
+    }
+    out->cur = read_cur(body, end);
+    v = find_after(body, (size_t)(end - body), "\"indicators\":");
+    if (v != NULL) {
+        v = find_after(v, (size_t)(end - v), "\"close\":[");
+    }
+    if ((v != NULL) && read_close_prev(v, end, &bar_prev)) {
+        out->has_bar_prev = 1u;
+        out->prev_x100    = bar_prev;                          /* 直前の足の終値(§5.3) */
+    } else {
+        out->prev_x100    = meta_prev;
+    }
+    if (!stk_calc(out->price_x100, out->prev_x100, &c)) {
+        out->err = 6u;                                         /* 範囲外(価格・前日の終値・騰落率) */
+        return false;
+    }
+    out->err = 0u;
+    out->ok  = 1u;
     return true;
 }
 

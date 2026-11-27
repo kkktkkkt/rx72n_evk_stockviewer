@@ -1,6 +1,6 @@
 # 実装メモ(コーディング担当)
 
-最終更新: 2026-11-27。状態: **Phase 0(TLS の実機検証用の最小の変更)と Phase 1(表示)を実装済み。Phase 2 以降は未着手。** 実機ではビルドも実行もしていない(ホスト試験のみ)。
+最終更新: 2026-11-27。状態: **Phase 0(TLS の実機検証用の最小の変更)・Phase 1(表示)・Phase 2(数値と解析)を実装済み。Phase 3 以降は未着手。** 実機ではビルドも実行もしていない(ホスト試験のみ)。
 
 ## Phase 0: 変更したファイル(`docs/design.md` §5.5.2 の 0-1〜0-6)
 
@@ -48,7 +48,57 @@
 
 `[wx] res=fail src=<src> err=<1..9> http=<n> ms=<n> len=<n>`。`err=9` = 取得中に `ready`(ESP32 が再起動)。`len` = バッファに溜めたバイト数(最大 3,072。本文は出さない)。`[wifi] step=wx_sslconf ...` が `z` のときだけ出る。
 
-## 設計から外れた点・設計役への差し戻し
+## Phase 2(数値と解析): 実装したこと
+
+| ファイル | 内容 |
+|---|---|
+| `src/app/stk_core.h/.c`(新規。標準 C。float なし) | `stk_calc`(×100 の整数 → 前日比・騰落率(0.01% 単位。四捨五入は絶対値の 0.5 を遠い方へ。int64 の割り算 1 か所)・`dir`)、`stk_fmt_price` / `stk_fmt_pct` / `stk_fmt_amt`(カンマ区切り・小数 2 桁・▲ ▼ − の記号 `\x01` `\x02` `\x03`)、`stk_row_kind`、`stk_market`(取引中 / 終値 / 不明。§5.4)。型と定数(`stk_view_t` など)は Phase 1 のまま |
+| `src/app/ui_render.c` | 暫定の `fmt_*` を削除し、`stk_fmt_*` を呼ぶ。**描画は 1 画素も変わらない**(`test_ui_stock` の 24 状態の CRC と、C / Python の 0 バイト差が合格) |
+| `src/app/wx_core.h/.c` | `wx_parse_http` を Yahoo の chart API(`range=2d`)用に書き換え(§5.2。価格・前日の終値・`mtime`・`rs`・`re`・currency・HTTP の状態・`Date:` を整数で。本文は結果に残さない)。`wx_result_t` に `sym`・`has_bar_prev`・`cur`(`wx_cur_t`)・`price_x100`・`prev_x100`・`mtime`・`rs`・`re` を追加。旧 `wx_parse_http` は **`wx_parse_weather`** に改名して残した(下の「設計から外れた点」の 1) |
+| `src/app/wifi_core.c` | 呼び出し 2 行だけ `wx_parse_weather` に変更(動作は今までどおり。Phase 3 で `wx_parse_http` へ切り替える) |
+| `tests/host/test_stk_core.c`、`test_wx_stock.c`(新規)、`run.sh`(S29・S30、既存の link 行に `stk_core.c`) | H-1・H-2・H-5(S29)、H-3・H-4(S30) |
+| `tests/host/data/yahoo_{6723T,N225,GSPC}_{2d,1d}.http`(新規。6 つ) | 2026-11-27 13:03〜13:05 JST に PC から `curl --http1.0`(`User-Agent: rx72n-stockview/1`)で取った実応答。状態行・`date`・`content-type`・本文だけ(それ以外のヘッダーは捨てた)。S30 がヘッダーの内容を検査する |
+| `test_wx_core.c`、`test_wx_indep.c` | 天気の解析の試験は `wx_parse_weather` の呼び出しに名前だけ変更 |
+
+### 公開関数(stk_core.h)
+
+| 関数 | 内容 |
+|---|---|
+| `bool stk_calc(price_x100, prev_x100, stk_calc_t *out)` | 価格・前日の終値は 1〜99,999,999。`|pct_bp| ≦ 99,999`。外れたら false で `out` は 0・`STK_FLAT` |
+| `size_t stk_fmt_price(buf, size, price_x100, uint8_t kind)` | 円は整数円(0.5 円は切り上げ)、指数は小数 2 桁 |
+| `size_t stk_fmt_pct(buf, size, pct_bp, uint8_t dir)` | `+2.31%`、`\x03` + `0.25%`、変化なしは `0.00%`。符号は `dir` で決める |
+| `size_t stk_fmt_amt(buf, size, diff_x100, uint8_t kind)` | `\x01` / `\x02` + 数字。0 は矢印なしの `0` / `0.00` |
+| `uint8_t stk_row_kind(uint8_t row)` | 行 0 = `STK_KIND_YEN`、それ以外 = `STK_KIND_INDEX` |
+| `uint8_t stk_market(bool synced, now_utc, mtime, rs, re)` | 未同期 = `STK_MKT_NONE`。32bit の差で比べる |
+
+整形の失敗(範囲外・size 不足・kind / dir が不正)は 0 を返して `buf[0] = '\0'`。
+
+### 設計から外れた点・設計に無い判断(設計役の確認が要る)
+
+1. **旧天気の解析を `wx_parse_weather` として残した**。設計 §5.9 は `wx_result_t` の天気の項目と天気の解析を削除するが、`wifi_core.c` の `wx_publish`・`wifi_at.c`・`wx_fmt_ok`・`wx_fmt_state` と、それらの試験(`test_wifi_core.c`・`test_wifi_at.c`)がまだ天気の結果を使うため、Phase 3 の前に消すと既存の試験と `APP_WX = 1`(天気の製品版)が壊れる。**Phase 3 で `wifi_core` を `wx_parse_http` に切り替えるときに、`wx_parse_weather`・`wmo` `kind` `temp_x10` `obs`・`WX_KIND_*`・`wx_fmt_ok` の天気項目を削除する**。
+2. **`stk_market` の引数に `synced` を足した**(設計 §5.4・H-5 の「時計が未同期 → NONE」を表す手段が無かったため)。`now_utc` は呼び出し側が JST から 32,400 を引いて渡す。
+3. **`stk_fmt_pct` / `stk_fmt_amt` の `dir`・`kind` は `uint8_t`**(設計 §4.3 は `int8_t`。`-Wconversion` で警告になるため)。`stk_fmt_amt` は `dir` を取らず、`diff_x100` の符号から ▲ ▼ を決める(設計どおり)。
+4. **`STK_FRESH_S`(1,800)を `stk_core.h` に置いた**(設計 §5.9 は `WX_FRESH_S` を `wx_core.h` に追加するとしているが、`stk_core` が `wx_core` に依存しないようにするため)。`WX_FRESH_S` は作っていない。
+5. **`wx_parse_http` が `stk_core.c` の `stk_calc` を呼ぶ**(段 7 の範囲検査を 1 か所にするため)。`wx_core.c` を link する試験は `stk_core.c` も link する(`run.sh` を直した)。RX 側は e² studio が `src/app/*.c` を拾うので、**新しい `stk_core.c` を `HardwareDebug` の makefile へ反映するため、プロジェクトの更新(refresh)が要る**(ビルド担当)。
+6. **`currency` は必須にしない**(設計 §5.2 の段 4 のキー一覧に無いため)。無い・3 文字でない = `WX_CUR_NONE`、成功のまま。`cur` は今は表示に使わない(Phase 3 以降で銘柄の種類との照合に使える)。
+7. **close 配列は最大 5 要素ではなく、`]` までの全要素を読んで「最後から 2 番目」を取る**(設計は「最大 5 要素まで」)。`]` が無い(途切れ)・読めない要素・末尾のカンマは「直前の足なし」(= `chartPreviousClose`)。バッファ 3,072 の範囲に収まるので、作業量は変わらない。
+8. **同じキーが 2 回あれば最初の出現を使う**(設計に規定なし。`meta` は本文の先頭にある)。`regularMarketPrice`・`chartPreviousClose`・`regularMarketTime`・`regular` の `start` `end` は**どれか 1 つ欠けても `err = 5`**(直前の足があっても `chartPreviousClose` が無ければ失敗。設計 §5.2 段 4 のとおり)。
+9. **直前の足が範囲外(0 など)のときは `err = 6`**(`chartPreviousClose` へ倒さない。設計 §5.2 段 5〜7 のとおり)。
+10. §5.2 段 8(バッファ超過でもキーがそろえば成功)は **Phase 3 の `wifi_core` の仕事**として手を付けていない。`wx_parse_http` 単独では、途中で切れた応答は「必要な値がそろう長さ」から成功し、足りなければ `err = 5`(12 バイト未満は `err = 3`)。
+
+### 実応答から分かったこと(設計 §2.1 の F10 との差)
+
+- 2026-11-27 13:03 JST の取得では、**`^N225` の `range=2d` も足が 2 本**(設計 F10 では 1 本)。ただし `1d` では 1 本なので、`has_bar_prev = 0` の経路は 1d の 3 応答で試験している。
+- **`^GSPC` の `range=2d`**: `chartPreviousClose` = 7,237.17 だが、直前の足 = 7,201.09(`fulldayChange` −18.31 と一致)。設計 §5.3 の (b) を実応答で確認した(前日比 −25 = −0.25%、Yahoo の −0.254% と一致)。`1d` の `chartPreviousClose` は 7,201.09。
+- 日本株・日経平均の `regularMarketTime` は `Date:` より 約 15 分(901〜902 秒)前 → `stk_market` は「取引中」(遅れ ≦ 1,800)。
+
+### 確かめていないこと
+
+- RX 用 GCC でのビルド(`-Wstack-usage=100` を含む)。ホストの `-fstack-usage` は `wx_parse_http` が x86 で 176 バイト(旧 `wx_parse_http` = 今の `wx_parse_weather` は 144)。RX の値は別なので、ビルド担当の結果を見る。
+- S12(ASan / UBSan)はこの環境では libasan が無く SKIP。代わりに `test_wx_stock` が禁止ページ(あらゆる長さに切る + 変異ファズ 60,000 回)で範囲外の読み出しを検出する。S12 の対象には `test_stk_core`・`test_wx_stock` も足してある(libasan のある環境で実行される)。
+- 実機での実行(Phase 5)。
+
+## 設計から外れた点・設計役への差し戻し(Phase 0)
 
 1. **`wx_build_request` の引数**: 設計 0-2 は `(buf, size, sym)`。Phase 0 は接続先が要るので `(buf, size, target, sym)`。Phase 3 で `target` を外す。
 2. **step の追加**: `z` のために `WIFI_STEP_WX_SSLCONF` を `wx_close` と `wx_tcp` の間(17)に入れた。`wx_tcp` / `wx_send` / `wx_recv` の `[hb] scr` が 17/18/19 → 18/19/20 に、`WIFI_STEP_END` が 20 → 21 になる。**`docs/design-uart.md` の `scr` の範囲(0〜19)の更新が要る**。
@@ -86,8 +136,8 @@
 ## 残作業(Phase 1 で意図して残したもの)
 
 - **Phase 4 で削除する**: 旧 UI の `nav_logic.c`(`nav_t`・`nav_update`・`nav_step`。`app_main.c` が `nav_logic.h` を include するため ELF に残る)、`clut8_*`、`tools/gen_ui_assets.py`(**実行すると `src/app` の生成物を壊す**)、`tests/host/test_nav*.c`、`test_clut8_*.c`、`tools/fb2png.py`・`tools/wx_compare_p2b.py`(旧 UI 用)。
-- Phase 2: `stk_fmt_*` を作って `ui_render.c` の暫定整形と置き換える。Phase 3: `ui_wx_t` と `wx_ui` の廃止、`[ev] btn=tap src=...` の書式(今は `btn=tap st=act`)。Phase 4: `app_main` の結合、`[perf]` の `slide`(今は 0)。
+- Phase 3: `ui_wx_t` と `wx_ui` の廃止、`[ev] btn=tap src=...` の書式(今は `btn=tap st=act`)。Phase 4: `app_main` の結合、`[perf]` の `slide`(今は 0)。
 
 ## 未実装(Phase 1 以降)
 
-表示・数値整形・`wx_parse_http` の Yahoo 対応・銘柄ごとの取得と予定表・`[stk]` ログ・結合。
+銘柄ごとの取得と予定表・`[stk]` ログ・結合(Phase 3 以降)。

@@ -1,5 +1,5 @@
 /* test_wx_indep.c - 天気・時刻同期(docs/design.md §22)の独立試験(テスト担当が追加。コーディング担当の試験と重ならない観点)。標準C + ホストの OS(ガードページ)。
- *   A  ガードページ: wx_parse_http / wx_parse_date に、データの末尾(または先頭)をアクセス禁止ページに接して渡す。範囲外を 1 バイトでも読めば異常終了する
+ *   A  ガードページ: wx_parse_weather / wx_parse_date に、データの末尾(または先頭)をアクセス禁止ページに接して渡す。範囲外を 1 バイトでも読めば異常終了する
  *      (S12 の ASan が使えない環境の代わり。あらゆる長さの切れ方 + 変異ファズ)
  *   B  日付の全日検査: 2020-01-01〜2099-12-31 の全日 x 3 時刻を、独立に作った暦(1 日ずつ数える)と突き合わせる。Date: の往復・JST の繰り上がり・存在しない日の拒否
  *   C  ソフト時計: 32bit の ms の巻き戻りを含む乱数検査(64bit の基準と比べる)・日またぎ
@@ -100,10 +100,10 @@ static void t_guard(void)
     vn[7] = mk(var[7], sizeof var[7], "HTTP/1.0 200 OK\r\nDate: Wed, 25 Nov 2026 04:24:13 GMT\r\ncurrent: x\r\n\r\n", "\"current\":", "-60.0", "99");
     for (v = 0u; v < 8u; v++) {
         wx_result_t *fr = &full;
-        (void)wx_parse_http(var[v], vn[v], fr);
+        (void)wx_parse_weather(var[v], vn[v], fr);
         for (len = 0u; len <= vn[v]; len++) {
             for (at = 0; at < 2; at++) {
-                bool ok = wx_parse_http(place(var[v], len, at), len, &r);
+                bool ok = wx_parse_weather(place(var[v], len, at), len, &r);
                 inv(&r, ok);
                 if (ok) {                                         /* 切れたものが成功なら、全体と同じ値 */
                     succ++;
@@ -128,7 +128,7 @@ static void t_guard(void)
             if ((rnd() & 3u) == 0u) { n = rn((uint32_t)n + 1u); }
             at = (int)(rnd() & 1u);
             {
-                bool ok = wx_parse_http(place(m, n, at), n, &r);
+                bool ok = wx_parse_weather(place(m, n, at), n, &r);
                 if (ok) {
                     if (!(r.ok == 1u && r.err == 0u && r.http == 200u && r.temp_x10 >= -600 && r.temp_x10 <= 600 && r.wmo <= 99 && r.kind == wx_kind_of(r.wmo))) { bad++; }
                 } else if (!(r.ok == 0u && r.err >= 3u && r.err <= 6u)) { bad++; }

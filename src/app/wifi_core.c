@@ -995,7 +995,7 @@ static void recv_done(wifi_core_t *c, uint32_t now, int how)
     bool         ok = false;
 
     if ((c->wx_flags & F_OVER) != 0u) {
-        (void)wx_parse_http(c->wx_buf, c->wx_len, r);        /* http と Date: だけ拾う(Phase 0 の g。応答が途切れているので、成功にはしない) */
+        (void)wx_parse_weather(c->wx_buf, c->wx_len, r);     /* http と Date: だけ拾う(Phase 0 の g。応答が途切れているので、成功にはしない) */
         r->ok  = 0u;
         r->err = 7u;
     } else if (c->wx_len == 0u) {
@@ -1003,7 +1003,7 @@ static void recv_done(wifi_core_t *c, uint32_t now, int how)
         r->kind = (uint8_t)WX_KIND_UNKNOWN;
         r->err  = 3u;
     } else {
-        ok = wx_parse_http(c->wx_buf, c->wx_len, r);
+        ok = wx_parse_weather(c->wx_buf, c->wx_len, r);   /* Phase 3 で wx_parse_http(株価)へ切り替える */
     }
     r->closed = (how == RECV_CLOSED) ? 1u : 0u;
     r->len    = c->wx_len;

@@ -499,3 +499,42 @@ cd D:\workspace\rx72n\rx72n_gcc
 - 成果物の ELF・MOT はプレビュー構成のまま残した(再ビルドしていない)。`HardwareDebug\` の中身はプレビュー構成。書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。
 - `_nav_init` などの旧 UI のシンボルが ELF に残っている(前回 10:52 の記録と同じ。`nav_logic.c` の整理が未了)。
 - `.settings/...` のタイムスタンプ行をビルドが書き換えた可能性がある(内容の変化なし)。
+
+## 追記: 2026-11-27 13:21〜13:22 (JST) Phase 2 の既定構成ビルド(新規 `stk_core.c` の取り込み確認)(ビルド担当)
+
+| 時刻(JST) | コマンド | 結果 | 備考 |
+|---|---|---|---|
+| 13:21:12 | 前提確認(`jobs\runner.alive` 13:21:12 で新しい。e2studio のプロセス無し) | OK | `wifi_secret.h` は開いていない |
+| 13:21:20 | `src\app\wifi_sw.h` の `APP_STK_PREVIEW` が `(0)` であることを確認(書換えなし) | OK | 既定構成 |
+| 13:21:28〜13:21:57 | `tools/submit-job.sh build '{"mode":"Headless"}' 400`(ジョブ `132128-build`、exit 0、ジョブ時間 28 秒、経過 29 秒) | **成功**(`Build Finished. 0 errors, 0 warnings.`、13:21:51) | ヘッドレスビルドで Makefile が再生成された(`HardwareDebug\makefile` と `src\app\subdir.mk` が 13:21:48)。`Building file: ../src/app/stk_core.c` を含む 14 ファイルを再コンパイル。smc_gen は再コンパイルなし |
+
+### 新規 `stk_core.c` の取り込み(結論: 手動の refresh は不要)
+- ヘッドレスビルド(`e2studioc -build`)が `src\app\` を走査し、`subdir.mk` と `makefile` に `stk_core.c` / `stk_core.o` / `stk_core.d` を自動で加えた。`.cproject` の編集は不要だった。
+- 前回の 12:56 のプレビュー構成ビルドは、このファイルを取り込んでいなかった(`HardwareDebug\src\app\stk_core.o` が無かった)。今回の Headless ビルドで初めて取り込まれた。
+- 旧プロジェクト `rx72n_gcc` のワークスペース登録は触っていない。
+- 注意: `.settings\*.properties` と `.settings\language.settings.xml` が、ビルドの後に変わっている(git の作業ツリーで `M`)。内容の変化かどうかは未確認(コミット前に差分を見ること)。
+
+### 成果物(既定構成、13:21:51)
+| 項目 | 値 |
+|---|---|
+| `HardwareDebug\rx72n_stockview.elf` | 1,614,180 バイト、更新 2026-11-27 13:21:51 |
+| `HardwareDebug\rx72n_stockview.mot` | 1,452,826 バイト、更新 2026-11-27 13:21:51 |
+| `HardwareDebug\rx72n_stockview.map` | 293,940 バイト、更新 2026-11-27 13:21:51 |
+| `rx-elf-size` text / data / bss / dec | 481,344 / 2,876 / 18,368 / 502,588 |
+
+- 10:52 の既定構成の直近記録(text 479,768 / data 2,876 / bss 18,368)との差: text **+1,576**、data 0、bss 0。
+- 12:56 のプレビュー構成(text 480,288)との差: text **+1,056**(`ui_preview.c` が消え、`stk_core.c` が入ったため)。
+
+### シンボル確認(`rx-elf-nm`、14.2.0.202607 のもの。`D:\Renesas\GNURX\GCC_fo_ Renesas_RX_14.2.0.202607-GNURX-ELF\rx-elf\rx-elf\bin\`)
+- `_stk_calc`(T、`ffc09428`)、`_stk_fmt_price`(T、`ffc094c8`)、`_stk_fmt_pct`(T、`ffc09538`)、`_stk_fmt_amt`(T、`ffc095b8`)、`_stk_row_kind`(T、`ffc094c0`)、`_stk_market`(T、`ffc09670`)。計 6 シンボル。
+- `map` に `./src/app/stk_core.o` のセクションが入っている(`.text.*` の配置を確認)。
+- `_wx_` `_wifi_` のシンボルは既定構成では ELF に出ていない(従来どおり。`wifi_sw.h` の既定 (0) のため)。
+
+### 警告・エラー
+- **0 件**(`0 errors, 0 warnings`)。`-Wstack-usage` の警告は出ていない。
+- 既知の 2 件(smc_gen の `r_bsp_common.c:105`・`r_rx_intrinsic_functions.c:347`、stack usage 非対応)は今回は再コンパイルされていないため、未確認。
+- ログ末尾の `Managed Build system manifest file error: ... llvm ...` は従来どおり(影響なし)。
+
+### 退避・後始末
+- 変更したファイルは無し(`wifi_sw.h` `ui_assets.h` などの製品コードは触っていない)。
+- 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。ランナーは起動したまま。

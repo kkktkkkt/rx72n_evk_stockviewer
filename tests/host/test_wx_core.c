@@ -38,7 +38,7 @@ static wx_result_t g_r;
 
 static bool parse_str(const char *s)
 {
-    return wx_parse_http(s, strlen(s), &g_r);
+    return wx_parse_weather(s, strlen(s), &g_r);
 }
 
 /* ---------------------------------------------------------------- H-X0 要求 */
@@ -144,7 +144,7 @@ static void t_parse_real(void)
 
     TEST("H-X1-1 実測の応答(HTTP/1.0)");
     n = resp(b, sizeof b, HDR_OK, "12.7", "0");
-    CHECK(wx_parse_http(b, n, &g_r));
+    CHECK(wx_parse_weather(b, n, &g_r));
     CHECK_EQ(g_r.ok, 1); CHECK_EQ(g_r.err, 0); CHECK_EQ(g_r.http, 200);
     CHECK_EQ(g_r.temp_x10, 127); CHECK_EQ(g_r.wmo, 0); CHECK_EQ(g_r.kind, WX_KIND_SUN);
     CHECK_EQ(g_r.obs, 1330);
@@ -157,7 +157,7 @@ static void t_parse_real(void)
     m = (size_t)snprintf(c, sizeof c, "%s", "HTTP/1.1 200 OK\r\nDate: Wed, 25 Nov 2026 04:24:13 GMT\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n175\r\n");
     m += body(c + m, sizeof c - m, "12.7", "0");
     m += (size_t)snprintf(c + m, sizeof c - m, "\r\n0\r\n\r\n");
-    CHECK(wx_parse_http(c, m, &g_r));
+    CHECK(wx_parse_weather(c, m, &g_r));
     CHECK_EQ(g_r.temp_x10, 127); CHECK_EQ(g_r.wmo, 0); CHECK_EQ(g_r.obs, 1330); CHECK_EQ(g_r.have_date, 1);
 }
 
@@ -180,7 +180,7 @@ static void t_parse_values(void)
     TEST("H-X1-3 気温(符号・小数・桁・範囲の境界)");
     for (i = 0u; i < (sizeof T / sizeof T[0]); i++) {
         n = resp(b, sizeof b, HDR_OK, T[i].t, "3");
-        CHECK(wx_parse_http(b, n, &g_r));
+        CHECK(wx_parse_weather(b, n, &g_r));
         if (g_r.temp_x10 != T[i].v) { printf("  temp %s -> %d\n", T[i].t, g_r.temp_x10); }
         CHECK_EQ(g_r.temp_x10, T[i].v);
         CHECK_EQ(g_r.kind, WX_KIND_CLOUD);
@@ -188,7 +188,7 @@ static void t_parse_values(void)
     TEST("H-X1-4 異常(null・文字列・数字なし・範囲外)は失敗で、値を残さない");
     for (i = 0u; i < (sizeof E / sizeof E[0]); i++) {
         n = resp(b, sizeof b, HDR_OK, E[i].t, "0");
-        CHECK(!wx_parse_http(b, n, &g_r));
+        CHECK(!wx_parse_weather(b, n, &g_r));
         if (g_r.err != E[i].e) { printf("  temp '%s' -> err %d\n", E[i].t, g_r.err); }
         CHECK_EQ(g_r.err, E[i].e);
         CHECK_EQ(g_r.ok, 0);
@@ -197,14 +197,14 @@ static void t_parse_values(void)
     }
     for (i = 0u; i < (sizeof CE / sizeof CE[0]); i++) {
         n = resp(b, sizeof b, HDR_OK, "12.7", CE[i].c);
-        CHECK(!wx_parse_http(b, n, &g_r));
+        CHECK(!wx_parse_weather(b, n, &g_r));
         if (g_r.err != CE[i].e) { printf("  code '%s' -> err %d\n", CE[i].c, g_r.err); }
         CHECK_EQ(g_r.err, CE[i].e);
     }
     n = resp(b, sizeof b, HDR_OK, "12.7", "99");
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.wmo, 99); CHECK_EQ(g_r.kind, WX_KIND_THUNDER);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.wmo, 99); CHECK_EQ(g_r.kind, WX_KIND_THUNDER);
     n = resp(b, sizeof b, HDR_OK, "12.7", "61");
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.wmo, 61); CHECK_EQ(g_r.kind, WX_KIND_RAIN);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.wmo, 61); CHECK_EQ(g_r.kind, WX_KIND_RAIN);
 }
 
 static void t_parse_units(void)
@@ -215,30 +215,30 @@ static void t_parse_units(void)
 
     TEST("H-X1-5 current_units の中の \"temperature_2m\":\"°C\" を気温として読まない");
     n = resp(b, sizeof b, HDR_OK, "12.7", "0");
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.temp_x10, 127);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.temp_x10, 127);
     /* current に気温が無く、current_units にだけある → 失敗(units を読まない) */
     n = (size_t)snprintf(b, sizeof b, "%s{\"current_units\":{\"temperature_2m\":\"" DEG "\",\"weather_code\":\"wmo code\"},\"current\":{\"time\":\"2026-11-25T13:30\",\"weather_code\":0}}", HDR_OK);
-    CHECK(!wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.err, 5);
+    CHECK(!wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.err, 5);
     /* current_units だけで current が無い */
     n = (size_t)snprintf(b, sizeof b, "%s{\"current_units\":{\"temperature_2m\":55.5,\"weather_code\":1}}", HDR_OK);
-    CHECK(!wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.err, 5);
+    CHECK(!wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.err, 5);
     /* units に数値っぽい値があっても、current の値を使う */
     n = (size_t)snprintf(b, sizeof b, "%s{\"current_units\":{\"temperature_2m\":55.5,\"weather_code\":7},\"current\":{\"temperature_2m\":1.5,\"weather_code\":3}}", HDR_OK);
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.temp_x10, 15); CHECK_EQ(g_r.wmo, 3);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.temp_x10, 15); CHECK_EQ(g_r.wmo, 3);
 
     TEST("H-X1-9 ヘッダーに current という語があっても本文だけを見る");
     tail = "{\"current\":{\"time\":\"2026-11-25T13:30\",\"temperature_2m\":-1.2,\"weather_code\":71}}";
     n = (size_t)snprintf(b, sizeof b, "HTTP/1.0 200 OK\r\nDate: Wed, 25 Nov 2026 04:24:13 GMT\r\nX-Note: \"current\":{\"temperature_2m\":99.9,\"weather_code\":99}\r\n\r\n%s", tail);
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.temp_x10, -12); CHECK_EQ(g_r.wmo, 71); CHECK_EQ(g_r.kind, WX_KIND_SNOW);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.temp_x10, -12); CHECK_EQ(g_r.wmo, 71); CHECK_EQ(g_r.kind, WX_KIND_SNOW);
     n = (size_t)snprintf(b, sizeof b, "HTTP/1.0 200 OK\r\nX-Current: current temperature_2m\r\n\r\n%s", tail);
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.temp_x10, -12);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.temp_x10, -12);
     CHECK_EQ(g_r.have_date, 0);
 
     TEST("H-X1 obs(current.time)が無くても成功。空行が無くても全体を探す");
     n = (size_t)snprintf(b, sizeof b, "%s{\"current\":{\"temperature_2m\":3.0,\"weather_code\":2}}", HDR_OK);
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.obs, 0); CHECK_EQ(g_r.kind, WX_KIND_PARTLY);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.obs, 0); CHECK_EQ(g_r.kind, WX_KIND_PARTLY);
     n = (size_t)snprintf(b, sizeof b, "HTTP/1.0 200 OK\r\nDate: Wed, 25 Nov 2026 04:24:13 GMT\r\n{\"current\":{\"time\":\"2026-11-25T09:05\",\"temperature_2m\":3.0,\"weather_code\":2}}");
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.obs, 905); CHECK_EQ(g_r.have_date, 1);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.obs, 905); CHECK_EQ(g_r.have_date, 1);
 }
 
 static void t_parse_status(void)
@@ -250,7 +250,7 @@ static void t_parse_status(void)
     TEST("H-X1-6 状態が 200 でない(http を記録して失敗。Date: は残す)");
     for (i = 0u; i < (sizeof ST / sizeof ST[0]); i++) {
         n = (size_t)snprintf(b, sizeof b, "HTTP/1.1 %d X\r\nDate: Wed, 25 Nov 2026 04:24:13 GMT\r\nConnection: close\r\n\r\nplease use https", ST[i]);
-        CHECK(!wx_parse_http(b, n, &g_r));
+        CHECK(!wx_parse_weather(b, n, &g_r));
         CHECK_EQ(g_r.err, 4); CHECK_EQ(g_r.http, ST[i]); CHECK_EQ(g_r.have_date, 1); CHECK_EQ(g_r.ok, 0);
     }
     /* 状態行が HTTP でない・短い */
@@ -259,7 +259,7 @@ static void t_parse_status(void)
     CHECK(!parse_str("HTTP/1.0 2x0 OK\r\n\r\n{}"));   CHECK_EQ(g_r.err, 4);
     CHECK(!parse_str("HTTP/1.0 20"));                CHECK_EQ(g_r.err, 3);
     CHECK(!parse_str(""));                           CHECK_EQ(g_r.err, 3);
-    CHECK(!wx_parse_http(NULL, 0u, &g_r));           CHECK_EQ(g_r.err, 3);
+    CHECK(!wx_parse_weather(NULL, 0u, &g_r));           CHECK_EQ(g_r.err, 3);
     CHECK(!parse_str("HTTP/1.0 200 OK"));            CHECK_EQ(g_r.err, 5);     /* 状態行だけ。キー無し */
 }
 
@@ -270,22 +270,22 @@ static void t_parse_date_header(void)
 
     TEST("H-X1-8 Date: が無い・壊れている・小文字");
     n = resp(b, sizeof b, "HTTP/1.0 200 OK\r\nContent-Type: x\r\n\r\n", "12.7", "0");
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0); CHECK_EQ(g_r.ok, 1);       /* 天気は成功 */
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0); CHECK_EQ(g_r.ok, 1);       /* 天気は成功 */
     n = resp(b, sizeof b, "HTTP/1.0 200 OK\r\nDate: Wed, 25 Xxx 2026 04:24:13 GMT\r\n\r\n", "12.7", "0");
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
     n = resp(b, sizeof b, "HTTP/1.0 200 OK\r\nDate: Wed, 25 Nov 2026 04:24:13\r\n\r\n", "12.7", "0");      /* GMT なし */
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
     n = resp(b, sizeof b, "HTTP/1.0 200 OK\r\ndate: Wed, 25 Nov 2026 04:24:13 GMT\r\n\r\n", "12.7", "0");
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.have_date, 1);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.have_date, 1);
     n = resp(b, sizeof b, "HTTP/1.0 200 OK\r\nDATE:Wed, 25 Nov 2026 04:24:13 GMT\r\n\r\n", "12.7", "0");
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.have_date, 1);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.have_date, 1);
     n = resp(b, sizeof b, "HTTP/1.0 200 OK\r\nX-Date: Wed, 25 Nov 2026 04:24:13 GMT\r\n\r\n", "12.7", "0");   /* 行頭が Date: でない */
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
     /* 本文の中の Date: は見ない */
     n = (size_t)snprintf(b, sizeof b, "HTTP/1.0 200 OK\r\n\r\nDate: Wed, 25 Nov 2026 04:24:13 GMT\r\n{\"current\":{\"temperature_2m\":1.0,\"weather_code\":0}}");
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
     n = resp(b, sizeof b, "HTTP/1.0 200 OK\r\nDate: Wed, 25 Nov 2019 04:24:13 GMT\r\n\r\n", "12.7", "0");  /* 範囲外(2019) */
-    CHECK(wx_parse_http(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
+    CHECK(wx_parse_weather(b, n, &g_r)); CHECK_EQ(g_r.have_date, 0);
 }
 
 static void t_parse_truncate(void)
@@ -304,8 +304,8 @@ static void t_parse_truncate(void)
         memcpy(p, full, len);
         memset(p + len, 'Z', n - len);                          /* B: 切った後ろが毒(Z) */
         memset(&ra, 0xA5, sizeof ra); memset(&rp, 0x5A, sizeof rp);
-        (void)wx_parse_http(a, len, &ra);
-        (void)wx_parse_http(p, len, &rp);
+        (void)wx_parse_weather(a, len, &ra);
+        (void)wx_parse_weather(p, len, &rp);
         CHECK_EQ(ra.ok, rp.ok); CHECK_EQ(ra.err, rp.err); CHECK_EQ(ra.http, rp.http); CHECK_EQ(ra.have_date, rp.have_date);
         CHECK_EQ(ra.temp_x10, rp.temp_x10); CHECK_EQ(ra.wmo, rp.wmo); CHECK_EQ(ra.obs, rp.obs); CHECK_EQ(ra.jst_s, rp.jst_s);
         if (rp.ok != 0u) {
@@ -321,24 +321,24 @@ static void t_parse_truncate(void)
     {
         const char *k = "\"temperature_2m\":-3.4";
         size_t at = (size_t)(strstr(full, k) - full) + strlen("\"temperature_2m\":");
-        CHECK(!wx_parse_http(full, at + 2u, &g_r));             /* "-3" */
-        CHECK(!wx_parse_http(full, at + 4u, &g_r));             /* "-3.4"(区切りが無い) */
+        CHECK(!wx_parse_weather(full, at + 2u, &g_r));             /* "-3" */
+        CHECK(!wx_parse_weather(full, at + 4u, &g_r));             /* "-3.4"(区切りが無い) */
     }
     TEST("H-X1-10 巨大な応答・ゴミ");
     {
         static char big[8000];
 
         memset(big, 'A', sizeof big);
-        CHECK(!wx_parse_http(big, sizeof big, &g_r)); CHECK_EQ(g_r.err, 4);
+        CHECK(!wx_parse_weather(big, sizeof big, &g_r)); CHECK_EQ(g_r.err, 4);
         n = resp(full, sizeof full, HDR_OK, "12.7", "0");
         memset(big, ' ', sizeof big);
         memcpy(big, full, n);
-        CHECK(wx_parse_http(big, sizeof big, &g_r));            /* 後ろが空白でも読める */
+        CHECK(wx_parse_weather(big, sizeof big, &g_r));            /* 後ろが空白でも読める */
         CHECK_EQ(g_r.temp_x10, 127);
         for (len = 0u; len < 300u; len++) {                     /* ランダムなバイト列でも落ちない */
             size_t k;
             for (k = 0u; k < 200u; k++) { big[k] = (char)(rand() & 0xFF); }
-            (void)wx_parse_http(big, (len % 200u), &g_r);
+            (void)wx_parse_weather(big, (len % 200u), &g_r);
         }
     }
 }
