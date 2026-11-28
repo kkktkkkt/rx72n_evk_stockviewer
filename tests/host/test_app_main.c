@@ -163,12 +163,15 @@ static unsigned g_n_wx_init, g_n_wx_poll, g_n_wx_state, g_n_req, g_lines_at_wx_i
 static uint32_t g_wx_poll_ms, g_wx_init_ms, g_ui_ms;
 static unsigned g_req_src[16];
 static stk_view_t g_stk;                          /* stk_ui が返す表示値(フックが書き換える) */
+static clk_view_t g_clk = { .clock_min = 0xFFFFu, .kind = (uint8_t)CLK_UNKNOWN };   /* clk_ui が返す表示値(既定 = 時刻未同期。フックが書き換える) */
+static unsigned g_n_clk_ui; static uint32_t g_clk_ui_ms;
 #if APP_WX_PRODUCT
 void wx_init(uint32_t now_ms) { g_n_wx_init++; g_wx_init_ms = now_ms; g_lines_at_wx_init = g_nlines; }
 void wx_poll(uint32_t now_ms) { g_n_wx_poll++; g_wx_poll_ms = now_ms; }
 wx_req_t wx_request(wx_src_t src, uint32_t now_ms) { (void)now_ms; if (g_n_req < 16u) { g_req_src[g_n_req] = (unsigned)src; } g_n_req++; return WX_REQ_OK; }
 void stk_ui(stk_view_t *out, uint32_t now_ms) { *out = g_stk; g_ui_ms = now_ms; }
 void wx_log_state(uint32_t now_ms) { (void)now_ms; g_n_wx_state++; }
+void clk_ui(clk_view_t *out, uint32_t now_ms) { *out = g_clk; g_clk_ui_ms = now_ms; g_n_clk_ui++; }
 #endif
 
 /* ------------------------------------------------------------ 被試験物 */
@@ -311,6 +314,90 @@ int main(void)
     CHECK_EQ(g_drops, 0);
     CHECK_EQ(g_n_bl, 0);                          /* 昼なので変化なし。LCD が使えない時は lcd_bl_set を呼ばない(7a) */
     TEST_REPORT("test_app_main(初期化の失敗)");
+}
+
+/* ================================================================ 6d 結合(製品 + clk_ui の値の注入。docs/design.md §13.3・§13.5・§13.8) */
+#elif defined(T_CLK_PRODUCT)
+
+static nav_sample_t g_tpc[6200];
+static unsigned g_clock_scr_1499, g_n_req_at_3600;
+
+static clk_view_t clk_in(uint16_t m, uint8_t have, uint8_t kind)
+{
+    clk_view_t c;
+    memset(&c, 0, sizeof c);
+    c.clock_min = m; c.have = have; c.kind = kind; c.temp = have ? 18 : 0; c.mon = 11u; c.day = 27u; c.wday = 5u;
+    return c;
+}
+
+static void clkprod_tick(uint32_t t)
+{
+    if (t == 1499u) { g_clock_scr_1499 = count_prefix("[scr] to=clock"); }
+    if (t == 1500u) { g_clk = clk_in(581u, 1u, CLK_SUN); }              /* 時刻が分かった(株価の表示時間 10 秒は過ぎている → すぐ時計・天気へ) */
+    if (t == 4600u) { g_clk = clk_in(582u, 0u, CLK_UNKNOWN); }           /* 天気が取れなくなった(60 分たった / 一度も取れていない) */
+    if (t == 5300u) { g_clk = clk_in(0xFFFFu, 0u, CLK_UNKNOWN); }        /* 時刻が使えなくなった(株価画面にいる間) */
+}
+
+static bool has_scr(bool to_clock, const clk_view_t *c, uint32_t tick)
+{
+    char want[160];
+
+    return (applog_fmt_scr(want, sizeof want, to_clock, (uint8_t)(to_clock ? (1u + clk_view_kind(c)) : 0u), c->clock_min, clk_view_kind(c), c->have != 0u, c->temp, tick) != 0u)
+           && (find_line(want, 0) >= 0);
+}
+
+int main(void)
+{
+    stk_view_t v;
+    unsigned i;
+    const clk_view_t c0 = clk_in(581u, 1u, CLK_SUN), c1 = clk_in(582u, 0u, CLK_UNKNOWN), c2 = clk_in(0xFFFFu, 0u, CLK_UNKNOWN);
+
+    memset(&v, 0, sizeof v);
+    v.net = STK_NET_ON; v.have_any = 1u; v.clock_min = 555u; v.upd_min = 552u;
+    v.row[0].have = 1u; v.row[0].price_x100 = 243300; v.row[0].diff_x100 = 5500; v.row[0].pct_bp = 231; v.row[0].mkt = STK_MKT_TRADING;
+    g_stk = v;
+    for (i = 0u; i < 6200u; i++) { g_tpc[i].pressed = false; g_tpc[i].points = 0u; g_tpc[i].x = 100u; g_tpc[i].y = 100u; }
+    g_tpc[2500].pressed = true; g_tpc[2500].points = 1u; g_tpc[2501] = g_tpc[2500];      /* 株価画面でのタップ(離しの確定 = tick 2504) */
+    g_tpc[3700] = g_tpc[2500]; g_tpc[3701] = g_tpc[2500];                                /* 時計・天気画面でのタップ(確定 = tick 3704) */
+    g_touch_script = g_tpc; g_touch_n = 6200u; g_touch_t0 = 0u;
+    g_on_tick = clkprod_tick;
+    memset(g_fb, 0xCC, sizeof g_fb);
+
+    run(7000u);
+
+    TEST("6d 結合(製品 + clk_ui): 時刻が分かるまで(tick 1500 まで)は、株価の表示時間 10 秒を過ぎても時計・天気画面へ切り替えない。分かった tick で切り替える(パレット 1 + kind)");
+    check_boot_lines();
+    CHECK_EQ(g_clock_scr_1499, 0);
+    CHECK_EQ(g_n_clk_ui, g_iter - 1u);
+    CHECK(has_scr(true, &c0, 1500u));                                    /* [scr] to=clock pal=1 clk=0941 kind=sun temp=18 tick=1500 */
+    CHECK(find_line("[scr] to=clock pal=1 clk=0941 kind=sun temp=18 tick=1500\r\n", 0) >= 0);
+
+    TEST("6d 時計・天気画面は 5 秒で株価へ(tick 2000)、株価 10 秒で戻る。株価画面でのタップ(tick 2504)は切り替えタイマを最初から(次の時計・天気は 3504。3000 では出ない)+ 更新要求");
+    CHECK(has_scr(false, &c0, 2000u));                                   /* 株価画面でも clk / kind / temp が付く */
+    CHECK(find_line("[scr] to=stock pal=0 clk=0941 kind=sun temp=18 tick=2000\r\n", 0) >= 0);
+    CHECK(find_line("[scr] to=clock pal=1 clk=0941 kind=sun temp=18 tick=3000\r\n", 0) < 0);
+    CHECK(find_line("[scr] to=clock pal=1 clk=0941 kind=sun temp=18 tick=3504\r\n", 0) >= 0);   /* t_scr は直前の ui_update の時刻 = tick 2504 */
+
+    TEST("6d 時計・天気画面でのタップ(tick 3704)は株価画面へ戻す([scr] to=stock)+ 更新要求(wx_request 2 回目)。次の時計・天気は 3704 + 1000 = 4704。天気なし(have=0)は pal=8・kind=none temp=none");
+    CHECK_EQ(count_prefix("[ev] btn=tap src=touch\r\n"), 2);
+    CHECK_EQ(g_n_req, 2);
+    CHECK_EQ(g_req_src[0], WX_SRC_TOUCH); CHECK_EQ(g_req_src[1], WX_SRC_TOUCH);
+    CHECK(find_line("[scr] to=stock pal=0 clk=0941 kind=sun temp=18 tick=3704\r\n", 0) >= 0);
+    CHECK(find_line("[scr] to=clock pal=8 clk=0942 kind=none temp=none tick=4704\r\n", 0) >= 0);
+    CHECK(has_scr(true, &c1, 4704u));
+    CHECK(find_line("[scr] to=stock pal=0 clk=0942 kind=none temp=none tick=5204\r\n", 0) >= 0);
+
+    TEST("6d 時刻が使えなくなる(tick 5300)と、株価の表示時間が過ぎても時計・天気画面へ出ない(最後の to=clock は 4704)");
+    CHECK_EQ(count_prefix("[scr] to=clock"), 3);                         /* 1500・3504・4704 */
+    CHECK_EQ(s_ui.screen, UI_SCR_STOCK);
+    CHECK_EQ(g_app_dbg.scr, 0);
+    CHECK_EQ(s_ui.cview.clock_min, 0xFFFF);
+    CHECK_EQ(g_n_flip_pal, 6);                                            /* 1500・2000・3504・3704・4704・5204(画面が変わるたびにパレットが入れ替わる) */
+    CHECK_EQ(g_n_pal_same, 0);
+    CHECK_EQ(g_drops, 0);
+    CHECK_EQ(count_prefix("[err] "), 0);
+    (void)c2;
+    TEST_REPORT("test_app_main(6d 結合: 製品 + clk_ui)");
 }
 
 /* ================================================================ 7a 夜間のバックライト(製品 + 窓の注入。docs/design.md §14.8 H-N2 の結合) */
@@ -499,6 +586,9 @@ int main(void)
     CHECK_EQ(g_app_dbg.scr, 0);
     CHECK_EQ(s_ui.screen, UI_SCR_STOCK);
     CHECK_EQ(s_pal_shown, 0);
+    CHECK_EQ(g_n_clk_ui, g_iter - 1u);                                    /* clk_ui は 10ms ごと(tick_step)。時刻が未同期(clk_ui が 0xFFFF)の間は 700 tick たっても切り替わらない */
+    CHECK_EQ(g_clk_ui_ms, g_tick_now * 10u);
+    CHECK_EQ(s_ui.cview.clock_min, 0xFFFF);
 
     TEST("UART: s = [st] + wx_log_state 1 回、? = 新しい [help]、n p d + - X は無視(行も更新要求も出ない)");
     CHECK_EQ(count_prefix("[st] "), 1);

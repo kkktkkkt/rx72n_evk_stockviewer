@@ -719,3 +719,35 @@ cd D:\workspace\rx72n\rx72n_gcc
 ### 注意
 - 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。`wifi_sw.h` は未変更。ランナーは起動したまま。
 - ELF のサイズは前回の A2 より 30 KB 大きいが、ROM 使用量は 641,932 バイト(4MB の約 15.3%)。
+
+## 追記: 2026-11-28 09:34〜09:35 (JST) Phase 6d(時刻・天気・気温の結合、`APP_WX_WEATHER` 既定 1、時計・天気と株価の自動切替 既定有効)の既定構成 clean ビルド(ビルド担当)
+
+前提: e2studio / e2studioc / make / rfp-cli / e2-server-gdb / rx-elf-gdb のプロセス無し。`jobs/runner.alive` 09:34:50(新しい)。`jobs/inbox` 空。`src/app/wifi_sw.h` は未変更(`APP_WX` の既定 (1)、`APP_WX_WEATHER` = (1)、`APP_NIGHT` = (1)、`APP_STK_PREVIEW`・`APP_CLK_PREVIEW`・`APP_WIFI_TEST`・`APP_WIFI_AUTOSTART`・`APP_STK_FAULT`・`APP_STK_BADAP` = (0))。`wifi_secret.h` は開いていない・内容を出していない。書込み・実機操作・COM・gdb・rfp-cli は**未実施**。製品コードは変更していない。
+
+| 時刻(JST) | コマンド(`tools/submit-job.sh`) | 結果 | 備考 |
+|---|---|---|---|
+| 09:34:54〜09:35:18 | `build '{"mode":"Headless","clean":true}' 400`(ジョブ `093454-build`、exit 0、26.8 秒) | **成功**(`Build Finished. 0 errors, 2 warnings`) | makefile は自動で再生成。74 ファイルを再コンパイル(clean)。ログ末尾の `Managed Build system manifest` の llvm メッセージは従来どおり(影響なし)。ログ = `jobs/outbox/093454-build.log` |
+
+### 警告の内訳
+- 2 件とも既知の smc_gen(`-Wstack-usage=100` 非対応): `src/smc_gen/r_bsp/mcu/all/r_bsp_common.c:105` `delay_wait`、`src/smc_gen/r_bsp/mcu/all/r_rx_intrinsic_functions.c:347` `R_BSP_ChangeToUserMode`。
+- `src/app/` の警告・エラーは **0 件**(clean ビルドで全数確認。`wx_core.c`・`wifi_at.c`・`wifi_core.c`・`night_core.c`・`clk_*.c`・`ui_clock.c`・`stk_core.c`・`app_main.c` を含む)。
+
+### 成果物(`HardwareDebug\rx72n_stockview.elf` / `.mot` / `.map`。`jobs\artifacts\` へコピー)
+| 項目 | 値 | 前回(2026-11-28 04:05、Phase 7a + 6c) | 差 |
+|---|---|---|---|
+| `rx72n_stockview.elf` | 1,964,828 バイト | 1,962,380 | +2,448 |
+| `rx72n_stockview.mot` | 1,926,970 バイト | 1,925,962 | +1,008 |
+| `rx-elf-size` text / data / bss | **639,388 / 2,880 / 22,716** | 639,052 / 2,880 / 22,716 | text +336、data 0、bss 0 |
+| ROM(text + data) | 642,268 | 641,932 | +336 |
+
+- 保存先: `jobs\artifacts\N2-product.elf`(1,964,828 バイト)、`N2-product.mot`(1,926,970 バイト)、`N2-product.map`(324,009 バイト)。
+- 注意: `APP_WX` = 1 のため、`.elf` `.mot` `.map` に Wi-Fi の設定(SSID・パスワード)が入りうる(設計 §21.5)。`jobs\artifacts\` の外へ出さない。
+
+### シンボルの確認(`rx-elf-nm`。`D:\Renesas\GNURX\GCC_fo_ Renesas_RX_14.2.0.202607-GNURX-ELF\rx-elf\rx-elf\bin\` の 14.2 のもの)
+- `_clk_ui`(T、`ffc0b448`)、`_clk_view_make`(T、`ffc08e28`)、`_ui_screen_step`(T、`ffc0a570`)、`_wx_parse_weather`(T、`ffc0dd40`)が入っている。
+- `_night_` で始まるシンボルは 9 件(`_night_init` `_night_update` `_night_filter` など。`_night_apply` は `t`)。
+- 既定値: `APP_WX_WEATHER` = (1)、`APP_NIGHT` = (1)(`src/app/wifi_sw.h` の 47 行目・80 行目)。
+
+### 注意
+- 書込み・実機操作・COM・gdb・rfp-cli は**未実施**。`wifi_sw.h` は未変更。ランナーは起動したまま。
+- `.settings/*.properties` のタイムスタンプ行をビルドが書き換えた可能性がある(この回は `git status` で未確認)。

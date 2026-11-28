@@ -41,11 +41,10 @@
 /* 製品(LCD・タッチが動く通常の起動)に取得を組み込む = APP_WX = 1 かつ APP_WIFI_TEST = 0。専用モードが優先 */
 #define APP_WX_PRODUCT       ((APP_WX) && !(APP_WIFI_TEST))
 
-/* 1 = 取得の周期の最初に天気(取得 ID 3。Open-Meteo)を含める(docs/design.md §13.6。天気 → 6723.T → ^N225 → ^GSPC の 4 回)。
- * 0 = 株価 3 銘柄だけ(Phase 5 と同じ)。Phase 6c は wx_sched(標準 C)までで、wifi_at.c が天気の結果を扱うのは 6d なので、**6c の既定は 0**。6d で既定を 1 にする。
- * ホスト試験の天気の予定表(test_wx_weather.c)は -DAPP_WX_WEATHER=1 で作る */
+/* 1 = 取得の周期の最初に天気(取得 ID 3。Open-Meteo)を含める(docs/design.md §13.6。天気 → 6723.T → ^N225 → ^GSPC の 4 回)。既定 1(Phase 6d。wifi_at.c が天気を扱う)。
+ * 0 = 株価 3 銘柄だけ(Phase 5 と同じ。株価だけの予定表の試験用)。 */
 #ifndef APP_WX_WEATHER
-#define APP_WX_WEATHER       (0)
+#define APP_WX_WEATHER       (1)
 #endif
 #if ((APP_WX_WEATHER) != 0) && ((APP_WX_WEATHER) != 1)
 #error "APP_WX_WEATHER must be 0 or 1"

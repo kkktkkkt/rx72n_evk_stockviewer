@@ -410,9 +410,9 @@ fi
 if sel S24; then
   echo "### S24 株価の取得の論理(docs/design.md H-6・H-11): wx_core の単体試験(要求 144 / 145 / 145 バイト・接続先・[stk] の書式 R-STK-*・取得の予定表(3 銘柄・失敗分のやり直し・429・全部失敗・周期・更新要求・32bit の巻き戻り)・Date: と時刻・ソフト時計)。専用モード(APP_WIFI_TEST=1)と製品(APP_WX=1)の 2 通り。wifi_core の WX step・範囲(H-10)は S22、wifi_at は S23 / S26"
   rc=0
-  cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$APP/wx_core.c" "$APP/stk_core.c" "$APP/clk_core.c" -o "$BUILD/test_wx_core" || rc=1
+  cc_nowarn $STD $WARN -DAPP_WIFI_TEST=1 -DAPP_WX_WEATHER=0 -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$APP/wx_core.c" "$APP/stk_core.c" "$APP/clk_core.c" -o "$BUILD/test_wx_core" || rc=1
   [ -x "$BUILD/test_wx_core" ] && { timeout 300 "$BUILD/test_wx_core" || rc=1; }
-  cc_nowarn $STD $WARN -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$APP/wx_core.c" "$APP/stk_core.c" "$APP/clk_core.c" -o "$BUILD/test_wx_core_wx" || rc=1
+  cc_nowarn $STD $WARN -DAPP_WX=1 -DAPP_WX_WEATHER=0 -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$APP/wx_core.c" "$APP/stk_core.c" "$APP/clk_core.c" -o "$BUILD/test_wx_core_wx" || rc=1
   [ -x "$BUILD/test_wx_core_wx" ] && { timeout 300 "$BUILD/test_wx_core_wx" || rc=1; }
   result S24 $rc
 fi
@@ -421,7 +421,7 @@ fi
 
 # ---------------------------------------------------------------- S26
 if sel S26; then
-  echo "### S26 株価の取得の製品への組み込み(docs/design.md §5.7・§5.9・§7.5・Phase 3): APP_WX = 1(APP_WIFI_TEST = 0)の wifi_at.c(wx_init / wx_poll / wx_request / stk_ui / wx_log_state)を偽の ESP32 で試験(秘密あり / なし。3 銘柄の周期・失敗分のやり直し・全部失敗の再接続・[stk] ログ・表示値 stk_view_t)、app_main.c の組み込み(偽の wifi_at API)、APP_WX = 0 / APP_WIFI_TEST = 0 の組み合わせで中身が消えること"
+  echo "### S26 株価の取得の製品への組み込み(docs/design.md §5.7・§5.9・§7.5・Phase 3): APP_WX = 1(APP_WIFI_TEST = 0)の wifi_at.c(wx_init / wx_poll / wx_request / stk_ui / wx_log_state)を偽の ESP32 で試験(秘密あり / なし。天気 + 3 銘柄の周期(天気が最初)・失敗分のやり直し・天気だけの失敗・全部失敗の再接続・[stk] [wx] ログ・表示値 stk_view_t と時計・天気画面の値 clk_view_t)、app_main.c の組み込み(偽の wifi_at API)、APP_WX = 0 / APP_WIFI_TEST = 0 の組み合わせで中身が消えること"
   rc=0
   echo "  APP_WX = 1 かつ APP_WIFI_TEST = 0 の wifi_at.c(WIFI_AT_HOST_TEST。秘密あり / なし)・app_main.c の -fsyntax-only"
   for f in app_main wifi_at; do
@@ -451,7 +451,7 @@ fi
 if sel S27; then
   echo "### S27 取得・時刻同期の独立試験(テスト担当の追加): test_wx_indep(ガードページによる範囲外読み出しの検出・全日の暦・ソフト時計・予定表の乱数走行(ms の折り返し)・wifi_core の乱数入力)"
   rc=0
-  cc_nowarn $STD -Wall -Wextra -DAPP_WX=1 -I"$APP" -I"$HERE" "$HERE/test_wx_indep.c" "$APP/wx_core.c" "$APP/wifi_core.c" "$APP/stk_core.c" "$APP/clk_core.c" -o "$BUILD/test_wx_indep" || rc=1
+  cc_nowarn $STD -Wall -Wextra -DAPP_WX=1 -DAPP_WX_WEATHER=0 -I"$APP" -I"$HERE" "$HERE/test_wx_indep.c" "$APP/wx_core.c" "$APP/wifi_core.c" "$APP/stk_core.c" "$APP/clk_core.c" -o "$BUILD/test_wx_indep" || rc=1
   [ -x "$BUILD/test_wx_indep" ] && { timeout 300 "$BUILD/test_wx_indep" || rc=1; }
   echo "  同じ試験を -DAPP_WX_WEATHER=1(周期に天気が加わる。取る順 3 → 0 → 1 → 2。天気の 429 は普通の失敗。H-C3 ⑧)でも"
   cc_nowarn $STD -Wall -Wextra -DAPP_WX=1 -DAPP_WX_WEATHER=1 -I"$APP" -I"$HERE" "$HERE/test_wx_indep.c" "$APP/wx_core.c" "$APP/wifi_core.c" "$APP/stk_core.c" "$APP/clk_core.c" -o "$BUILD/test_wx_indep_w" || rc=1
@@ -563,14 +563,14 @@ if sel S33; then
     sed -i "$expr" "$MUT/$file"
     if cmp -s "$MUT/$file" "$MUT/$file.orig"; then echo "  NG: 変異が当たっていない: $name"; rc=1; return; fi
     for f in "$@"; do srcs="$srcs $MUT/$f"; done
-    if ! "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/$tsrc" $srcs -o "$MUT/t" >"$MUT/cc.log" 2>&1; then echo "  NG: 変異版がコンパイルできない: $name"; head -5 "$MUT/cc.log"; rc=1; return; fi
+    if ! "$CC" $STD -DAPP_WIFI_TEST=1 -DAPP_WX_WEATHER=0 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/$tsrc" $srcs -o "$MUT/t" >"$MUT/cc.log" 2>&1; then echo "  NG: 変異版がコンパイルできない: $name"; head -5 "$MUT/cc.log"; rc=1; return; fi
     if timeout 300 "$MUT/t" >"$MUT/run.log" 2>&1; then echo "  NG: 変異 [$name] を試験が検出しなかった(合格してしまった)"; rc=1
     else echo "  ok: 変異 [$name] で試験が失敗した($(grep -c 'FAIL' "$MUT/run.log") 件)"; fi
   }
   echo "  まず無変更の複製で試験が通ること(変異試験の前提)"
   rm -rf "$MUT"; mkdir -p "$MUT"
   cp "$APP/wx_core.h" "$APP/wx_core.c" "$APP/stk_core.h" "$APP/stk_core.c" "$APP/wifi_sw.h" "$APP/wifi_core.h" "$APP/wifi_core.c" "$APP/clk_core.h" "$APP/clk_core.c" "$MUT/"
-  "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$MUT/wx_core.c" "$MUT/stk_core.c" "$MUT/clk_core.c" -o "$MUT/t0" >/dev/null 2>&1 && "$MUT/t0" >/dev/null 2>&1 || { echo "  NG: 無変更の複製で test_wx_core が通らない"; rc=1; }
+  "$CC" $STD -DAPP_WIFI_TEST=1 -DAPP_WX_WEATHER=0 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$MUT/wx_core.c" "$MUT/stk_core.c" "$MUT/clk_core.c" -o "$MUT/t0" >/dev/null 2>&1 && "$MUT/t0" >/dev/null 2>&1 || { echo "  NG: 無変更の複製で test_wx_core が通らない"; rc=1; }
   "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT" -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$MUT/wifi_core.c" "$MUT/wx_core.c" "$MUT/stk_core.c" "$MUT/clk_core.c" -o "$MUT/t1" >/dev/null 2>&1 && "$MUT/t1" >/dev/null 2>&1 || { echo "  NG: 無変更の複製で test_wifi_core が通らない"; rc=1; }
   # 予定表(H-6)
   mut_run "やり直しの回数 2 回 → 3 回"        wx_core.c 's/s->retry_n < WX_RETRY_MAX/s->retry_n <= WX_RETRY_MAX/' test_wx_core.c wx_core.c stk_core.c clk_core.c
@@ -589,11 +589,11 @@ fi
 
 # ---------------------------------------------------------------- S34
 if sel S34; then
-  echo "### S34 app_main.c の結合試験(Phase 4。H-12・H-13。Phase 6b: [scr] の行・lcd_flip_pal・APP_CLK_PREVIEW = 1 / 2・時計・天気の値の注入): 偽の LCD・タッチ・CMT・ログ・wifi_at API で app_main() を 10ms ずつ走らせ、起動の行の順・面 0 を lcd_init の前に描く・stk_ui の値が ui_render で描かれ変わった時だけ入れ替わる・[ev] btn=tap src=touch|uart と wx_request(src)・s ? と n p d + - の扱い・[hb]・[scr] を、製品 / APP_WX=0 / APP_STK_PREVIEW=1 / LCD 初期化失敗 / タッチ初期化失敗 / APP_CLK_PREVIEW=1・2 / 時計・天気の値の注入 の 8 通りで確かめる"
+  echo "### S34 app_main.c の結合試験(Phase 4。H-12・H-13。Phase 6b: [scr] の行・lcd_flip_pal・APP_CLK_PREVIEW = 1 / 2・時計・天気の値の注入): 偽の LCD・タッチ・CMT・ログ・wifi_at API で app_main() を 10ms ずつ走らせ、起動の行の順・面 0 を lcd_init の前に描く・stk_ui の値が ui_render で描かれ変わった時だけ入れ替わる・[ev] btn=tap src=touch|uart と wx_request(src)・s ? と n p d + - の扱い・[hb]・[scr] を、製品 / APP_WX=0 / APP_STK_PREVIEW=1 / LCD 初期化失敗 / タッチ初期化失敗 / APP_CLK_PREVIEW=1・2 / 時計・天気の値の注入 / 6d 結合(製品 + clk_ui。画面の切り替えとタップ)/ 夜間 の 10 通りで確かめる"
   rc=0
   build_ui_objs || rc=1
   A34="$APP/ui_render.c $CLKC $APP/ui_logic.c $APP/stk_core.c $APP/gfx.c $APP/app_logfmt.c $APP/night_core.c $APP/ui_preview.c $APP/clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
-  for v in "prod:" "nowx:-DAPP_WX=0" "preview:-DAPP_STK_PREVIEW=1" "lcdfail:-DT_LCD_FAIL" "touchfail:-DT_TOUCH_FAIL" "clkprev1:-DAPP_CLK_PREVIEW=1" "clkprev2:-DAPP_CLK_PREVIEW=2" "clkinject:-DAPP_WX=0 -DT_CLK_INJECT" "night:-DT_NIGHT" "night0:-DAPP_NIGHT=0"; do
+  for v in "prod:" "nowx:-DAPP_WX=0" "preview:-DAPP_STK_PREVIEW=1" "lcdfail:-DT_LCD_FAIL" "touchfail:-DT_TOUCH_FAIL" "clkprev1:-DAPP_CLK_PREVIEW=1" "clkprev2:-DAPP_CLK_PREVIEW=2" "clkinject:-DAPP_WX=0 -DT_CLK_INJECT" "clkprod:-DT_CLK_PRODUCT" "night:-DT_NIGHT" "night0:-DAPP_NIGHT=0"; do
     name="${v%%:*}"; flags="${v#*:}"
     echo "  -- $name ${flags}"
     EXTRA_CFLAGS="$flags" build_fit_test "$BUILD/test_app_main_$name" "$HERE/test_app_main.c" $A34 || rc=1
@@ -644,7 +644,7 @@ if sel S36; then
   sed -i 's/< WX_MIN_GAP_MS) {/< 0u) {/' "$MUT2/wx_core.c"
   if cmp -s "$MUT2/wx_core.c" "$MUT2/wx_core.c.orig"; then echo "  NG: 変異が当たっていない: 更新要求の最小間隔"; rc=1
   else
-    "$CC" $STD -DAPP_WIFI_TEST=1 -I"$MUT2" -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$MUT2/wx_core.c" "$MUT2/stk_core.c" "$MUT2/clk_core.c" -o "$MUT2/t" >"$MUT2/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT2/cc.log"; rc=1; }
+    "$CC" $STD -DAPP_WIFI_TEST=1 -DAPP_WX_WEATHER=0 -I"$MUT2" -I"$APP" -I"$HERE" "$HERE/test_wx_core.c" "$MUT2/wx_core.c" "$MUT2/stk_core.c" "$MUT2/clk_core.c" -o "$MUT2/t" >"$MUT2/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない"; head -5 "$MUT2/cc.log"; rc=1; }
     if [ -x "$MUT2/t" ]; then "$MUT2/t" >"$MUT2/run.log" 2>&1; mut2_verdict "更新要求の最小間隔(5 秒)を外す" $?; fi
   fi
   # (3)(4) app_main: タップの src の取り違え、stk_ui の値を表示へ渡さない
@@ -838,10 +838,10 @@ fi
 
 # ---------------------------------------------------------------- S43
 if sel S43; then
-  echo "### S43 天気の取得の論理(docs/design.md §13.6・H-C2・H-C3・H-C5・H-C4 の一部。Phase 6c。ホストのみ): test_wx_weather(天気の要求 195 バイト・wx_parse_weather(実応答・全 WMO コード・気温の境界・キー欠落・null・重複キー・あらゆる長さに切る・取り違え・変異ファズ)・[wx] の 3 形式・予定表 3 → 0 → 1 → 2・天気の失敗・429・全部失敗の再接続・周期の時間・更新要求)を既定 / WX_METEO_SSL = 1 / APP_STK_FAULT = 4 の 3 通りで。APP_WX_WEATHER の既定は 0(6d で 1)。wifi_core の天気(H-C4)は S22、乱数走行は S27。変異試験 6 か所"
+  echo "### S43 天気の取得の論理(docs/design.md §13.6・H-C2・H-C3・H-C5・H-C4 の一部。Phase 6c。ホストのみ): test_wx_weather(天気の要求 195 バイト・wx_parse_weather(実応答・全 WMO コード・気温の境界・キー欠落・null・重複キー・あらゆる長さに切る・取り違え・変異ファズ)・[wx] の 3 形式・予定表 3 → 0 → 1 → 2・天気の失敗・429・全部失敗の再接続・周期の時間・更新要求)を既定 / WX_METEO_SSL = 1 / APP_STK_FAULT = 4 の 3 通りで。APP_WX_WEATHER の既定は 1(6d)。wifi_core の天気(H-C4)は S22、乱数走行は S27。変異試験 6 か所"
   rc=0
-  echo "  wifi_sw.h: APP_WX_WEATHER の既定は 0(6c。wifi_at.c が天気を扱うのは 6d)・0 / 1 以外は #error"
-  d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_WX_WEATHER == 0, "weather default");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -I"$APP" - 2>&1)" || { echo "  NG: APP_WX_WEATHER の既定: $d"; rc=1; }
+  echo "  wifi_sw.h: APP_WX_WEATHER の既定は 1(6d。wifi_at.c が天気を扱う)・0 / 1 以外は #error"
+  d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_WX_WEATHER == 1, "weather default");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -I"$APP" - 2>&1)" || { echo "  NG: APP_WX_WEATHER の既定: $d"; rc=1; }
   if echo '#include "wifi_sw.h"' | "$CC" -fsyntax-only -x c -DAPP_WX_WEATHER=2 -I"$APP" - >/dev/null 2>&1; then echo "  NG: APP_WX_WEATHER = 2 で #error が出ない"; rc=1; else echo "  ok (APP_WX_WEATHER = 2 は #error)"; fi
   echo "  wx_core.c / wifi_core.c / clk_core.c が APP_WX_WEATHER = 1・WX_METEO_SSL = 1 でも標準 C(gnu99 / c99 -pedantic-errors / c11)で警告ゼロ、データシンボルなし(wx_core.o)"
   for std in "-std=gnu99" "-std=c99 -pedantic-errors" "-std=c11"; do
@@ -872,11 +872,11 @@ if sel S43; then
   echo "  wifi_core の天気(H-C4)の METEO_SSL = 1 版(接続先が SSL 443・タイムアウト 20 秒)"
   cc_nowarn $STD $WARN -DAPP_WX=1 -DWX_METEO_SSL=1 -I"$APP" -I"$HERE" "$HERE/test_wifi_core.c" "$APP/wifi_core.c" "$APP/wx_core.c" "$APP/stk_core.c" "$APP/clk_core.c" -o "$BUILD/test_wifi_core_ssl" || rc=1
   [ -x "$BUILD/test_wifi_core_ssl" ] && { timeout 300 "$BUILD/test_wifi_core_ssl" | tail -2 | grep -E "FAIL|checks"; [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1; }
-  echo "  -fsyntax-only: app_main.c / wifi_at.c が APP_WX_WEATHER = 1 でも通る(wifi_at.c は 6d まで天気を扱わない)"
-  for f in app_main wifi_at; do
-    o="$("$CC" -fsyntax-only $STD -Wall -Wextra $RXDEF -DAPP_WX=1 -DAPP_WX_WEATHER=1 -DWIFI_AT_HOST_TEST '-DWIFI_SSID="s"' '-DWIFI_PASS="p"' -I"$APP" $FIT_INC "$APP/$f.c" 2>&1)"; crc=$?
-    if [ $crc -ne 0 ] || echo "$o" | grep -E "src/app/.*(warning|error)" >/dev/null; then echo "  NG $f.c"; echo "$o" | head -10; rc=1; else echo "  ok $f.c"; fi
-  done
+  echo "  -fsyntax-only: app_main.c / wifi_at.c が APP_WX_WEATHER = 0 / 1 のどちらでも通る"
+  for f in app_main wifi_at; do for wv in 0 1; do
+    o="$("$CC" -fsyntax-only $STD -Wall -Wextra $RXDEF -DAPP_WX=1 -DAPP_WX_WEATHER=$wv -DWIFI_AT_HOST_TEST '-DWIFI_SSID="s"' '-DWIFI_PASS="p"' -I"$APP" $FIT_INC "$APP/$f.c" 2>&1)"; crc=$?
+    if [ $crc -ne 0 ] || echo "$o" | grep -E "src/app/.*(warning|error)" >/dev/null; then echo "  NG $f.c (APP_WX_WEATHER=$wv)"; echo "$o" | head -10; rc=1; else echo "  ok $f.c (APP_WX_WEATHER=$wv)"; fi
+  done; done
   # ---- 変異試験(製品コードの複製に 1 か所だけ誤りを入れ、試験が失敗することを確かめる。製品のファイルは書き換えない)
   MUT4="$BUILD/mut4"
   mut4_run() { # $1=名前 $2=変えるファイル $3=sed 式 $4=試験(.c) $5=追加のコンパイルフラグ。$6..=リンクするソース
@@ -973,6 +973,52 @@ NIGHTD
     if [ -x "$MUT6/t" ]; then if "$MUT6/t" >"$MUT6/run.log" 2>&1; then echo "  NG: 変異 [消灯中のタッチを渡す] を結合試験が検出しなかった"; rc=1; else echo "  ok: 変異 [消灯中のタッチを渡す] で結合試験が失敗した($(grep -c 'FAIL' "$MUT6/run.log") 件)"; fi; fi
   fi
   result S44 $rc
+fi
+
+# ---------------------------------------------------------------- S45
+if sel S45; then
+  echo "### S45 時計・天気画面と天気の取得の結合(docs/design.md §13.5・§13.8・§13.11 の 6d。Phase 6d): APP_WX_WEATHER の既定 = 1 / wifi_at.o が clk_ui を持つ / 結合試験(wifi_at の天気の分岐・[wx] ログ・clk_ui は S26、app_main の clk_ui → ui_set_clk と画面の切り替えは S34 の clkprod)が、天気の保持を落とす・天気の失敗を株価の経路へ流す・日(day)を渡さない・天気だけの失敗が株価のフッターに出る・時刻未同期でも切り替える・clk_ui の値を渡さない、の 6 つの変異を検出する"
+  rc=0
+  d="$(printf '#include "wifi_sw.h"\n_Static_assert(APP_WX_WEATHER == 1, "weather default");\n' | "$CC" -fsyntax-only -x c -std=gnu11 -I"$APP" - 2>&1)" || { echo "  NG: APP_WX_WEATHER の既定は 1: $d"; rc=1; }
+  o="$("$CC" $STD -Wall -Wextra $RXDEF -DAPP_WX=1 -DWIFI_AT_HOST_TEST -I"$APP" $FIT_INC -c "$APP/wifi_at.c" -o "$BUILD/wifi_at_wx45.o" 2>&1)"; crc=$?
+  [ $crc -eq 0 ] || { echo "$o" | head; rc=1; }
+  nm "$BUILD/wifi_at_wx45.o" | grep -qE " [Tt] _?clk_ui\$" || { echo "  NG: wifi_at.o に clk_ui が無い"; rc=1; }
+  echo "  wifi_at.c が 天気の本文の語を出力に使っていない(コメントを除く)"
+  if "$CC" -x c -fpreprocessed -dD -E -P "$APP/wifi_at.c" 2>/dev/null | grep -nE 'temperature_2m|weather_code|latitude|open-meteo'; then echo "  NG: wifi_at.c に天気の本文の語"; rc=1; fi
+  build_ui_objs || rc=1
+  MUT45="$BUILD/mut45"
+  mut45() { # $1=名前 $2=変えるファイル(src/app の中) $3=sed 式 $4=試験(.c) $5=EXTRA_CFLAGS。$6.. = リンクするソース(名前だけなら src/app の中のもの。/ を含めばそのまま)
+    local name="$1" file="$2" expr="$3" tsrc="$4" flags="$5" f srcs=""
+    shift 5
+    rm -rf "$MUT45"; mkdir -p "$MUT45/src/app" "$MUT45/tests/host" "$MUT45/tests/stubs"
+    find "$APP" -maxdepth 1 \( -name '*.h' -o -name '*.c' \) ! -name wifi_secret.h -exec cp {} "$MUT45/src/app/" \;
+    cp "$HERE/test_framework.h" "$HERE/$tsrc" "$MUT45/tests/host/"; cp "$HERE"/../stubs/* "$MUT45/tests/stubs/"
+    if [ -n "$expr" ]; then
+      for mf in $file; do     # $file は空白区切りで複数可(sed 式を全部に当て、どのファイルも変わること)
+        cp "$MUT45/src/app/$mf" "$MUT45/orig"
+        sed -i "$expr" "$MUT45/src/app/$mf"
+        if cmp -s "$MUT45/src/app/$mf" "$MUT45/orig"; then echo "  NG: 変異が当たっていない: $name ($mf)"; rc=1; return; fi
+      done
+    fi
+    for f in "$@"; do case "$f" in */*) srcs="$srcs $f";; *) srcs="$srcs $MUT45/src/app/$f";; esac; done
+    EXTRA_CFLAGS="$flags" build_fit_test "$MUT45/t" "$MUT45/tests/host/$tsrc" $srcs >"$MUT45/cc.log" 2>&1 || { echo "  NG: 変異版がコンパイルできない: $name"; head -5 "$MUT45/cc.log"; rc=1; return; }
+    if [ -z "$expr" ]; then
+      timeout 300 "$MUT45/t" >"$MUT45/run.log" 2>&1 && echo "  ok: 無変更の複製で $tsrc が通る" || { echo "  NG: 無変更の複製で $tsrc が通らない"; rc=1; }
+    elif timeout 300 "$MUT45/t" >"$MUT45/run.log" 2>&1; then echo "  NG: 変異 [$name] を試験が検出しなかった(合格してしまった)"; rc=1
+    else echo "  ok: 変異 [$name] で試験が失敗した($(grep -c 'FAIL' "$MUT45/run.log") 件)"; fi
+  }
+  WA="wifi_core.c wx_core.c stk_core.c clk_core.c app_logfmt.c"
+  AM="ui_render.c ui_clock.c clk_core.c ui_logic.c stk_core.c gfx.c app_logfmt.c night_core.c ui_preview.c clk_preview.c $UIOBJ/ui_gfx_data.o $UIOBJ/ui_layout.o $UIOBJ/ui_strips.o $UIOBJ/clk_data.o"
+  WF="-DAPP_WX=1 -DWIFI_AT_HOST_TEST"
+  mut45 "(無変更)" wifi_at.c "" test_wifi_at.c "$WF" $WA
+  mut45 "(無変更)" app_main.c "" test_app_main.c "-DT_CLK_PRODUCT" $AM
+  mut45 "天気の成功を保持しない(s_wslot.have = 0)" wifi_at.c 's/s_wslot.have     = 1u;/s_wslot.have     = 0u;/' test_wifi_at.c "$WF" $WA
+  mut45 "天気の失敗を株価の書式へ流す([wx] res=fail を出さない)" wifi_at.c 's/emit(wx_fmt_wx_fail(/emit(wx_fmt_fail(/' test_wifi_at.c "$WF" $WA
+  mut45 "clk_ui が日(day)を渡さない" wifi_at.c 's/d.day  = f.day;/d.day  = 0u;/' test_wifi_at.c "$WF" $WA
+  mut45 "天気だけの失敗が株価の partial(フッター)に出る(失敗の印を株価の 3 ビットに絞る 2 か所を外す)" "wx_core.c stk_core.c" 's/return (uint8_t)(s->failed \& WX_SYM_ALL);/return s->failed;/; s/(fail_mask \& 7u) != 0u/(fail_mask \& 0xFu) != 0u/' test_wifi_at.c "$WF" $WA
+  mut45 "clk_ui の値を ui_set_clk に渡さない" app_main.c 's/^    ui_set_clk(&s_ui, &s_cview);$/    (void)s_cview;/' test_app_main.c "-DT_CLK_PRODUCT" $AM
+  mut45 "時刻が未同期でも時計・天気画面へ切り替える" ui_logic.c 's/bool usable = (u->cview.clock_min <= (uint16_t)CLK_MINUTES_MAX);/bool usable = true;/' test_app_main.c "-DT_CLK_PRODUCT" $AM
+  result S45 $rc
 fi
 
 echo "================ 集計: PASS=$PASSES FAIL=$FAILS SKIP(未実施)=$SKIPS SUSPECT(不具合の可能性)=$SUSPECTS ${FAILED_LIST:+(失敗:$FAILED_LIST)}"

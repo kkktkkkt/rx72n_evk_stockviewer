@@ -362,3 +362,43 @@ S22(`test_wifi_core` の `t_wx_weather` = H-C4。専用 / 製品 / `WX_METEO_SSL
 4. `tools/job-runner.ps1` などの `tx` の許可文字に `b` が無い(デバッグ担当の作業)。
 
 試験: S44(`test_night_core` = H-N1・H-N2、窓を変えた -D、変異 5 + app_main 1)、S34(`night` = T_NIGHT の結合、`night0` = `APP_NIGHT=0`)、S6(`test_bl_set` = H-N4)、S8(H-N5)、S7(`APP_NIGHT` 0 / 1 の構文)。
+
+## Phase 6d(結合: 時刻・天気・気温の実データを時計・天気画面へ。docs/design.md §13.11 の 6d。2026-11-28。ホスト試験のみ。実機・ビルド未実施)
+
+**要点**: `wifi_at.c` が天気の結果を保持し、`clk_ui()` が時計・天気画面の表示値を作り、`app_main` の `tick_step` が `ui_set_clk` へ渡す。**`APP_WX_WEATHER` の既定を 1** にした(周期 = 天気 → 6723.T → ^N225 → ^GSPC の 4 回)。自動切り替え(株価 10 秒 / 時計・天気 5 秒)は `ui_screen_step` が既に持っていて、`cview` に時刻が入った時点から効く(時刻が未同期の間は切り替わらない)。
+
+| ファイル | 内容 |
+|---|---|
+| `src/app/wifi_sw.h` | `APP_WX_WEATHER` の既定 0 → **1** |
+| `src/app/wifi_at.c` | `s_wslot`(`clk_slot_t`)・`s_wmo`。`wx_report`: `r->sym == WX_WEATHER` なら成功で保持 + `[wx] res=ok`(`wx_fmt_wx_ok`)、失敗で `[wx] res=fail`(`wx_fmt_wx_fail`)。**株価の保持(`slot_record`)・`[stk]` には渡さない**。`wx_log_state`(UART `s`): 株価の行の後に `[wx] have=...`(`wx_wlog_t`)。`clk_ui(out, now_ms)`: ソフト時計の分・日付(`wx_date_fields`)+ `s_wslot` → `clk_view_make`(未同期は `clock_min = 0xFFFF`・日付なし、60 分以上更新なしは `have = 0` = 「不明」)。`wx_init` で `s_wslot` を消す |
+| `src/app/wifi_at.h` | `clk_ui` の宣言、`wx_log_state` のコメント |
+| `src/app/app_main.c` | `s_cview`。`tick_step`(製品): `stk_ui` → `ui_set_view` の次に `clk_ui(&s_cview, now_ms)` → `ui_set_clk`。先頭コメント。夜間消灯(`#if APP_NIGHT`)・プレビュー分岐は変更なし |
+| `tests/host/test_wifi_at.c` | 偽の ESP32 が天気(平文 80。`HTTP/1.1 200`・`Date:`・`current_units` の後に `current`。本文に `BODY_SENTINEL`)と天気の 404(`w` / `v` コマンド)を返す。P2〜P4・P6・P9・P10 の期待を 4 回の周期に直し、`[wx]` 行・`clk_ui` の値(時刻と天気が株価より前にそろう・日付・曜日)を追加。**新規 P6c(天気だけの失敗: 株価・partial・net に出ない、やり直し、直れば ok)・P6d(60 分で不明。`y` コマンド)**。`check_lines_clean` に `[wx]` と天気の本文の語(`"current"` `latitude` `generationtime` `temperature_2m` `weather_code` `open-meteo`)の混入検査 |
+| `tests/host/test_app_main.c` | `clk_ui` の偽物(既定 = 時刻未同期)。既定の製品は 700 tick でも切り替わらず `clk_ui` が毎 tick 呼ばれること。**新規 `T_CLK_PRODUCT`(S34 の `clkprod`)**: 時刻未同期の間は 10 秒を過ぎても切り替えない → 分かった tick で `[scr] to=clock pal=1` → 5 秒で株価 → 10 秒で戻る・株価画面のタップで切り替えタイマが最初から・時計・天気画面のタップで株価へ戻し更新要求・天気なしは `pal=8 kind=none temp=none`・時刻が使えなくなれば出ない |
+| `tests/host/run.sh` | 株価だけの予定表の試験(S24 `test_wx_core`、S27 の既定版 `test_wx_indep`、S33・S36 の変異の土台)に `-DAPP_WX_WEATHER=0` を付けた(H-1〜H-6 を従来の期待のまま残す。天気つきは S43・S27 の `-DAPP_WX_WEATHER=1`・S26・S45)。S43: 既定 = 1 の確認、`app_main.c` / `wifi_at.c` の構文を 0 / 1 の両方で。S34 に `clkprod`。**S45 新設**(下) |
+
+### 設計から外れた点・判断が要る点
+
+1. **`[wx] have=` の行は、製品の `wx_log_state`(UART `s`)にだけ足した**(専用モード `APP_WIFI_TEST` の `s` には出ない。専用モードは天気を取らない)。
+2. 天気の取得の接続失敗(`wx_sched_done` に `ok = false`、`[stk] res=fail sym=0 err=8`)は、従来どおり株価の行(`sym=0`)のまま。接続の失敗は取得の種類に依らないので変えていない。
+3. `s_cview` は `static`(設計の書き方どおり)。`clk_view_t` は 8 バイトなので `.bss` は +8。
+4. 夜間消灯中のタップは `night_filter` が標本を捨てる(7a)ので、時計・天気画面でも「起こすだけ」で更新要求・株価画面への復帰にならない。**時計・天気画面 + 消灯の組み合わせの結合試験は書いていない**(T_NIGHT は時刻未同期の `clk_ui` で株価画面のまま)。論理上は同じ経路(`real = NULL`)。
+5. 6c の判断(`APP_WX_WEATHER`)は設計どおり 6d で既定 1 にした。0 にすると Phase 5 と同じ株価だけの周期に戻る(`wifi_at.c` は 0 でも構文が通る = S43)。
+
+### 試験(ホスト)
+
+全体 `bash tests/host/run.sh`: **PASS 33 / FAIL 0 / SKIP 1**(SKIP = S12。この環境に libasan / libubsan が無い。従来どおり)。S14(株価画面の CRC)・S28(全画素)・S38(sha256)・S44(夜間消灯)は合格のまま。
+
+| 試験 | 内容 |
+|---|---|
+| S26 | `test_wifi_at` の製品版(秘密あり 500 checks / なし 25)。天気つきの周期・`[wx]` 行・`clk_ui` |
+| S34 `clkprod` | 結合(36 checks)。既定の製品は 63 checks |
+| S45(新設) | 無変更の複製で 2 試験が通ることを確かめたうえで、変異 6 か所を検出: 天気の成功を保持しない / 天気の失敗を株価の書式へ流す / `clk_ui` が日を渡さない / **天気だけの失敗が株価の partial(フッター)に出る**(`wx_sched_failed_mask` と `stk_view_make` の 3 ビット絞りの 2 か所は二重の防御なので、両方を外して初めて出る)/ `clk_ui` の値を `ui_set_clk` に渡さない / **時刻未同期でも時計・天気画面へ切り替える**(`ui_logic.c`) |
+
+### RX 用 GCC 14.2(`-Og -Wstack-usage=100`、単独の `-c`。リンクはしていない。`wifi_secret.h` はダミー定義で読まず)
+
+`wifi_at.c` `app_main.c` `wx_core.c` `wifi_core.c` `clk_core.c` `ui_logic.c` `ui_render.c` `stk_core.c`: **警告なし**(`-Wall -Wextra` も)。スタック: `wx_report` 28、`wx_log_state` 32、`clk_ui` 44、`act_end` 76(既存)、`tick_step` 36、`wx_fmt_ok` 88(既存)。text: `wifi_at.o` 2,319(`-Og`)・`app_main.o` 2,212。
+
+### 実機の試験(デバッグ担当)で見てほしいこと
+
+U-C1(`[wx] res=ok src=boot` が `[stk] res=ok sym=0` より前・10〜12 秒後に最初の `[scr] to=clock`)、U-C2(天気の値の照合)、U-C3(`[scr]` の間隔 500 ± 3 / 1,000 ± 3・`uf`)、U-C4(周期が 600 秒で、天気 + 株価 3 つが 10 周期連続 ok。**平文 TCP と SSL の混在でも ESP32 のメモリが解放されるか = R20**)、U-C5(分の変わり目。**天気の `Date:` で最初に時計を合わせるので、PC との差を見る = R16**)、U-C6(タップ)、U-C7(`APP_STK_FAULT = 4`)、U-C8(`APP_STK_BADAP = 2`)、V-C2・V-C3。`[scr]` の行数が増える(株価画面の描き直しのたびに出る。分の変わり目で時計・天気画面も出る)ので、判定スクリプトの正規表現と `drop`(行キュー 8 行)に注意。

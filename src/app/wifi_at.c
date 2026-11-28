@@ -3,7 +3,7 @@
  * 2 つの使い方(どちらも APP_WIFI_ON = 0 の時は中身が消える。wifi_sw.h):
  *   - 専用モード(APP_WIFI_TEST = 1): wifi_test_main()。戻らない。LCD・タッチは動かさない。d n p = 接続の試験、x t y g z = 取得 1 回(WIFI_RANGE_WX。銘柄は ^N225)。
  *   - 製品(APP_WX_PRODUCT = APP_WX かつ APP_WIFI_TEST = 0): app_main のメインループから wx_init() / wx_poll()(ブロックしない)。
- *     接続(WIFI_RANGE_CONNECT)→ 銘柄ごとの取得(WIFI_RANGE_WX を 3 回)を wx_sched_*(予定表)が決め、ここが実行して結果を返す。表示用の値は stk_ui()。
+ *     接続(WIFI_RANGE_CONNECT)→ 取得(WIFI_RANGE_WX を天気 1 回 + 銘柄ごとに 3 回)を wx_sched_*(予定表)が決め、ここが実行して結果を返す。表示用の値は stk_ui()(株価)と clk_ui()(時計・天気。設計 §13)。
  * 応答の本文は、ここからも出さない(出すのは数値と名前だけ)。
  * 秘密: SSID・パスワードは wifi_secret.h(git 管理外)から wifi_core へポインタで渡すだけ。ここからはログ・[err] に出さない。
  *       wifi_secret.h を include するのはこのファイルだけ。無い時は製品は OFFLINE のまま動く(ESP32 に触れない)。 */
@@ -179,6 +179,8 @@ static uint8_t    s_res_ok;                 /* 今の動きの中で出た取得
 static uint16_t   s_res_http;
 static stk_slot_t s_slot[STK_ROWS];         /* 銘柄ごとの最後の成功(stk_view_make の入力) */
 static uint16_t   s_upd_min;                /* 最後の成功の時刻(JST の分。STK_NONE16 = なし) */
+static clk_slot_t s_wslot;                  /* 天気の最後の成功(clk_view_make の入力。design.md §13.6) */
+static uint8_t    s_wmo;                    /* その WMO コード([wx] have= 用) */
 #if APP_WIFI_TEST
 static uint8_t    s_wx_last_ok;
 #endif
@@ -223,7 +225,18 @@ static void wx_report(uint32_t now_ms, wx_src_t src)
 #if APP_WIFI_TEST
     s_wx_last_ok = r->ok;
 #endif
-    if (r->ok != 0u) {
+    if (r->sym == (uint8_t)WX_WEATHER) {     /* 天気は [wx]。株価の保持・[stk] には渡さない */
+        if (r->ok != 0u) {
+            s_wslot.have     = 1u;
+            s_wslot.kind     = r->kind;
+            s_wslot.temp_x10 = r->temp_x10;
+            s_wslot.ok_ms    = now_ms;
+            s_wmo            = r->wmo;
+            emit(wx_fmt_wx_ok(s_line, sizeof(s_line), src, r));
+        } else {
+            emit(wx_fmt_wx_fail(s_line, sizeof(s_line), src, r));
+        }
+    } else if (r->ok != 0u) {
         emit(wx_fmt_ok(s_line, sizeof(s_line), src, r, slot_record(r, now_ms)));
     } else {
         emit(wx_fmt_fail(s_line, sizeof(s_line), src, r));
@@ -349,6 +362,8 @@ void wx_init(uint32_t now_ms)
     for (i = 0u; i < (uint8_t)STK_ROWS; i++) {
         memset(&s_slot[i], 0, sizeof s_slot[i]);
     }
+    memset(&s_wslot, 0, sizeof s_wslot);
+    s_wmo = 0u;
     wifi_core_init(&s_core, &k_ops, AT_SSID, AT_PASS);
     wifi_core_set_quiet(&s_core, true);
     if (AT_HAVE_SECRET != 0) {
@@ -402,8 +417,36 @@ wx_req_t wx_request(wx_src_t src, uint32_t now_ms)
 
 void wx_log_state(uint32_t now_ms)
 {
+    wx_wlog_t w;
+
     net_line(now_ms, (uint8_t)wx_sched_net(&s_sched), wx_sched_busy(&s_sched) ? 1u : 0u);
     sym_lines(now_ms);
+    memset(&w, 0, sizeof w);                 /* [wx] have=(天気。設計 §13.9)。have = 0 のときは wx_fmt_wx_state が 0 / none / -1 にそろえる */
+    w.have = s_wslot.have;
+    w.age_s = -1;
+    if (w.have != 0u) {
+        w.wmo      = s_wmo;
+        w.kind     = s_wslot.kind;
+        w.temp_x10 = s_wslot.temp_x10;
+        w.age_s    = (int32_t)((now_ms - s_wslot.ok_ms) / 1000u);
+    }
+    emit(wx_fmt_wx_state(s_line, sizeof(s_line), &w));
+}
+
+void clk_ui(clk_view_t *out, uint32_t now_ms)
+{
+    clk_date_t d;
+    wx_date_t  f;
+    uint32_t   jst;
+    bool       synced = wx_clock_now(&s_clk, now_ms, &jst);
+
+    if (synced) {
+        wx_date_fields(jst, &f);
+        d.mon  = f.month;
+        d.day  = f.day;
+        d.wday = f.wday;
+    }
+    clk_view_make(out, &s_wslot, now_ms, wx_clock_min(&s_clk, now_ms), synced ? &d : NULL);
 }
 
 void stk_ui(stk_view_t *out, uint32_t now_ms)

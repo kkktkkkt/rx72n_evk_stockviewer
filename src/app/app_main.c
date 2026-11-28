@@ -2,7 +2,7 @@
  * 起動: app_log_init -> [boot] -> ui_init + 面0に描画 -> lcd_init -> touch_init -> 10msタイマ -> [perf] -> wx_init -> ループ
  * ループ: app_log_poll -> 反映待ちの完了確認 -> (10msごと)[hb]/[err]/UART1文字/touch/stk_ui -> ui_set_view/ui_update/[ev]+更新要求 -> wx_poll(APP_WX_PRODUCT) -> 描画(裏面 -> 入れ替え)
  * 表示の入力: APP_STK_PREVIEW = 1 は決まった 8 状態、APP_CLK_PREVIEW = 1 / 2 は決まった株価 + 時計・天気(§13.2)、APP_WX_PRODUCT = 1 は取得の結果(stk_ui)、どれも 0 は「起動中・オフライン」のまま。
- * 時計・天気画面の値(ui_set_clk)は、6d(天気の取得との結合)までプレビューだけが渡す。渡さない間は時刻未同期 = 株価画面のまま切り替わらない。
+ * 時計・天気画面の値(ui_set_clk)は、製品では clk_ui(取得の結果)、プレビューでは固定の値。時刻が未同期の間は ui_screen_step が切り替えず、株価画面のまま。
  * 描画: 画面のパレットが今表示中のものと違うときは、lcd_flip_pal(NoReflect 1 回 + BufferChange)で面とパレットを同じ垂直同期で入れ替える。
  * UART出力の仕様: docs/design-uart.md §10・docs/design.md §7.5。ログ用の大きいバッファは static(メインループ専用。割り込みから使わない)。 */
 #include <stdint.h>
@@ -43,6 +43,7 @@ static volatile uint32_t s_tick;                 /* 10ms ごとに +1(CMT割り�
 static ui_t    s_ui;                             /* 状態機械(メインループ専用) */
 #if APP_WX_PRODUCT
 static stk_view_t s_view;                        /* 取得の結果から作った表示用の値(stk_ui)。10ms ごとに作り直す */
+static clk_view_t s_cview;                       /* 時計・天気画面の表示用の値(clk_ui)。同じく 10ms ごと */
 #endif
 static uint8_t s_back;                           /* 次に描く面(表示中でない方)。表示中 = s_back ^ 1 */
 static bool    s_flip_pending;                   /* lcd_flip を受け付けた。表示面が変わるまで裏面に書かない */
@@ -285,6 +286,8 @@ static void tick_step(uint32_t now, uint32_t *last_hb, uint32_t *last_uf, bool t
 #elif APP_WX_PRODUCT
     stk_ui(&s_view, now_ms);     /* 3 銘柄の値・市場の状態・Wi-Fi の状態・時計・更新時刻(設計 §3.9・§4.4) */
     ui_set_view(&s_ui, &s_view);
+    clk_ui(&s_cview, now_ms);    /* 時刻・日付・天気(設計 §13.8)。時刻が未同期の間は clock_min = 0xFFFF で、ui_screen_step が時計・天気画面へ切り替えない */
+    ui_set_clk(&s_ui, &s_cview);
 #endif
 #if APP_NIGHT   /* 7a: 窓の判定(株価の時計 clock_min。取得のないビルドは未同期 = 消さない)。取得・描画・画面の切り替えは止めない */
 #if APP_WX_PRODUCT
