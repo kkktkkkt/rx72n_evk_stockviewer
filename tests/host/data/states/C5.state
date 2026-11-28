@@ -1,0 +1,10 @@
+# C5 雪 07:08 -2°(白/背景 4.17、マイナス記号、1桁の月日)
+# 書式: key=整数(docs/design.md §13.10)。書かれないキーは 0(clk.clock だけ 65535 = 未同期)
+scr=1
+clk.clock=428
+clk.have=1
+clk.kind=5
+clk.temp=-2
+clk.mon=1
+clk.day=5
+clk.wday=2

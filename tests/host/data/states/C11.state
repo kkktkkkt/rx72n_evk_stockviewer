@@ -1,0 +1,10 @@
+# C11 最大の正の気温 12:34 99°
+# 書式: key=整数(docs/design.md §13.10)。書かれないキーは 0(clk.clock だけ 65535 = 未同期)
+scr=1
+clk.clock=754
+clk.have=1
+clk.kind=0
+clk.temp=99
+clk.mon=10
+clk.day=10
+clk.wday=6

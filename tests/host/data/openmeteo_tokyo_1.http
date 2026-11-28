@@ -1,0 +1,5 @@
+HTTP/1.1 200 OK
+Date: Fri, 27 Nov 2026 15:10:07 GMT
+Content-Type: application/json; charset=utf-8
+
+{"latitude":35.7,"longitude":139.75,"generationtime_ms":0.0514984130859375,"utc_offset_seconds":32400,"timezone":"Asia/Tokyo","timezone_abbreviation":"GMT+9","elevation":12.0,"current_units":{"time":"iso8601","interval":"seconds","temperature_2m":"°C","weather_code":"wmo code"},"current":{"time":"2026-11-28T00:00","interval":900,"temperature_2m":13.2,"weather_code":3}}
