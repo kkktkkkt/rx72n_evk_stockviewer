@@ -282,7 +282,7 @@ Windows 上の Claude Code から、e² studio を閉じた状態で直接実行
 - ホスト描画は `tools\fb_hostrender.c` を作り直す(`jobs\fb\fb_hostrender.exe` は 11-22 の古い版。天気つきは `jobs\fb\fb_hostrender_wx.exe`。ビルド行は `tools\fb_hostrender.c` の先頭)。判定: `python -I tools/fb2png.py check <gdb.log> jobs/fb/W --c8 --host jobs/fb/fb_hostrender_wx.exe`。
 
 ### 12.5 追記(2026-11-27 stockview の Phase 0): 起動から録る・送信の許可文字・複数ジョブの組み合わせ
-- `serial` ジョブの `tx` の許可文字は `[npsd+?xtygz-]`(`job-runner.ps1` 147 行目。`t y g z` は TLS 検証用)。`tools\serial-read.ps1` と `tools\gdb-run.ps1` の許可文字は**まだ従来のまま**(`t y g z` は送れない)。
+- `serial` ジョブの `tx` の許可文字は `[npsd+?xtygz-]`(`job-runner.ps1` 147 行目。`t y g z` は TLS 検証用)。`tools\serial-read.ps1` と `tools\gdb-run.ps1` の許可文字は `[npsd+-?xb]`(`t y g z` は送れない)。**2026-11-28: `b`(夜間消灯の試験用)を 3 つの許可文字に追加済み**(job-runner は `[npsd+?xtygzb-]`)。
 - **`[boot]` から全部を録る手順**: `serial` ジョブ(`tx` 付き)をバックグラウンドで出す(`(tools/submit-job.sh serial '<JSON>' 160 > out 2>&1 &)`)→ 4 秒待つ → **ランナーを経由せず** `rfp-cli.exe -d RX72x -t e2l -if fine -auth id FF… -noquery -noprogress -sig -run` を直接実行(ランナーは 1 つずつ順に処理するので、`serial` の実行中に `rfp reset-run` のジョブは出せない)。`serial` は先頭に直前の走行の残りが混ざる(`DiscardInBuffer` なし)ので、`[boot]` の行から判定する。
 - `serial` の `txGapMs` の上限は 1000ms。15 秒間隔で送るには、`?`(`[help]` を 1 行出すだけ)を 14 個はさむ。
 - `rfp-cli -a -run` の書込みは約 82 秒(2026-11-27。旧記録の約 65 秒より長い)。

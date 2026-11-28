@@ -144,7 +144,7 @@ function Invoke-Job($job, [string]$log) {
             $tx = $null
             if ($null -ne $job.args.tx -and [string]$job.args.tx -ne '') {
                 $tx = [string]$job.args.tx
-                if ($tx -cnotmatch '^[npsd+?xtygz-]{1,200}$') { throw 'tx は [npsd+?xtygz-] の1〜200文字のみ' }
+                if ($tx -cnotmatch '^[npsd+?xtygzb-]{1,200}$') { throw 'tx は [npsd+?xtygzb-] の1〜200文字のみ' }
             }
             $txAt = if ($null -ne $job.args.txAtSec) { [double]$job.args.txAtSec } else { 2.0 }
             $txGap = if ($null -ne $job.args.txGapMs) { [int]$job.args.txGapMs } else { 50 }

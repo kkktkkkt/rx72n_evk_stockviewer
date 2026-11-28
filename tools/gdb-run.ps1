@@ -156,7 +156,7 @@ try {
         }
         # "#uart <文字列>": COM7 へ1文字ずつ送る(許可文字 [npsd+-?x])。初回に COM7 を開き、以降の待ち中の受信も時刻付きで $base.serial.log へ
         if ($l -match '^\s*#uart\s+(\S+)') {
-            $tx = $Matches[1]; if ($tx -cnotmatch '^[npsd+\-?x]{1,200}$') { $gdb.Note("uart 不許可: $tx"); break }
+            $tx = $Matches[1]; if ($tx -cnotmatch '^[npsd+\-?xb]{1,200}$') { $gdb.Note("uart 不許可: $tx"); break }
             if (-not $script:sp) { $script:sp = New-Object System.IO.Ports.SerialPort $ComPort, 115200, 'None', 8, 'One'; $script:sp.ReadTimeout = 50; $script:sp.Open() }
             for ($ci = 0; $ci -lt $tx.Length; $ci++) { $script:sp.Write([string]$tx[$ci]); $null = Mark "uart tx '$($tx[$ci])'"; if ($ci -lt $tx.Length - 1) { Wait-Ms 120 } }
             continue

@@ -5,7 +5,7 @@
 #   -Tx 文字列(許可文字は [npsd+-?x] の1〜200文字。それ以外はエラー)、-TxAtSec(開いてから送り始めるまでの秒。0 <= TxAtSec < Seconds)、
 #   -TxGapMs(1文字ごとの間隔 0〜1000。0 なら全文字を1回の書込み)。送信した文字は時刻付きで標準出力に "# tx 'c'" として出す(-Stamp 時)。
 if ($Tx -ne '') {
-    if ($Tx -cnotmatch '^[npsd+\-?x]{1,200}$') { throw "Tx は [npsd+-?x] の1〜200文字のみ: '$Tx'" }
+    if ($Tx -cnotmatch '^[npsd+\-?xb]{1,200}$') { throw "Tx は [npsd+-?xb] の1〜200文字のみ: '$Tx'" }
     if ($TxAtSec -lt 0 -or $TxAtSec -ge $Seconds) { throw "TxAtSec は 0 以上 Seconds 未満: $TxAtSec" }
     if ($TxGapMs -lt 0 -or $TxGapMs -gt 1000) { throw "TxGapMs は 0〜1000: $TxGapMs" }
 }
